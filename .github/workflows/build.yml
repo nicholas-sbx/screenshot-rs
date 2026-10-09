@@ -20,6 +20,8 @@ permissions:
 
 env:
   NFPM_VERSION: "2.43.0"
+  # (pinned: a new Rust's new lints can't break the build unannounced)
+  RUST_VERSION: "1.99.0"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
 
@@ -60,11 +62,11 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev sway wl-clipboard dbus fonts-dejavu-core
+          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev sway grim wl-clipboard dbus fonts-dejavu-core python3
       - name: Rust
         run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --check
@@ -76,7 +78,7 @@ jobs:
         run: |
           cargo build --locked --examples
           FLATSHOT_SELFTEST_OUT=shots ./target/debug/flatshot --self-test
-      - name: End to end on a headless sway (overlay, instant captures, clipboard, tray app)
+      - name: End to end on a headless sway (overlay, pins, instant captures, clipboard, tray app)
         run: timeout 300 ./tests/e2e.sh
       - uses: actions/upload-artifact@v4
         if: always()
@@ -98,8 +100,8 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev
       - name: Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
       - name: Install nfpm
         run: |

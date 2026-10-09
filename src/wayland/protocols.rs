@@ -9,6 +9,7 @@ use smithay_client_toolkit::dispatch2::Dispatch2;
 use wayland_client::protocol::{wl_buffer, wl_shm_pool};
 use wayland_client::{Connection, Proxy, QueueHandle};
 use wayland_protocols::wp::fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
+use wayland_protocols::wp::relative_pointer::zv1::client::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1};
 use wayland_protocols::wp::text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3};
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
 use wayland_protocols_wlr::screencopy::v1::client::{zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1};
@@ -35,6 +36,7 @@ no_events!(
     wl_shm_pool::WlShmPool,
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
     zwp_text_input_manager_v3::ZwpTextInputManagerV3,
+    zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
 );
 
 /// A buffer: set free again when the compositor releases it.
@@ -45,6 +47,24 @@ impl Dispatch2<wl_buffer::WlBuffer, App> for BufferData {
         if let wl_buffer::Event::Release = event {
             self.0.store(false, Ordering::Release);
             app.wl.buffer_released = true;
+        }
+    }
+}
+
+/// Pointer motion as it moves, wherever surfaces are (for dragging pins).
+pub struct RelativeData;
+
+impl Dispatch2<zwp_relative_pointer_v1::ZwpRelativePointerV1, App> for RelativeData {
+    fn event(
+        &self,
+        app: &mut App,
+        _: &zwp_relative_pointer_v1::ZwpRelativePointerV1,
+        event: zwp_relative_pointer_v1::Event,
+        _: &Connection,
+        _: &QueueHandle<App>,
+    ) {
+        if let zwp_relative_pointer_v1::Event::RelativeMotion { dx, dy, .. } = event {
+            app.relative_motion(dx, dy);
         }
     }
 }

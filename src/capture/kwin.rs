@@ -109,13 +109,13 @@ fn capture_one(conn: &zbus::blocking::Connection, want: &Want, started: Instant)
         }
     }
     if matches!(format, RGBX8888 | RGBA8888 | RGBA8888_PREMULTIPLIED) {
-        for px in img.data_mut().chunks_exact_mut(4) {
+        for px in img.data_mut().as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
     }
     if format == ARGB32 {
         // Straight alpha (a screen is opaque, so this is rare): premultiply.
-        for px in img.data_mut().chunks_exact_mut(4) {
+        for px in img.data_mut().as_chunks_mut::<4>().0 {
             let a = px[3] as u32;
             if a != 255 {
                 for c in &mut px[..3] {

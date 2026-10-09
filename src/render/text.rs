@@ -503,7 +503,7 @@ impl System {
             skrifa::bitmap::Origin::BottomLeft => -((bitmap.inner_bearing_y * scale).round() as i32) - h as i32,
         };
         let data = scaled.data().to_vec();
-        let alpha = data.chunks_exact(4).map(|p| p[3]).collect();
+        let alpha = data.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         Some(Glyph { left, top, w, h, alpha, color: Some(data) })
     }
 }

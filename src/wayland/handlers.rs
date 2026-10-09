@@ -13,6 +13,7 @@ use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, Poin
 use smithay_client_toolkit::seat::touch::TouchHandler;
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::wlr_layer::{LayerShellHandler, LayerSurface, LayerSurfaceConfigure};
+use smithay_client_toolkit::shell::xdg::popup::{Popup, PopupConfigure, PopupHandler};
 use smithay_client_toolkit::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{delegate_dispatch2, delegate_registry, registry_handlers};
@@ -27,7 +28,11 @@ use crate::keys::KeyPress;
 use crate::keyseq;
 
 impl CompositorHandler for App {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: i32) {}
+    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, factor: i32) {
+        if let Some(s) = self.wl.surfaces.iter_mut().find(|s| &s.wl == surface) {
+            s.int_scale = factor.max(1);
+        }
+    }
 
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
 
@@ -97,6 +102,23 @@ impl WindowHandler for App {
     }
 }
 
+impl PopupHandler for App {
+    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, popup: &Popup, config: PopupConfigure) {
+        let id = popup.wl_surface().id();
+        if let Some(s) = self.wl.surfaces.iter_mut().find(|s| s.wl.id() == id) {
+            if config.width > 0 && config.height > 0 {
+                s.logical = (config.width as u32, config.height as u32);
+            }
+            s.configured = true;
+        }
+    }
+
+    fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, popup: &Popup) {
+        let id = popup.wl_surface().id();
+        self.surface_closed(&id);
+    }
+}
+
 impl SeatHandler for App {
     fn seat_state(&mut self) -> &mut SeatState {
         &mut self.wl.seats
@@ -127,7 +149,10 @@ impl SeatHandler for App {
             Capability::Pointer if self.wl.pointer.is_none() => {
                 let surface = self.wl.compositor.create_surface(qh);
                 match self.wl.seats.get_pointer_with_theme::<App, ()>(qh, &seat, self.wl.shm.wl_shm(), surface, ThemeSpec::System) {
-                    Ok(p) => self.wl.pointer = Some(p),
+                    Ok(p) => {
+                        self.wl.pointer = Some(p);
+                        self.wl.create_relative_pointer();
+                    }
                     Err(e) => crate::warn!("no pointer: {e}"),
                 }
             }
@@ -144,10 +169,20 @@ impl SeatHandler for App {
         match capability {
             Capability::Keyboard => {
                 if let Some(k) = self.wl.keyboard.take() {
+                    // Its data stops key repeat in the event loop when it's
+                    // dropped, which can't be done from inside the loop's
+                    // dispatch (where the compositor's "forget it" comes):
+                    // hold on to it until things are quiet.
+                    if let Some(data) = k.object_data().cloned() {
+                        self.wl.retired.push((std::time::Instant::now(), data));
+                    }
                     k.release();
                 }
             }
             Capability::Pointer => {
+                if let Some(r) = self.wl.relative.take() {
+                    r.destroy();
+                }
                 if let Some(p) = self.wl.pointer.take() {
                     p.pointer().release();
                 }

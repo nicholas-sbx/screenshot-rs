@@ -1269,14 +1269,14 @@ fn copy_background(data: &mut [u8], stride: usize, at: IRect, base: &Image, regi
         let line = (at.y + row) as usize * stride;
         let dst = &mut data[line + at.x as usize * 4..line + (at.x + region.w) as usize * 4];
         if y < src_rect.y || y >= src_rect.y2() || src_rect.is_empty() {
-            for px in dst.chunks_exact_mut(4) {
+            for px in dst.as_chunks_mut::<4>().0 {
                 px.copy_from_slice(&ink);
             }
             continue;
         }
         // Columns inside the picture are copied, the rest are ink.
         let src_row = base.row(y as u32);
-        for (i, px) in dst.chunks_exact_mut(4).enumerate() {
+        for (i, px) in dst.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let x = region.x + i as i32;
             if x < src_rect.x || x >= src_rect.x2() {
                 px.copy_from_slice(&ink);
@@ -1322,10 +1322,10 @@ fn shade_row(row: &mut [u8], x0: i32, y: i32, dim: Color, hole: Option<IRect>) {
             px[k] = ((v + 1 + (v >> 8)) >> 8) as u8;
         }
     };
-    for px in row[..skip0 as usize * 4].chunks_exact_mut(4) {
+    for px in row[..skip0 as usize * 4].as_chunks_mut::<4>().0 {
         blend(px);
     }
-    for px in row[skip1 as usize * 4..].chunks_exact_mut(4) {
+    for px in row[skip1 as usize * 4..].as_chunks_mut::<4>().0 {
         blend(px);
     }
 }

@@ -90,7 +90,7 @@ impl App {
     /// long enough, no pins left)?
     pub(super) fn may_exit(&self) -> bool {
         let holding = self.wl.clipboard.holds() && self.hold_until.is_some_and(|t| Instant::now() < t);
-        !holding
+        !holding && !self.has_pins()
     }
 
     /// Will a one-off capture hand what it copies to wl-copy (so it can
@@ -149,8 +149,12 @@ impl App {
             config::update_state(vec![("last_region", serde_json::json!([a.x, a.y, a.w, a.h]))]);
         }
         if pin {
-            // (pins come with the next step; until then a pin is delivered as usual)
-            crate::warn!("pinning isn't available in this build yet");
+            self.pin(Arc::new(image), at, None);
+            self.clock.step("pinned", "");
+            if self.cfg.sound {
+                sound::play(&self.cfg.sound_file);
+            }
+            return 0;
         }
         let result = match deliver::deliver(&image, &self.cfg, self.output_file.as_deref(), &shot, &mut self.clock) {
             Ok(r) => r,

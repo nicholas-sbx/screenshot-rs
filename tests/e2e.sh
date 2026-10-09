@@ -70,7 +70,56 @@ code=$?
 set -e
 [ $code = 1 ] && pass "escape cancels" || fail "escape: exit $code"
 
-# 3. Instant captures.
+# 3. A pin: on top of the windows where the region was, dragged by the
+# pointer, closed with Esc (the one-off run ends with its last pin).
+$BIN --pin > /dev/null 2>&1 &
+pid=$!
+sleep 1
+(
+    $EX/inject move 500 400 drag 100 100 300 200 sleep 500 drag 150 150 450 350 sleep 1500 click 500 400 sleep 200 key Escape sleep 300
+) &
+injector=$!
+sleep 1.6
+grim "$work/pin.png" 2>/dev/null || true
+wait $injector
+for _ in $(seq 30); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
+if kill -0 $pid 2>/dev/null; then fail "the pin didn't close"; kill $pid; else pass "pin closed with Esc"; fi
+if [ -f "$work/pin.png" ]; then
+    edge=$(python3 - "$work/pin.png" <<'PY'
+import struct, sys, zlib
+d = open(sys.argv[1], "rb").read()
+w, h = struct.unpack(">II", d[16:24])
+bpp = 4 if d[25] == 6 else 3
+i, idat = 8, b""
+while i < len(d):
+    n = struct.unpack(">I", d[i:i + 4])[0]
+    if d[i + 4:i + 8] == b"IDAT":
+        idat += d[i + 8:i + 8 + n]
+    i += 12 + n
+raw, stride, prev, rows = zlib.decompress(idat), w * bpp + 1, bytearray(w * bpp), []
+for y in range(h):
+    f, line = raw[y * stride], bytearray(raw[y * stride + 1:(y + 1) * stride])
+    for x in range(len(line)):
+        a = line[x - bpp] if x >= bpp else 0
+        b = prev[x]
+        c = prev[x - bpp] if x >= bpp else 0
+        if f == 1: line[x] = (line[x] + a) & 255
+        elif f == 2: line[x] = (line[x] + b) & 255
+        elif f == 3: line[x] = (line[x] + (a + b) // 2) & 255
+        elif f == 4:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+    rows.append(bytes(line))
+    prev = line
+pts = [(x, y) for y in range(h) for x in range(w) if rows[y][x * bpp] > 160 and rows[y][x * bpp + 2] < 110 and rows[y][x * bpp + 1] < 140]
+print(f"{min(p[0] for p in pts)} {min(p[1] for p in pts)} {max(p[0] for p in pts)} {max(p[1] for p in pts)}" if pts else "none")
+PY
+)
+    [ "$edge" = "400 300 599 399" ] && pass "pin dragged to its place ($edge)" || fail "pin's edge at $edge, wanted 400 300 599 399"
+fi
+
+# 4. Instant captures.
 $BIN -f > /dev/null && expect_size "all screens" "$(newest)" "1600 1000" || fail "--full failed"
 $BIN -r 320x240+10+20 > /dev/null && expect_size "exact region" "$(newest)" "320 240" || fail "--region failed"
 $BIN -l > /dev/null && expect_size "last region" "$(newest)" "320 240" || fail "--last-region failed"
@@ -78,7 +127,7 @@ $BIN -m > /dev/null && expect_size "current monitor" "$(newest)" "1600 1000" || 
 $BIN -r 64x48+0+0 -o "$work/out.png" > /dev/null && expect_size "--output" "$work/out.png" "64 48" || fail "--output failed"
 $BIN -r 64x48+0+0 -o - --no-copy > "$work/stdout.png" && expect_size "PNG to stdout" "$work/stdout.png" "64 48" || fail "-o - failed"
 
-# 4. The tray app, with stand-ins for KDE's services.
+# 5. The tray app, with stand-ins for KDE's services.
 cat > "$work/tray.sh" <<SH
 #!/usr/bin/env bash
 set -u

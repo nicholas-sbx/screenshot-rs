@@ -183,7 +183,7 @@ impl Image {
             self.data_mut().fill(0);
             return;
         }
-        for chunk in self.data_mut().chunks_exact_mut(4) {
+        for chunk in self.data_mut().as_chunks_mut::<4>().0 {
             chunk.copy_from_slice(&px);
         }
     }
@@ -220,12 +220,12 @@ impl Image {
 
     /// Does any pixel let something through?
     pub fn has_alpha(&self) -> bool {
-        self.data().chunks_exact(4).any(|p| p[3] != 255)
+        self.data().as_chunks::<4>().0.iter().any(|p| p[3] != 255)
     }
 
     /// Make every pixel opaque (a screenshot is: whatever its alpha says).
     pub fn force_opaque(&mut self) {
-        for p in self.data_mut().chunks_exact_mut(4) {
+        for p in self.data_mut().as_chunks_mut::<4>().0 {
             p[3] = 255;
         }
     }
@@ -233,7 +233,7 @@ impl Image {
     /// Straight (not premultiplied) RGBA bytes, for encoders.
     pub fn to_rgba(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.byte_len());
-        for p in self.data().chunks_exact(4) {
+        for p in self.data().as_chunks::<4>().0 {
             let (b, g, r, a) = (p[0], p[1], p[2], p[3]);
             if a == 255 || a == 0 {
                 out.extend_from_slice(&[r, g, b, a]);
@@ -248,7 +248,7 @@ impl Image {
     /// One row as straight RGB(A) for an encoder, into `out`.
     pub fn row_rgb(&self, y: u32, alpha: bool, out: &mut Vec<u8>) {
         out.clear();
-        for p in self.row(y).chunks_exact(4) {
+        for p in self.row(y).as_chunks::<4>().0 {
             let (b, g, r, a) = (p[0], p[1], p[2], p[3]);
             if alpha {
                 if a == 255 || a == 0 {
@@ -269,7 +269,7 @@ impl Image {
         if rgba.len() < img.byte_len() {
             return Err("short pixel data".into());
         }
-        for (d, s) in img.data_mut().chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
+        for (d, s) in img.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(rgba.as_chunks::<4>().0) {
             let a = s[3] as u32;
             let pm = |c: u8| ((c as u32 * a + 127) / 255) as u8;
             if a == 255 {
@@ -285,7 +285,7 @@ impl Image {
     /// pixel, for looking for codes and edges.
     pub fn to_luma(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.width as usize * self.height as usize);
-        for p in self.data().chunks_exact(4) {
+        for p in self.data().as_chunks::<4>().0 {
             out.push(((p[2] as u32 * 11 + p[1] as u32 * 16 + p[0] as u32 * 5) >> 5) as u8);
         }
         out

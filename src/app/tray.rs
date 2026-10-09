@@ -38,7 +38,6 @@ pub enum Event {
 }
 
 /// What a notification's buttons act on.
-#[allow(dead_code)] // (where it was and the monitors then: for pins)
 pub struct NoteTarget {
     pub path: PathBuf,
     /// where it was captured (global logical pixels)
@@ -336,9 +335,18 @@ impl App {
         crate::warn!("the annotation editor isn't in this build yet ({path})");
     }
 
-    /// Pin the screenshot a notification was about.
-    fn pin_file(&mut self, _token: u64) {
-        crate::warn!("pins aren't in this build yet");
+    /// Pin the screenshot a notification was about: where it was taken,
+    /// unless the monitors changed since (then the desktop's middle).
+    fn pin_file(&mut self, token: u64) {
+        let Some(t) = self.tray.targets.get(&token) else { return };
+        let (path, at, layout) = (t.path.clone(), t.at, t.layout.clone());
+        let image = match crate::codec::decode_file(&path) {
+            Ok(img) => img,
+            Err(e) => return crate::warn!("can't pin {}: {e}", path.display()),
+        };
+        let now: Vec<(String, IRect, f64)> = self.wl.monitors().into_iter().map(|m| (m.name, m.rect, m.scale as f64)).collect();
+        let same = at.is_some() && now == layout;
+        self.pin(std::sync::Arc::new(image), at.filter(|_| same), at.map(|a| (a.w as u32, a.h as u32)));
     }
 
     fn show_settings(&mut self) {

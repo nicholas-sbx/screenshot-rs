@@ -199,8 +199,8 @@ pub fn pointer_patch(plain: &Image, with: &Image) -> Option<(IPoint, Arc<Image>)
             continue;
         }
         // The first and last differing pixels in this row.
-        let first = a.chunks_exact(4).zip(b.chunks_exact(4)).position(|(p, q)| p != q);
-        let last = a.chunks_exact(4).zip(b.chunks_exact(4)).rposition(|(p, q)| p != q);
+        let first = a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0).position(|(p, q)| p != q);
+        let last = a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0).rposition(|(p, q)| p != q);
         if let (Some(f), Some(l)) = (first, last) {
             x0 = x0.min(f as u32);
             x1 = x1.max(l as u32 + 1);

@@ -92,7 +92,7 @@ fn from_channels(w: u32, h: u32, buf: &[u8], channels: usize, line: usize) -> Re
     for y in 0..h {
         let src = &buf[y as usize * line..y as usize * line + w as usize * channels];
         let dst = img.row_mut(y);
-        for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(channels)) {
+        for (d, s) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.chunks_exact(channels)) {
             let (r, g, b, a) = match channels {
                 1 => (s[0], s[0], s[0], 255),
                 2 => (s[0], s[0], s[0], s[1]),

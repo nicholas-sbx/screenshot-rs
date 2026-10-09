@@ -172,7 +172,7 @@ fn copy(g: &mut Grab, shm: &wl_shm::WlShm, qh: &QueueHandle<App>) {
 fn finish(img: &mut Image, format: Option<wl_shm::Format>, y_invert: bool) {
     let swap = matches!(format, Some(wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888));
     if swap {
-        for px in img.data_mut().chunks_exact_mut(4) {
+        for px in img.data_mut().as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
     }

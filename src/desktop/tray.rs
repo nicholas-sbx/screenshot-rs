@@ -403,7 +403,7 @@ fn emit<B: serde::Serialize + zbus::zvariant::DynamicType>(path: &str, iface: &s
 fn pixmap(img: &Image) -> (i32, i32, Vec<u8>) {
     let mut data = Vec::with_capacity(img.byte_len());
     for y in 0..img.height() {
-        for px in img.row(y).chunks_exact(4) {
+        for px in img.row(y).as_chunks::<4>().0 {
             let (b, g, r, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
             let un = |c: u32| (c * 255 + a / 2).checked_div(a).map_or(0, |v| v.min(255) as u8);
             data.extend_from_slice(&[a as u8, un(r), un(g), un(b)]);

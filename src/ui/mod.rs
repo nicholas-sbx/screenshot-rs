@@ -1,6 +1,7 @@
 //! The capture overlay: what's drawn on it, its panels, and the session
 //! that runs it.
 
+pub mod menu;
 pub mod overlay;
 pub mod panels;
 pub mod session;

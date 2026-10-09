@@ -4,6 +4,7 @@
 
 mod capture;
 mod finish;
+mod pins;
 mod tray;
 
 pub use capture::{Job, Mode, last_region};
@@ -74,6 +75,9 @@ pub struct App {
     tray: tray::TrayState,
     /// to the event loop from the tray app's threads
     events: Option<calloop::channel::Sender<tray::Event>>,
+    /// captures pinned to the screen
+    pins: Vec<pins::Pin>,
+    next_pin: u32,
 }
 
 impl Painted for Session {
@@ -104,9 +108,15 @@ impl App {
     /// Input for `surface` (the focused one for keys).
     pub fn input(&mut self, surface: Option<ObjectId>, ev: Input) {
         let owner = surface.as_ref().and_then(|id| self.wl.owner_of(id));
+        match owner {
+            Some(Owner::Pin(id)) => return self.pin_input(id, ev),
+            Some(Owner::Menu(id)) => return self.menu_input(id, ev),
+            _ => {}
+        }
         let Some(s) = &mut self.session else { return };
         let o = match owner {
             Some(Owner::Overlay(o)) => o,
+            Some(_) => return,
             None => match ev {
                 // (keys before the keyboard entered an overlay: the pointer's one)
                 Input::Key(_) | Input::KeyUp(_) | Input::Modifiers(_) => s.st.pointer_overlay.unwrap_or(0),
@@ -144,10 +154,15 @@ impl App {
 
     /// The compositor closed one of our surfaces (or asked to).
     pub fn surface_closed(&mut self, id: &ObjectId) {
-        if let Some(Owner::Overlay(_)) = self.wl.owner_of(id)
-            && let Some(s) = &mut self.session
-        {
-            s.cancel();
+        match self.wl.owner_of(id) {
+            Some(Owner::Overlay(_)) => {
+                if let Some(s) = &mut self.session {
+                    s.cancel();
+                }
+            }
+            Some(Owner::Pin(p)) => self.close_pin(p),
+            Some(Owner::Menu(p)) => self.close_menu(p),
+            None => {}
         }
     }
 
@@ -187,6 +202,8 @@ impl App {
 
     /// After each round of events: finish what's ready, draw what changed.
     pub fn after_dispatch(&mut self) {
+        // (long since forgotten by the compositor: safe to drop here)
+        self.wl.retired.retain(|(t, _)| t.elapsed() < Duration::from_secs(5));
         self.poll_capture();
         if let Some(rx) = &self.desktop_rx
             && let Ok(found) = rx.try_recv()
@@ -239,11 +256,13 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        self.redraw_pins();
         let Some(s) = &mut self.session else { return };
         let mut drawn = false;
         for i in 0..self.wl.surfaces.len() {
-            let Owner::Overlay(o) = self.wl.surfaces[i].owner;
-            drawn |= self.wl.redraw(i, o, s);
+            if let Owner::Overlay(o) = self.wl.surfaces[i].owner {
+                drawn |= self.wl.redraw(i, o, s);
+            }
         }
         if drawn && self.first_frame {
             self.first_frame = false;
@@ -252,10 +271,15 @@ impl App {
     }
 
     fn update_cursor(&mut self) {
-        let (Some(s), Some(on)) = (&self.session, &self.wl.pointer_on) else { return };
+        let Some(on) = &self.wl.pointer_on else { return };
         let Some(i) = self.wl.surface_index(on) else { return };
-        let Owner::Overlay(o) = self.wl.surfaces[i].owner;
-        let icon = match s.cursor(o) {
+        let shape = match (self.wl.surfaces[i].owner, &self.session) {
+            (Owner::Overlay(o), Some(s)) => s.cursor(o),
+            (Owner::Pin(_), _) => CursorShape::Move,
+            (Owner::Menu(_), _) => CursorShape::Arrow,
+            _ => return,
+        };
+        let icon = match shape {
             CursorShape::Crosshair => CursorIcon::Crosshair,
             CursorShape::Text => CursorIcon::Text,
             CursorShape::Move => CursorIcon::Move,
@@ -278,7 +302,7 @@ impl App {
         let caret = match (&self.session, &self.wl.keyboard_on) {
             (Some(s), Some(on)) => match self.wl.owner_of(on) {
                 Some(Owner::Overlay(o)) => s.text_input(o),
-                None => None,
+                _ => None,
             },
             _ => None,
         };
@@ -342,6 +366,8 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         paste_rx: None,
         tray: tray::TrayState::default(),
         events: None,
+        pins: Vec::new(),
+        next_pin: 0,
     };
     // The monitors (and xdg-output's logical layout) arrive in two rounds.
     for _ in 0..2 {

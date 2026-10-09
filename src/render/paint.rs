@@ -364,12 +364,36 @@ impl<'a> Painter<'a> {
     }
 
     pub fn stroke_rect(&mut self, r: Rect, pen: Pen) {
+        let device_width = pen.width * self.t.sx.abs().max(self.t.sy.abs());
+        if !pen.dashed && device_width <= 1.0 && pen.width > 0.0 {
+            // tiny-skia draws strokes this thin as hairlines, whose edges
+            // drift off the pixel grid: four thin bands are crisp.
+            let h = pen.width / 2.0;
+            let (x0, y0, x1, y1) = (r.x - h, r.y - h, r.x + r.w + h, r.y + r.h + h);
+            self.fill_rect(Rect::new(x0, y0, x1 - x0, pen.width), pen.color);
+            self.fill_rect(Rect::new(x0, y1 - pen.width, x1 - x0, pen.width), pen.color);
+            self.fill_rect(Rect::new(x0, y0 + pen.width, pen.width, (y1 - y0 - 2.0 * pen.width).max(0.0)), pen.color);
+            self.fill_rect(Rect::new(x1 - pen.width, y0 + pen.width, pen.width, (y1 - y0 - 2.0 * pen.width).max(0.0)), pen.color);
+            return;
+        }
         let Some(rect) = tiny_skia::Rect::from_xywh(r.x, r.y, r.w.max(0.0), r.h.max(0.0)) else { return };
         let p = PathBuilder::from_rect(rect);
         self.stroke_path(&p, pen);
     }
 
     pub fn draw_line(&mut self, a: Point, b: Point, pen: Pen) {
+        let device_width = pen.width * self.t.sx.abs().max(self.t.sy.abs());
+        if !pen.dashed && device_width <= 1.0 && pen.width > 0.0 && (a.x == b.x || a.y == b.y) {
+            // (as in stroke_rect: crisp, where a hairline would drift)
+            let (h, cap) = (pen.width / 2.0, if matches!(pen.cap, Cap::Flat) { 0.0 } else { pen.width / 2.0 });
+            let r = if a.x == b.x {
+                Rect::new(a.x - h, a.y.min(b.y) - cap, pen.width, (a.y - b.y).abs() + 2.0 * cap)
+            } else {
+                Rect::new(a.x.min(b.x) - cap, a.y - h, (a.x - b.x).abs() + 2.0 * cap, pen.width)
+            };
+            self.fill_rect(r, pen.color);
+            return;
+        }
         let mut pb = PathBuilder::new();
         pb.move_to(a.x, a.y);
         pb.line_to(b.x, b.y);

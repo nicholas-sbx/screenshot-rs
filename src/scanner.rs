@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn light_on_dark_qr() {
         let mut img = desktop_with_codes();
-        for px in img.data_mut().chunks_exact_mut(4) {
+        for px in img.data_mut().as_chunks_mut::<4>().0 {
             for v in &mut px[..3] {
                 *v = 255 - *v;
             }
@@ -266,7 +266,7 @@ mod tests {
     fn nothing_on_noise() {
         let mut img = Image::new(400, 300).unwrap();
         let mut seed = 0x1234_5678u32;
-        for px in img.data_mut().chunks_exact_mut(4) {
+        for px in img.data_mut().as_chunks_mut::<4>().0 {
             seed ^= seed << 13;
             seed ^= seed >> 17;
             seed ^= seed << 5;

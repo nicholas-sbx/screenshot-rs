@@ -19,14 +19,16 @@ use smithay_client_toolkit::seat::SeatState;
 use smithay_client_toolkit::seat::pointer::ThemedPointer;
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface};
-use smithay_client_toolkit::shell::xdg::XdgShell;
+use smithay_client_toolkit::shell::xdg::popup::Popup;
 use smithay_client_toolkit::shell::xdg::window::{Window, WindowDecorations};
+use smithay_client_toolkit::shell::xdg::{XdgPositioner, XdgShell, XdgSurface};
 use smithay_client_toolkit::shm::Shm;
 use wayland_client::backend::ObjectId;
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_buffer, wl_keyboard, wl_output, wl_shm, wl_surface, wl_touch};
 use wayland_client::{Connection, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::wp::fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
+use wayland_protocols::wp::relative_pointer::zv1::client::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1};
 use wayland_protocols::wp::text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3};
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1;
@@ -34,7 +36,7 @@ use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1;
 use crate::app::App;
 use crate::geom::{Damage, IRect};
 use crate::image::{Canvas, Image};
-use protocols::{BufferData, FractionalData, NoEvents, TextInputData};
+use protocols::{BufferData, FractionalData, NoEvents, RelativeData, TextInputData};
 
 /// A monitor, as the compositor describes it.
 #[derive(Clone, Debug)]
@@ -53,6 +55,10 @@ pub struct Monitor {
 pub enum Owner {
     /// the capture overlay on the session's monitor `.0`
     Overlay(usize),
+    /// a pinned capture, by id
+    Pin(u32),
+    /// a popup menu, by id
+    Menu(u32),
 }
 
 /// Something drawn on surfaces: what changed, and how to draw a part of it.
@@ -87,6 +93,11 @@ pub struct Surf {
     pub wl: wl_surface::WlSurface,
     pub layer: Option<LayerSurface>,
     pub window: Option<Window>,
+    pub popup: Option<Popup>,
+    /// see-through where nothing is drawn (rounded corners): ARGB buffers
+    pub transparent: bool,
+    /// the scale of the outputs it's on, as the compositor last said
+    pub int_scale: i32,
     viewport: Option<wp_viewport::WpViewport>,
     fractional: Option<wp_fractional_scale_v1::WpFractionalScaleV1>,
     /// the size the compositor gave it, in logical pixels
@@ -102,6 +113,36 @@ pub struct Surf {
     pub cursor: Option<smithay_client_toolkit::seat::pointer::CursorIcon>,
 }
 
+impl Surf {
+    fn new(owner: Owner, wl: wl_surface::WlSurface, logical: (u32, u32)) -> Surf {
+        Surf {
+            owner,
+            wl,
+            layer: None,
+            window: None,
+            popup: None,
+            transparent: false,
+            int_scale: 1,
+            viewport: None,
+            fractional: None,
+            logical,
+            preferred_scale: None,
+            configured: false,
+            frame_pending: false,
+            bufs: Vec::new(),
+            frames: 0,
+            scratch: Vec::new(),
+            cursor: None,
+        }
+    }
+
+    /// The scale to draw at: the compositor's preferred (fractional) one,
+    /// else that of the outputs it's on.
+    pub fn scale(&self) -> f32 {
+        self.preferred_scale.unwrap_or(self.int_scale.max(1) as f32)
+    }
+}
+
 impl Drop for Surf {
     fn drop(&mut self) {
         self.bufs.clear();
@@ -111,7 +152,8 @@ impl Drop for Surf {
         if let Some(f) = self.fractional.take() {
             f.destroy();
         }
-        // (the layer surface or window is destroyed with its wrapper, then the surface)
+        // (the layer surface, window or popup is destroyed with its wrapper, then the surface)
+        self.popup.take();
         self.layer.take();
         self.window.take();
         self.wl.destroy();
@@ -132,7 +174,13 @@ pub struct Wayland {
     pub fractional: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
     pub text_input_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
     pub screencopy: Option<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1>,
+    pub relative_manager: Option<zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1>,
+    /// the pointer's motion as it moves (dragging pins)
+    pub relative: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
     pub keyboard: Option<wl_keyboard::WlKeyboard>,
+    /// what's left of keyboards gone from the seat, dropped later (see
+    /// remove_capability)
+    pub retired: Vec<(std::time::Instant, Arc<dyn wayland_client::backend::ObjectData>)>,
     pub pointer: Option<ThemedPointer>,
     pub touch: Option<wl_touch::WlTouch>,
     pub text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
@@ -173,7 +221,10 @@ impl Wayland {
             fractional: globals.bind(&qh, 1..=1, NoEvents).ok(),
             text_input_manager: globals.bind(&qh, 1..=1, NoEvents).ok(),
             screencopy: globals.bind(&qh, 1..=3, NoEvents).ok(),
+            relative_manager: globals.bind(&qh, 1..=1, NoEvents).ok(),
+            relative: None,
             keyboard: None,
+            retired: Vec::new(),
             pointer: None,
             touch: None,
             text_input: None,
@@ -262,23 +313,134 @@ impl Wayland {
         if let Some(w) = &window {
             w.commit();
         }
-        self.surfaces.push(Surf {
-            owner,
-            wl: surface,
-            layer,
-            window,
-            viewport,
-            fractional,
-            logical: (monitor.rect.w as u32, monitor.rect.h as u32),
-            preferred_scale: None,
-            configured: false,
-            frame_pending: false,
-            bufs: Vec::new(),
-            frames: 0,
-            scratch: Vec::new(),
-            cursor: None,
-        });
+        let mut surf = Surf::new(owner, surface, (monitor.rect.w as u32, monitor.rect.h as u32));
+        surf.layer = layer;
+        surf.window = window;
+        surf.viewport = viewport;
+        surf.fractional = fractional;
+        surf.int_scale = monitor.scale;
+        self.surfaces.push(surf);
         Ok(())
+    }
+
+    /// Scaling and fractional-scale hints for a new surface.
+    fn scaling(&self, surface: &wl_surface::WlSurface) -> (Option<wp_viewport::WpViewport>, Option<wp_fractional_scale_v1::WpFractionalScaleV1>) {
+        let qh = &self.qh;
+        let viewport = self.viewporter.as_ref().map(|v| v.get_viewport(surface, qh, NoEvents));
+        let fractional = self.fractional.as_ref().map(|f| f.get_fractional_scale(surface, qh, FractionalData(surface.id())));
+        (viewport, fractional)
+    }
+
+    /// A surface above the windows on `monitor`, its top left at `at`
+    /// (logical, from the monitor's), `size` big: a pin. False without
+    /// layer-shell.
+    pub fn add_layer(&mut self, owner: Owner, monitor: &Monitor, at: (i32, i32), size: (u32, u32), namespace: &str) -> bool {
+        let Some(ls) = &self.layer_shell else { return false };
+        let qh = &self.qh;
+        let surface = self.compositor.create_surface(qh);
+        let l = ls.create_layer_surface(qh, surface.clone(), Layer::Top, Some(namespace), Some(&monitor.output));
+        l.set_anchor(Anchor::TOP | Anchor::LEFT);
+        l.set_margin(at.1, 0, 0, at.0);
+        l.set_size(size.0.max(1), size.1.max(1));
+        l.set_exclusive_zone(0);
+        l.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+        let (viewport, fractional) = self.scaling(&surface);
+        l.commit();
+        let mut surf = Surf::new(owner, surface, size);
+        surf.layer = Some(l);
+        surf.viewport = viewport;
+        surf.fractional = fractional;
+        surf.int_scale = monitor.scale;
+        self.surfaces.push(surf);
+        true
+    }
+
+    /// A window (xdg toplevel) of `size` (logical).
+    pub fn add_window(&mut self, owner: Owner, title: &str, size: (u32, u32), decorated: bool) -> Result<(), String> {
+        let Some(xdg) = &self.xdg_shell else { return Err("the compositor has no xdg-shell".into()) };
+        let qh = &self.qh;
+        let surface = self.compositor.create_surface(qh);
+        let decorations = if decorated { WindowDecorations::RequestServer } else { WindowDecorations::None };
+        let w = xdg.create_window(surface.clone(), decorations, qh);
+        w.set_title(title);
+        w.set_app_id("flatshot");
+        let (viewport, fractional) = self.scaling(&surface);
+        w.commit();
+        let mut surf = Surf::new(owner, surface, size);
+        surf.window = Some(w);
+        surf.viewport = viewport;
+        surf.fractional = fractional;
+        self.surfaces.push(surf);
+        Ok(())
+    }
+
+    /// A popup (a menu) of `size` (logical) next to `anchor` (logical, on
+    /// `parent`'s surface), taking the keyboard and pointer until it's
+    /// dismissed.
+    pub fn add_popup(&mut self, owner: Owner, parent: Owner, anchor: IRect, size: (u32, u32)) -> Result<(), String> {
+        use wayland_protocols::xdg::shell::client::xdg_positioner::{Anchor as PAnchor, ConstraintAdjustment, Gravity};
+        let Some(xdg) = &self.xdg_shell else { return Err("the compositor has no xdg-shell".into()) };
+        let Some(p) = self.surfaces.iter().find(|s| s.owner == parent) else { return Err("no parent surface".into()) };
+        let qh = &self.qh;
+        let positioner = XdgPositioner::new(xdg).map_err(|e| e.to_string())?;
+        positioner.set_size(size.0.max(1) as i32, size.1.max(1) as i32);
+        positioner.set_anchor_rect(anchor.x, anchor.y, anchor.w.max(1), anchor.h.max(1));
+        positioner.set_anchor(PAnchor::BottomRight);
+        positioner.set_gravity(Gravity::BottomRight);
+        positioner
+            .set_constraint_adjustment(ConstraintAdjustment::FlipX | ConstraintAdjustment::FlipY | ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY);
+        let surface = self.compositor.create_surface(qh);
+        let parent_xdg = p.window.as_ref().map(|w| w.xdg_surface().clone()).or_else(|| p.popup.as_ref().map(|pp| pp.xdg_surface().clone()));
+        let popup = Popup::from_surface(parent_xdg.as_ref(), &positioner, qh, surface.clone(), xdg).map_err(|e| e.to_string())?;
+        if parent_xdg.is_none() {
+            match &p.layer {
+                Some(l) => l.get_popup(popup.xdg_popup()),
+                None => return Err("the parent can't have popups".into()),
+            }
+        }
+        if let Some(seat) = self.seats.seats().next() {
+            popup.xdg_popup().grab(&seat, self.serial);
+        }
+        let (viewport, fractional) = self.scaling(&surface);
+        let int_scale = p.int_scale;
+        surface.commit();
+        let mut surf = Surf::new(owner, surface, size);
+        surf.popup = Some(popup);
+        surf.transparent = true;
+        surf.viewport = viewport;
+        surf.fractional = fractional;
+        surf.int_scale = int_scale;
+        self.surfaces.push(surf);
+        Ok(())
+    }
+
+    /// Take down `owner`'s surfaces.
+    pub fn remove(&mut self, owner: Owner) {
+        self.surfaces.retain(|s| s.owner != owner);
+        let _ = self.conn.flush();
+    }
+
+    /// The size `owner`'s surface is shown at (logical), ahead of the
+    /// compositor saying so.
+    pub fn set_logical_size(&mut self, owner: Owner, size: (u32, u32)) {
+        if let Some(s) = self.surfaces.iter_mut().find(|s| s.owner == owner) {
+            s.logical = size;
+        }
+    }
+
+    pub fn surf(&self, owner: Owner) -> Option<&Surf> {
+        self.surfaces.iter().find(|s| s.owner == owner)
+    }
+
+    /// Move a layer surface (logical, from its monitor's top left) and size it.
+    pub fn place_layer(&mut self, owner: Owner, at: (i32, i32), size: (u32, u32)) {
+        if let Some(s) = self.surfaces.iter_mut().find(|s| s.owner == owner)
+            && let Some(l) = &s.layer
+        {
+            l.set_margin(at.1, 0, 0, at.0);
+            l.set_size(size.0.max(1), size.1.max(1));
+            l.commit();
+        }
     }
 
     pub fn surface_index(&self, id: &ObjectId) -> Option<usize> {
@@ -329,7 +491,7 @@ impl Wayland {
         let free = s.bufs.iter().position(|b| !b.busy.load(Ordering::Acquire) && (b.img.width(), b.img.height()) == (w, h));
         let idx = match free {
             Some(idx) => idx,
-            None if s.bufs.len() < 2 => match new_buffer(&shm, &qh, w, h) {
+            None if s.bufs.len() < 2 => match new_buffer(&shm, &qh, w, h, s.transparent) {
                 Ok(mut b) => {
                     // A second buffer starts as a copy of the latest frame
                     // (far cheaper than drawing it all again).
@@ -433,6 +595,15 @@ impl Wayland {
         }
     }
 
+    /// Hear the pointer's motion as it moves (for dragging pins).
+    pub fn create_relative_pointer(&mut self) {
+        if self.relative.is_none()
+            && let (Some(m), Some(p)) = (&self.relative_manager, &self.pointer)
+        {
+            self.relative = Some(m.get_relative_pointer(p.pointer(), &self.qh, RelativeData));
+        }
+    }
+
     pub fn create_text_input(&mut self, seat: &wayland_client::protocol::wl_seat::WlSeat) {
         if self.text_input.is_none()
             && let Some(m) = &self.text_input_manager
@@ -443,14 +614,15 @@ impl Wayland {
 }
 
 /// A buffer of `w` x `h` in its own shared memory.
-fn new_buffer(shm: &wl_shm::WlShm, qh: &QueueHandle<App>, w: u32, h: u32) -> Result<Buf, String> {
+fn new_buffer(shm: &wl_shm::WlShm, qh: &QueueHandle<App>, w: u32, h: u32, transparent: bool) -> Result<Buf, String> {
     let img = Image::shared(w, h)?;
     let fd = img.fd().ok_or("not shared memory")?;
     let len = img.byte_len() as i32;
     let pool = shm.create_pool(fd, len, qh, NoEvents);
     let busy = Arc::new(AtomicBool::new(false));
-    // The overlay is opaque: XRGB lets the compositor skip blending it.
-    let buffer = pool.create_buffer(0, w as i32, h as i32, (w * 4) as i32, wl_shm::Format::Xrgb8888, qh, BufferData(busy.clone()));
+    // Opaque surfaces (the overlay, pins) say so: the compositor needn't blend them.
+    let format = if transparent { wl_shm::Format::Argb8888 } else { wl_shm::Format::Xrgb8888 };
+    let buffer = pool.create_buffer(0, w as i32, h as i32, (w * 4) as i32, format, qh, BufferData(busy.clone()));
     pool.destroy(); // (the buffer keeps the memory)
     Ok(Buf { img, buffer, busy, stale: Damage::full(), drawn: 0 })
 }
