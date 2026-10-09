@@ -29,13 +29,19 @@ pub const TEST_EAN: &str = "4006381333931";
 /// Fails the self-test with a message (and where), like Python's assert.
 macro_rules! check {
     ($cond:expr) => {
-        if !$cond {
-            return Err(format!("{}:{}: {}", file!(), line!(), stringify!($cond)));
+        {
+            let ok: bool = $cond;
+            if !ok {
+                return Err(format!("{}:{}: {}", file!(), line!(), stringify!($cond)));
+            }
         }
     };
     ($cond:expr, $($fmt:tt)+) => {
-        if !$cond {
-            return Err(format!("{}:{}: {}: {}", file!(), line!(), stringify!($cond), format!($($fmt)+)));
+        {
+            let ok: bool = $cond;
+            if !ok {
+                return Err(format!("{}:{}: {}: {}", file!(), line!(), stringify!($cond), format!($($fmt)+)));
+            }
         }
     };
 }
@@ -178,12 +184,13 @@ fn image_screen(img: Arc<Image>, logical: (i32, i32)) -> Screen {
 }
 
 fn test_config(tmp: &Path) -> Config {
-    let mut cfg = Config::default();
-    cfg.save_dir = tmp.join("shots").to_string_lossy().into_owned();
-    cfg.notify = false;
-    cfg.clipboard = "none".into();
-    cfg.dim_opacity = 45;
-    cfg
+    Config {
+        save_dir: tmp.join("shots").to_string_lossy().into_owned(),
+        notify: false,
+        clipboard: "none".into(),
+        dim_opacity: 45,
+        ..Default::default()
+    }
 }
 
 pub fn run() -> i32 {
