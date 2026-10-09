@@ -1,0 +1,77 @@
+[package]
+name = "flatshot"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "ShareX-style region screenshots for Wayland (KDE first) with a floating draw toolbar and QR/barcode scanning"
+license = "MIT"
+repository = "https://github.com/nicholas-sbx/screenshot-rs"
+readme = "README.md"
+publish = false
+
+[lib]
+name = "flatshot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flatshot"
+path = "src/main.rs"
+
+[dependencies]
+# Wayland: the pure-Rust wire implementation (no libwayland), client toolkit
+# for outputs, seats and shells, and the protocols the overlay uses.
+smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop", "xkbcommon"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+calloop = "0.14"
+calloop-wayland-source = "0.4"
+# D-Bus: pure Rust, with its own small executor thread.
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+# Drawing and text.
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+fontdb = { version = "0.24", default-features = false, features = ["std", "fs", "memmap", "fontconfig"] }
+harfrust = "0.14"
+swash = { version = "0.2", default-features = false, features = ["std", "scale", "render"] }
+unicode-bidi = "0.3"
+unicode-segmentation = "1.12"
+# Barcodes: memory-safe decoders for what's on screen (untrusted input).
+rxing = { version = "0.9", default-features = false, features = ["encoding_rs", "decoders", "full_barcode_format_support", "multi_barcode_readers"] }
+# Image files.
+png = "0.18"
+jpeg-encoder = "0.7"
+zune-jpeg = "0.5"
+image-webp = "0.2"
+gif = "0.14"
+# Settings files.
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+# System calls with safe wrappers; libc for the few rustix lacks.
+rustix = { version = "1", features = ["fs", "mm", "pipe", "net", "process", "thread", "event", "time", "stdio", "rand", "system"] }
+libc = "0.2"
+# X11 sessions.
+x11rb = { version = "0.14", default-features = false, features = ["allow-unsafe-code", "randr", "shm", "xfixes", "xkb", "cursor", "resource_manager"] }
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"
+debug = false
+incremental = false
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"

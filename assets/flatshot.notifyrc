@@ -1,0 +1,30 @@
+[Global]
+IconName=flatshot
+Name=Flatshot
+Comment=Flatshot
+DesktopEntry=flatshot
+
+[Event/screenshot]
+Name=Screenshot taken
+Comment=A screenshot was saved or copied
+Action=Popup
+
+[Event/recording]
+Name=Recording saved
+Comment=A screen recording was saved
+Action=Popup
+
+[Event/copied]
+Name=Copied
+Comment=A colour or a code's text was copied
+Action=Popup
+
+[Event/failed]
+Name=Something went wrong
+Comment=A screenshot or a recording failed
+Action=Popup
+
+[Event/notice]
+Name=Notice
+Comment=Something worth knowing while recording
+Action=Popup
