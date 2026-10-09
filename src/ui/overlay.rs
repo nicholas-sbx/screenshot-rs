@@ -284,23 +284,50 @@ impl Overlay {
 
     /// The capture plus drawings, cropped to `rect` (logical; None: all).
     pub fn render(&self, rect: Option<Rect>) -> Result<Image, String> {
+        let phys = self.render_rect(rect);
+        let mut out = self.base.crop(phys)?;
+        self.draw_annotations(&mut out, phys);
+        Ok(out)
+    }
+
+    /// The picture's pixels for `rect` (logical; None: all of it).
+    fn render_rect(&self, rect: Option<Rect>) -> IRect {
         let dpr = self.dpr;
-        let phys = match rect {
+        match rect {
             None => self.base.rect(),
             Some(r) => IRect::new(py_round(r.x * dpr), py_round(r.y * dpr), py_round(r.w * dpr), py_round(r.h * dpr))
                 .intersected(&self.base.rect()),
-        };
-        let mut out = self.base.crop(phys)?;
+        }
+    }
+
+    fn draw_annotations(&self, out: &mut Image, phys: IRect) {
+        if self.annotations.iter().all(|s| s.hidden) {
+            return; // (the capture is opaque as it is)
+        }
         {
-            let mut p = Painter::for_region(out.pixmap_mut(), dpr, (phys.x, phys.y));
+            let mut p = Painter::for_region(out.pixmap_mut(), self.dpr, (phys.x, phys.y));
             for shape in &self.annotations {
                 if !shape.hidden {
-                    shape.paint(&mut p, &self.base, dpr);
+                    shape.paint(&mut p, &self.base, self.dpr);
                 }
             }
         }
         out.force_opaque();
-        Ok(out)
+    }
+
+    /// As `render`, giving up the overlay: the whole picture with nothing
+    /// drawn on it is handed over as it is, without a copy.
+    pub fn into_render(mut self, rect: Option<Rect>) -> Result<Image, String> {
+        let phys = self.render_rect(rect);
+        let whole = phys == self.base.rect();
+        if whole && self.annotations.iter().all(|s| s.hidden) {
+            self.plain = None;
+            self.with_pointer = None;
+            self.edge_maps = None;
+            let base = std::mem::replace(&mut self.base, Arc::new(Image::new(1, 1)?));
+            return Ok(Arc::try_unwrap(base).unwrap_or_else(|shared| (*shared).clone()));
+        }
+        self.render(rect)
     }
 
     /// Show the picture with the mouse pointer in it, or without. The one

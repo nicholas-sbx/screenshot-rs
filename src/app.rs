@@ -22,6 +22,7 @@ use crate::template::{self, Shot};
 use crate::timing::{self, Clock};
 use crate::ui::overlay::Output;
 use crate::ui::session::{Button, CursorShape, Outcome, RecordSupport, Request, Screen, Session, Setup, Waker};
+use crate::ui::state::Desktop;
 use crate::wayland::{Monitor, Owner, Painted, Wayland};
 
 /// Input for a surface, as the platform reports it.
@@ -67,6 +68,9 @@ pub struct App {
     /// the session's monitors, as its overlays are numbered
     monitors: Vec<Monitor>,
     pending: Option<Pending>,
+    /// the compositor's description of the desktop, asked at capture time
+    desktop_rx: Option<mpsc::Receiver<Option<Desktop>>>,
+    desktop: Option<Desktop>,
     pub exit: Option<i32>,
     waker: Waker,
     clock: Clock,
@@ -175,6 +179,17 @@ impl App {
             both: self.cfg.region_pointer == "toggle" && !request.image,
         };
         let order = capture::backend_order(&self.cfg.backend, self.wl.screencopy.is_some());
+        // Ask the compositor about its windows now, while they are as captured.
+        self.desktop = None;
+        if self.cfg.detect_windows || names_window(&self.cfg) {
+            let (tx, rx) = mpsc::channel();
+            let waker = self.waker.clone();
+            let _ = std::thread::Builder::new().name("flatshot-windows".into()).spawn(move || {
+                let _ = tx.send(crate::desktop::windows::query(Duration::from_millis(1500)));
+                waker();
+            });
+            self.desktop_rx = Some(rx);
+        }
         // The overlay's surfaces are made now and configured while the
         // screen is taken: the first frame can go up as the pixels arrive.
         let namespace = layer_namespace();
@@ -310,6 +325,9 @@ impl App {
         };
         let mut session = Session::new(setup, Box::new(NoRecorder), self.waker.clone());
         session.clock = self.clock.clone();
+        if let Some(d) = &self.desktop {
+            session.desktop_found(d.clone());
+        }
         self.session = Some(session);
         self.first_frame = true;
     }
@@ -338,6 +356,17 @@ impl App {
     /// After each round of events: finish what's ready, draw what changed.
     pub fn after_dispatch(&mut self) {
         self.poll_capture();
+        if let Some(rx) = &self.desktop_rx
+            && let Ok(found) = rx.try_recv()
+        {
+            self.desktop_rx = None;
+            if let Some(d) = found {
+                if let Some(s) = &mut self.session {
+                    s.desktop_found(d.clone());
+                }
+                self.desktop = Some(d);
+            }
+        }
         if let Some(s) = &mut self.session {
             s.poll();
             if s.next_deadline().is_some_and(|d| d <= Instant::now()) {
@@ -454,6 +483,12 @@ impl App {
     }
 }
 
+/// Do the file name settings use the window's app or title?
+fn names_window(cfg: &Config) -> bool {
+    let both = format!("{}{}", cfg.save_dir, cfg.filename);
+    both.contains("{app") || both.contains("{title")
+}
+
 /// The layer-shell namespace: KWin makes it a window type and animates
 /// every one it doesn't know but "utility" (which every Plasma 6 knows).
 fn layer_namespace() -> String {
@@ -513,6 +548,8 @@ pub fn run_once(args: &Args) -> i32 {
         session: None,
         monitors: Vec::new(),
         pending: None,
+        desktop_rx: None,
+        desktop: None,
         exit: None,
         waker: Arc::new(move || ping.ping()),
         clock: Clock::since("region capture", started),

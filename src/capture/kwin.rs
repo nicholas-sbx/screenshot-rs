@@ -84,7 +84,7 @@ fn capture_one(conn: &zbus::blocking::Connection, want: &Want, started: Instant)
     let reply = reply.map_err(|e| describe(&e))?;
     let replied = started.elapsed();
     let results: HashMap<String, OwnedValue> = reply.body().deserialize().map_err(|e| format!("KWin's reply: {e}"))?;
-    let get = |k: &str| results.get(k).and_then(|v| number(v));
+    let get = |k: &str| results.get(k).and_then(number);
     let (Some(w), Some(h), Some(stride), Some(format)) = (get("width"), get("height"), get("stride"), get("format")) else {
         return Err("KWin's reply lacks the picture's size".into());
     };

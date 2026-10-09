@@ -40,11 +40,9 @@ impl Mapping {
         // SAFETY: a fresh anonymous mapping aliases nothing.
         let ptr = unsafe { rustix::mm::mmap_anonymous(std::ptr::null_mut(), len, ProtFlags::READ | ProtFlags::WRITE, flags) }
             .map_err(io::Error::from)?;
-        // Big pictures: ask for huge pages (fewer faults, fewer TLB misses).
-        if len >= 4 << 20 {
-            // SAFETY: the range is the mapping just made.
-            let _ = unsafe { rustix::mm::madvise(ptr, len, rustix::mm::Advice::LinuxHugepage) };
-        }
+        // (No MADV_HUGEPAGE: with the usual THP setting, defrag=madvise, a
+        // fault in such a mapping compacts memory first, synchronously, and
+        // a 4K picture took 130 ms to copy instead of a few.)
         Ok(Mapping { ptr: NonNull::new(ptr.cast()).ok_or_else(|| io::Error::other("mmap gave null"))?, len, fd: None })
     }
 

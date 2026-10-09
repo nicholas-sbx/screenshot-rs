@@ -1475,13 +1475,7 @@ impl Session {
         self.commit_text();
         self.clock.step("chosen", "");
         let ov = &self.overlays[o];
-        let image = match ov.render(rect) {
-            Ok(img) => img,
-            Err(e) => return self.fail(&e),
-        };
         let drawn = ov.annotations.len();
-        self.clock.step("drawn", format!("{} × {}, {drawn} drawing{}", image.width(), image.height(), if drawn == 1 { "" } else { "s" }));
-        let ov = &self.overlays[o];
         let mut shot = Shot::new(if window.is_some() {
             "window"
         } else if rect.is_some() {
@@ -1498,7 +1492,15 @@ impl Session {
         };
         self.name_source(&mut shot, window);
         let pin = self.st.pin_mode;
+        // The overlay goes (and with it what else held its picture), so a
+        // whole screen with nothing drawn is handed over without a copy.
+        let ov = self.overlays.swap_remove(o);
         self.close_overlays();
+        let image = match ov.into_render(rect) {
+            Ok(img) => img,
+            Err(e) => return self.fail(&e),
+        };
+        self.clock.step("drawn", format!("{} × {}, {drawn} drawing{}", image.width(), image.height(), if drawn == 1 { "" } else { "s" }));
         self.finish(Outcome::Image { image, shot, at, pin });
     }
 

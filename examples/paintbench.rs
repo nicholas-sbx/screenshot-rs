@@ -52,4 +52,24 @@ fn main() {
         }
     }
     println!("pointer move frame (crosshair + loupe): {:.2} ms each, {} rects", t.elapsed().as_secs_f64() * 1000.0 / 50.0, n);
+    for i in 0..3 {
+        let t = Instant::now();
+        let out = s.overlays[0].render(None).unwrap();
+        println!("render whole screen {i}: {:.2} ms ({} x {})", t.elapsed().as_secs_f64() * 1000.0, out.width(), out.height());
+    }
+    let t = Instant::now();
+    let c = s.overlays[0].base.crop(IRect::new(0, 0, w as i32, h as i32)).unwrap();
+    println!("crop: {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+    let t = Instant::now();
+    let mut c2 = c.clone();
+    println!("clone: {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+    let t = Instant::now();
+    c2.force_opaque();
+    println!("force_opaque: {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+    let t = Instant::now();
+    let _ = Image::new_populated(w, h).unwrap();
+    println!("new_populated: {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
 }
+
+#[allow(dead_code)]
+fn unused() {}
