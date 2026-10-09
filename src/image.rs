@@ -82,6 +82,22 @@ impl Image {
         Ok(Image { width, height, pixels })
     }
 
+    /// A picture in shared memory (a memfd), to hand to the compositor as a
+    /// wl_shm buffer: what's drawn here is what it shows.
+    pub fn shared(width: u32, height: u32) -> Result<Image, String> {
+        let len = check(width, height)?;
+        let map = Mapping::memfd("flatshot-buffer", len, false).map_err(|e| e.to_string())?;
+        Ok(Image { width, height, pixels: Pixels::Map(map) })
+    }
+
+    /// The memfd behind a shared picture.
+    pub fn fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        match &self.pixels {
+            Pixels::Map(m) => m.fd(),
+            Pixels::Heap(_) => None,
+        }
+    }
+
     fn new_uninit(width: u32, height: u32) -> Result<Image, String> {
         Image::new(width, height)
     }
@@ -389,6 +405,67 @@ impl Image {
 
     pub fn pixmap_ref(&self) -> tiny_skia::PixmapRef<'_> {
         tiny_skia::PixmapRef::from_bytes(self.data(), self.width, self.height).expect("picture sizes are valid pixmaps")
+    }
+}
+
+/// Pixels to draw on, borrowed: a whole picture, or the front of a
+/// scratch buffer standing for part of one.
+pub struct Canvas<'a> {
+    data: &'a mut [u8],
+    width: u32,
+    height: u32,
+}
+
+impl<'a> Canvas<'a> {
+    /// `width` x `height` pixels at the start of `data` (None if it's too short).
+    pub fn new(data: &'a mut [u8], width: u32, height: u32) -> Option<Canvas<'a>> {
+        let len = width as usize * height as usize * 4;
+        if width == 0 || height == 0 || data.len() < len {
+            return None;
+        }
+        Some(Canvas { data: &mut data[..len], width, height })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn stride(&self) -> usize {
+        self.width as usize * 4
+    }
+
+    pub fn rect(&self) -> IRect {
+        IRect::new(0, 0, self.width as i32, self.height as i32)
+    }
+
+    pub fn data(&self) -> &[u8] {
+        self.data
+    }
+
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        self.data
+    }
+
+    pub fn row_mut(&mut self, y: u32) -> &mut [u8] {
+        let s = self.stride();
+        &mut self.data[y as usize * s..(y as usize + 1) * s]
+    }
+
+    pub fn pixmap_mut(&mut self) -> tiny_skia::PixmapMut<'_> {
+        let (w, h) = (self.width, self.height);
+        tiny_skia::PixmapMut::from_bytes(self.data, w, h).expect("canvas sizes are valid pixmaps")
+    }
+}
+
+impl Image {
+    /// All of this picture, to draw on.
+    pub fn canvas(&mut self) -> Canvas<'_> {
+        let (width, height) = (self.width, self.height);
+        Canvas { data: self.data_mut(), width, height }
     }
 }
 

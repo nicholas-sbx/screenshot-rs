@@ -13,7 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::geom::{Damage, IPoint, IRect, Point, Rect};
-use crate::image::{self, Image};
+use crate::image::{self, Canvas, Image};
 use crate::render::paint::{Align, Pen};
 use crate::render::text::{self, BOLD, DEMIBOLD, MEDIUM};
 use crate::render::theme::{self, Color};
@@ -646,7 +646,7 @@ impl Overlay {
     /// Paint the device rectangle `region` of the overlay into `target`,
     /// whose top left is at `origin` in device pixels (a damaged part drawn
     /// on its own, or the whole buffer).
-    pub fn paint(&self, st: &State, target: &mut Image, origin: (i32, i32), region: IRect) {
+    pub fn paint(&self, st: &State, target: &mut Canvas<'_>, origin: (i32, i32), region: IRect) {
         let c = theme::c();
         let region_local = region.translated(-origin.0, -origin.1);
         let region_rect = region.to_f();
@@ -666,7 +666,7 @@ impl Overlay {
             .collect();
         // 1. The picture, shaded outside the focus unless drawings come first.
         let shade_now = if drawn.is_empty() { dim } else { None };
-        copy_background(target, region_local, &self.base, region, shade_now, hole);
+        copy_background_parallel(target, region_local, &self.base, region, shade_now, hole);
         if !drawn.is_empty() {
             let mut p = Painter::for_region(target.pixmap_mut(), self.dpr, origin);
             for s in &drawn {
@@ -734,12 +734,16 @@ impl Overlay {
             p.draw_line(Point::new(x, 0.0), Point::new(x, self.height()), Pen::new(color, 1.0));
             p.draw_line(Point::new(0.0, y), Point::new(self.width(), y), Pen::new(color, 1.0));
         }
-        if let Some(at) = self.loupe_at(st) {
+        if let Some(at) = self.loupe_at(st)
+            && self.loupe_bounds_key(st, at).0.intersects(&region)
+        {
             self.paint_loupe(&mut p, st, at);
         }
         if self.sel_rect.is_none() && st.pointer_overlay == Some(self.index) && st.cfg.show_hint {
             let (text, at, opacity) = self.hint(st);
-            pill(&mut p, &text, at, PillStyle { opacity, ..Default::default() });
+            if self.dev(pill_rect(&text, at, PillStyle::default()), 2).intersects(&region) {
+                pill(&mut p, &text, at, PillStyle { opacity, ..Default::default() });
+            }
         }
         // The floating panels, bottom to top: cards (the hovered one last),
         // the toolbar, the recording panel, the picker.
@@ -763,11 +767,13 @@ impl Overlay {
             && self.rec_drag.is_none()
             && st.countdown.is_none()
             && let Some(panel) = &self.panel
+            && self.dev(panel.rect(), 2).intersects(&region)
         {
             panel.paint(&mut p);
         }
         if self.picker_open()
             && let Some(picker) = &self.picker
+            && self.dev(picker.rect(), 2).intersects(&region)
         {
             picker.paint(&mut p);
         }
@@ -1202,14 +1208,43 @@ fn hint_text(st: &State, o: &Overlay) -> String {
 
 // -- the background ---------------------------------------------------------------------
 
-/// Copy `region` (device pixels) of `base` into `target` at `at`, shaded
-/// with `dim` outside `hole` when given. Pixels past the picture are ink.
-fn copy_background(target: &mut Image, at: IRect, base: &Image, region: IRect, dim: Option<Color>, hole: Option<IRect>) {
+/// Above this many pixels the background is copied by several threads
+/// (the first frame of a big monitor).
+const PARALLEL_ABOVE: i64 = 1 << 20;
+
+/// `copy_background` over bands of rows at once, for big regions.
+fn copy_background_parallel(target: &mut Canvas<'_>, at: IRect, base: &Image, region: IRect, dim: Option<Color>, hole: Option<IRect>) {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8) as i32;
+    if region.area() < PARALLEL_ABOVE || threads < 2 {
+        let stride = target.stride();
+        copy_background(target.data_mut(), stride, at, base, region, dim, hole);
+        return;
+    }
+    let stride = target.stride();
+    let band = (region.h + threads - 1) / threads;
+    let first_row = at.y as usize;
+    let data = &mut target.data_mut()[first_row * stride..(first_row + region.h as usize) * stride];
+    std::thread::scope(|s| {
+        for (i, rows) in data.chunks_mut(band as usize * stride).enumerate() {
+            let y0 = i as i32 * band;
+            let h = (rows.len() / stride) as i32;
+            let part = IRect::new(region.x, region.y + y0, region.w, h);
+            let at_part = IRect::new(at.x, 0, at.w, h);
+            s.spawn(move || copy_background(rows, stride, at_part, base, part, dim, hole));
+        }
+    });
+}
+
+/// Copy `region` (device pixels) of `base` into the rows `data` (`stride`
+/// bytes each) at `at`, shaded with `dim` outside `hole` when given.
+/// Pixels past the picture are ink.
+fn copy_background(data: &mut [u8], stride: usize, at: IRect, base: &Image, region: IRect, dim: Option<Color>, hole: Option<IRect>) {
     let ink = theme::c().ink.premul().to_le_bytes();
     let src_rect = region.intersected(&base.rect());
     for row in 0..region.h {
         let y = region.y + row;
-        let dst = &mut target.row_mut((at.y + row) as u32)[at.x as usize * 4..(at.x + region.w) as usize * 4];
+        let line = (at.y + row) as usize * stride;
+        let dst = &mut data[line + at.x as usize * 4..line + (at.x + region.w) as usize * 4];
         if y < src_rect.y || y >= src_rect.y2() || src_rect.is_empty() {
             for px in dst.chunks_exact_mut(4) {
                 px.copy_from_slice(&ink);
@@ -1237,7 +1272,7 @@ fn copy_background(target: &mut Image, at: IRect, base: &Image, region: IRect, d
 }
 
 /// Shade `region` of `target` (already drawn) outside `hole`.
-fn shade(target: &mut Image, at: IRect, region: IRect, dim: Color, hole: Option<IRect>) {
+fn shade(target: &mut Canvas<'_>, at: IRect, region: IRect, dim: Color, hole: Option<IRect>) {
     for row in 0..region.h {
         let y = region.y + row;
         let dst = &mut target.row_mut((at.y + row) as u32)[at.x as usize * 4..(at.x + region.w) as usize * 4];

@@ -55,6 +55,9 @@ libc = "0.2"
 x11rb = { version = "0.14", default-features = false, features = ["allow-unsafe-code", "randr", "shm", "xfixes", "xkb", "cursor", "resource_manager"] }
 
 [dev-dependencies]
+# For the input injection tool used in tests on a headless compositor.
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+xkbcommon = { version = "0.8", default-features = false }
 
 [profile.release]
 opt-level = 3

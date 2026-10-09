@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::{self, Config};
 use crate::geom::{IPoint, IRect, Point, Rect};
-use crate::image::{self, Image};
+use crate::image::{self, Canvas, Image};
 use crate::keys::{KeyPress, Where};
 use crate::keyseq::{self, key};
 use crate::render::Painter;
@@ -354,7 +354,7 @@ impl Session {
 
     /// Paint `region` (device pixels) of overlay `o` into `target`, whose
     /// top left is at `origin`.
-    pub fn paint(&self, o: usize, target: &mut Image, origin: (i32, i32), region: IRect) {
+    pub fn paint(&self, o: usize, target: &mut Canvas<'_>, origin: (i32, i32), region: IRect) {
         if let Some(ov) = self.overlays.get(o) {
             ov.paint(&self.st, target, origin, region);
         }

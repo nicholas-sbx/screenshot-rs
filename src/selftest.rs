@@ -152,7 +152,7 @@ fn frame(s: &mut Session, o: usize) -> Result<Image, String> {
     let _ = s.damage(o);
     let (w, h) = s.overlays[o].device_size();
     let mut img = Image::new(w, h)?;
-    s.paint(o, &mut img, (0, 0), IRect::new(0, 0, w as i32, h as i32));
+    s.paint(o, &mut img.canvas(), (0, 0), IRect::new(0, 0, w as i32, h as i32));
     Ok(img)
 }
 

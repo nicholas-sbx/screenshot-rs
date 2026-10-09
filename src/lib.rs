@@ -1,6 +1,8 @@
 //! Flatshot: ShareX-style region screenshots for Wayland (KDE first) with a
 //! floating draw toolbar, QR/barcode scanning and screen recording.
 
+pub mod app;
+pub mod capture;
 pub mod cli;
 pub mod codec;
 pub mod config;
@@ -17,3 +19,4 @@ pub mod template;
 pub mod timing;
 pub mod ui;
 pub mod util;
+pub mod wayland;

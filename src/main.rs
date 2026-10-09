@@ -17,7 +17,7 @@ fn main() -> std::process::ExitCode {
             if args.self_test {
                 return std::process::ExitCode::from(flatshot::selftest::run() as u8);
             }
-            std::process::ExitCode::SUCCESS
+            std::process::ExitCode::from(flatshot::app::run_once(&args) as u8)
         }
     }
 }
