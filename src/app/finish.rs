@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::App;
+use super::tray::NoteTarget;
 use crate::config;
 use crate::deliver;
 use crate::desktop::{notify, sound};
@@ -37,7 +38,7 @@ impl App {
         self.close_session();
         let _ = self.wl.conn.flush();
         let code = match outcome {
-            Outcome::Image { image, shot, at, pin } => self.deliver_image(image, shot, at.filter(|_| from_screen), pin, slot),
+            Outcome::Image { image, shot, at, pin } => self.deliver_image(image, shot, at, from_screen, pin, slot),
             Outcome::Color { hex, rgb: (r, g, b) } => {
                 let copied = self.copy_text(&hex, slot);
                 println!("{hex}");
@@ -141,8 +142,10 @@ impl App {
         }
     }
 
-    fn deliver_image(&mut self, image: Image, shot: Shot, at: Option<IRect>, pin: bool, slot: Option<Arc<Slot>>) -> i32 {
-        if let Some(a) = at {
+    /// Save, copy, notify... `at`: where the picture was on the desktop
+    /// (global logical pixels), remembered as the last region if `remember`.
+    pub(super) fn deliver_image(&mut self, image: Image, shot: Shot, at: Option<IRect>, remember: bool, pin: bool, slot: Option<Arc<Slot>>) -> i32 {
+        if let Some(a) = at.filter(|_| remember) {
             config::update_state(vec![("last_region", serde_json::json!([a.x, a.y, a.w, a.h]))]);
         }
         if pin {
@@ -196,9 +199,17 @@ impl App {
                 _ if copied => "Screenshot copied",
                 _ => "Screenshot taken",
             };
-            let note =
+            let mut note =
                 notify::Note { summary: summary.into(), body: bits.join("  ·  "), image: result.path.clone(), event: "screenshot", ..Default::default() };
-            self.notify(note);
+            let mut target = None;
+            if let Some(path) = result.path.clone().filter(|_| !self.one_shot) {
+                // (the tray app stays to hear the buttons)
+                let buttons = [("default", "Open"), ("open", "Open"), ("folder", "Show in folder"), ("annotate", "Annotate"), ("pin", "Pin")];
+                note.actions = buttons.iter().filter(|(k, _)| result.saved || *k != "folder").map(|(k, l)| (k.to_string(), l.to_string())).collect();
+                let layout = self.wl.monitors().into_iter().map(|m| (m.name, m.rect, m.scale as f64)).collect();
+                target = Some(NoteTarget { path, at, layout });
+            }
+            self.notify_with(note, target);
             self.clock.step("notified", "");
         }
         0
@@ -206,7 +217,18 @@ impl App {
 
     /// Pop up `note` (or do what its event is set to do instead).
     pub(super) fn notify(&mut self, note: notify::Note) {
-        notify::send_now(&note, false);
+        self.notify_with(note, None);
+    }
+
+    /// ... with buttons acting on `target`, in the tray app.
+    fn notify_with(&mut self, note: notify::Note, target: Option<NoteTarget>) {
+        let Some(n) = self.tray.notifier.as_mut() else {
+            notify::send_now(&note, false);
+            return;
+        };
+        if let (Some(token), Some(t)) = (n.send(note), target) {
+            self.remember_target(token, t);
+        }
     }
 
     /// Say what went wrong: on stderr, and in a notification.

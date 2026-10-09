@@ -17,7 +17,24 @@ fn main() -> std::process::ExitCode {
             if args.self_test {
                 return std::process::ExitCode::from(flatshot::selftest::run() as u8);
             }
-            std::process::ExitCode::from(flatshot::app::run_once(&args) as u8)
+            if args.print_config {
+                println!("{}", flatshot::config::load().dump());
+                return std::process::ExitCode::SUCCESS;
+            }
+            if args.tray {
+                flatshot::app::replace_older_tray();
+            }
+            // A tray app running takes it (it's ready, and owns the shortcuts).
+            if let Some(command) = args.forwardable()
+                && flatshot::ipc::send(&command)
+            {
+                return std::process::ExitCode::SUCCESS;
+            }
+            if args.quit {
+                return std::process::ExitCode::SUCCESS;
+            }
+            let code = if args.tray { flatshot::app::run_tray(&args) } else { flatshot::app::run_once(&args) };
+            std::process::ExitCode::from(code as u8)
         }
     }
 }

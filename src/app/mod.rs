@@ -2,7 +2,12 @@
 //! (later) the tray app. Ties the compositor's events to the session and
 //! the session's outcome to delivery.
 
+mod capture;
 mod finish;
+mod tray;
+
+pub use capture::{Job, Mode, last_region};
+pub use tray::{replace_older_tray, run_tray};
 
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -13,16 +18,14 @@ use smithay_client_toolkit::seat::pointer::CursorIcon;
 use wayland_client::backend::ObjectId;
 use wayland_client::protocol::wl_output;
 
-use crate::capture::{self, Grabbed, Plan};
 use crate::cli::Args;
 use crate::config::{self, Config};
 use crate::geom::{Damage, IRect, Point};
-use crate::image::{Canvas, Image};
+use crate::image::Canvas;
 use crate::keys::KeyPress;
 use crate::render::theme;
 use crate::timing::{self, Clock};
-use crate::ui::overlay::Output;
-use crate::ui::session::{Button, CursorShape, Effect, RecordSupport, Request, Screen, Session, Setup, Waker};
+use crate::ui::session::{Button, CursorShape, Effect, RecordSupport, Session, Waker};
 use crate::ui::state::Desktop;
 use crate::wayland::{Monitor, Owner, Painted, Wayland};
 
@@ -41,26 +44,6 @@ pub enum Input {
     Modifiers(i32),
 }
 
-/// Where a capture's pictures will come from.
-enum Source {
-    /// the Wayland connection (wlr-screencopy)
-    Screencopy,
-    /// a worker thread (KWin, the portal, a program), with which backend
-    Worker(mpsc::Receiver<Result<Vec<Grabbed>, String>>),
-}
-
-/// A capture being taken.
-struct Pending {
-    request: Request,
-    monitors: Vec<Monitor>,
-    plan: Plan,
-    backend: &'static str,
-    source: Source,
-    /// the backends left to try if this one fails, and why the others did
-    rest: Vec<&'static str>,
-    errors: Vec<String>,
-}
-
 pub struct App {
     pub wl: Wayland,
     pub loop_handle: LoopHandle<'static, App>,
@@ -68,7 +51,9 @@ pub struct App {
     pub session: Option<Session>,
     /// the session's monitors, as its overlays are numbered
     monitors: Vec<Monitor>,
-    pending: Option<Pending>,
+    pending: Option<capture::Pending>,
+    /// an instant capture's pictures, waiting for the desktop's description
+    taken: Option<capture::Taken>,
     /// the compositor's description of the desktop, asked at capture time
     desktop_rx: Option<mpsc::Receiver<Option<Desktop>>>,
     desktop: Option<Desktop>,
@@ -85,6 +70,10 @@ pub struct App {
     hold_until: Option<Instant>,
     /// the clipboard's text, being read for the session
     paste_rx: Option<mpsc::Receiver<Option<String>>>,
+    /// the tray app's services
+    tray: tray::TrayState,
+    /// to the event loop from the tray app's threads
+    events: Option<calloop::channel::Sender<tray::Event>>,
 }
 
 impl Painted for Session {
@@ -171,166 +160,10 @@ impl App {
         }
     }
 
-    // -- capturing ---------------------------------------------------------------------
-
-    /// Take the screens for a capture with `request`.
-    fn start_capture(&mut self, request: Request) {
-        let monitors = self.wl.monitors();
-        if monitors.is_empty() {
-            return self.fail("no monitors found");
-        }
-        // The pointer can be shown or not in the overlay: take both (unless
-        // the settings say always or never).
-        let plan = Plan {
-            monitors: monitors.iter().map(|m| (m.name.clone(), m.rect)).collect(),
-            each_screen: self.cfg.screenshot_method == "screens",
-            cursor: self.cfg.region_pointer == "shown",
-            both: self.cfg.region_pointer == "toggle" && !request.image,
-        };
-        let order = capture::backend_order(&self.cfg.backend, self.wl.screencopy.is_some());
-        // Ask the compositor about its windows now, while they are as captured.
-        self.desktop = None;
-        if self.cfg.detect_windows || names_window(&self.cfg) {
-            let (tx, rx) = mpsc::channel();
-            let waker = self.waker.clone();
-            let _ = std::thread::Builder::new().name("flatshot-windows".into()).spawn(move || {
-                let _ = tx.send(crate::desktop::windows::query(Duration::from_millis(1500)));
-                waker();
-            });
-            self.desktop_rx = Some(rx);
-        }
-        // The overlay's surfaces are made now and configured while the
-        // screen is taken: the first frame can go up as the pixels arrive.
-        let namespace = layer_namespace();
-        for (o, mon) in monitors.iter().enumerate() {
-            if let Err(e) = self.wl.add_overlay(Owner::Overlay(o), mon, &namespace) {
-                return self.fail(&e);
-            }
-        }
-        self.monitors = monitors.clone();
-        let mut pending = Pending { request, monitors, plan, backend: "none", source: Source::Screencopy, rest: order, errors: Vec::new() };
-        if self.next_backend(&mut pending) {
-            self.pending = Some(pending);
-        }
-    }
-
-    /// Start the next backend of `p`; false (and the capture failed) if none is left.
-    fn next_backend(&mut self, p: &mut Pending) -> bool {
-        while !p.rest.is_empty() {
-            let backend = p.rest.remove(0);
-            p.backend = backend;
-            if backend == "screencopy" {
-                match self.wl.start_screencopy(&p.monitors, p.plan.cursor, p.plan.both) {
-                    Ok(()) => {
-                        p.source = Source::Screencopy;
-                        return true;
-                    }
-                    Err(e) => {
-                        p.errors.push(format!("screencopy: {e}"));
-                        continue;
-                    }
-                }
-            }
-            let (tx, rx) = mpsc::channel();
-            let (plan, waker) = (p.plan.clone(), self.waker.clone());
-            let started = std::thread::Builder::new().name("flatshot-capture".into()).spawn(move || {
-                let _ = tx.send(capture::grab(backend, &plan));
-                waker();
-            });
-            match started {
-                Ok(_) => {
-                    p.source = Source::Worker(rx);
-                    return true;
-                }
-                Err(e) => p.errors.push(format!("{backend}: {e}")),
-            }
-        }
-        let why = if p.errors.is_empty() { "no way to capture the screen here".to_string() } else { p.errors.join("\n  ") };
-        self.fail(&format!("could not capture the screen\n  {why}"));
-        false
-    }
-
-    /// The capture in progress, if its pictures are in (or it failed).
-    fn poll_capture(&mut self) {
-        let Some(p) = &mut self.pending else { return };
-        let result = match &p.source {
-            Source::Screencopy if self.wl.screencopy_done() => {
-                let mut out = Vec::new();
-                let mut err = None;
-                for (monitor, cursor, r) in self.wl.take_screencopy() {
-                    match r {
-                        Ok(picture) => out.push(Grabbed { monitor, cursor, picture }),
-                        Err(e) => err = Some(e),
-                    }
-                }
-                match err {
-                    Some(e) => Err(e),
-                    None => Ok(out),
-                }
-            }
-            Source::Worker(rx) => match rx.try_recv() {
-                Ok(r) => r,
-                Err(mpsc::TryRecvError::Empty) => return,
-                Err(mpsc::TryRecvError::Disconnected) => Err("the capture stopped".into()),
-            },
-            _ => return,
-        };
-        let Some(mut p) = self.pending.take() else { return };
-        match result {
-            Ok(grabbed) => self.captured(p, grabbed),
-            Err(e) => {
-                p.errors.push(format!("{}: {e}", p.backend));
-                if self.next_backend(&mut p) {
-                    self.pending = Some(p);
-                }
-            }
-        }
-    }
-
-    /// The screens are in: show the overlays.
-    fn captured(&mut self, p: Pending, grabbed: Vec<Grabbed>) {
-        let n = p.monitors.len();
-        let mut plain: Vec<Option<Image>> = (0..n).map(|_| None).collect();
-        let mut with: Vec<Option<Image>> = (0..n).map(|_| None).collect();
-        let mut both = false;
-        for g in grabbed {
-            if g.monitor >= n {
-                continue;
-            }
-            if g.cursor && p.plan.both {
-                with[g.monitor] = Some(g.picture);
-                both = true;
-            } else {
-                plain[g.monitor] = Some(g.picture);
-            }
-        }
-        let mut screens = Vec::with_capacity(n);
-        for (m, mon) in p.monitors.iter().enumerate() {
-            let (picture, pointer) = match (plain[m].take(), with[m].take()) {
-                (Some(a), Some(b)) => {
-                    let patch = capture::pointer_patch(&a, &b);
-                    (a, patch)
-                }
-                (Some(a), None) | (None, Some(a)) => (a, None),
-                (None, None) => return self.fail(&format!("nothing captured on {}", mon.name)),
-            };
-            screens.push(Screen { output: Output { name: mon.name.clone(), rect: mon.rect, scale: mon.scale as f32 }, picture: Arc::new(picture), pointer });
-        }
-        let detail = screens.iter().map(|s| format!("{} × {}", s.picture.width(), s.picture.height())).collect::<Vec<_>>().join(", ");
-        self.clock.step("screenshot", format!("{detail} via {}", p.backend));
-        let setup = Setup { cfg: self.cfg.clone(), request: p.request, screens, pointer_taken: both, cursor: None, primary: 0, can_record: true };
-        let mut session = Session::new(setup, Box::new(NoRecorder), self.waker.clone());
-        session.clock = self.clock.clone();
-        if let Some(d) = &self.desktop {
-            session.desktop_found(d.clone());
-        }
-        self.session = Some(session);
-        self.first_frame = true;
-    }
-
     fn fail(&mut self, message: &str) {
         self.close_session();
         self.pending = None;
+        self.taken = None;
         self.report_failure("Screenshot failed", message);
         self.ended(2);
     }
@@ -347,7 +180,8 @@ impl App {
     /// How long the loop may sleep.
     fn timeout(&self) -> Option<Duration> {
         let session = self.session.as_ref().and_then(|s| s.next_deadline());
-        let deadline = [session, self.hold_until].into_iter().flatten().min()?;
+        let taken = self.taken.as_ref().map(|t| t.wait_until);
+        let deadline = [session, self.hold_until, taken].into_iter().flatten().min()?;
         Some(deadline.saturating_duration_since(Instant::now()))
     }
 
@@ -365,6 +199,10 @@ impl App {
                 self.desktop = Some(d);
             }
         }
+        if self.taken.is_some() {
+            self.finish_instant(false);
+        }
+        self.poll_notifications();
         if let Some(rx) = &self.paste_rx
             && let Ok(text) = rx.try_recv()
         {
@@ -466,6 +304,60 @@ fn layer_namespace() -> String {
     if desktop.contains("kde") { "utility".into() } else { "flatshot".into() }
 }
 
+/// The connection to the compositor and the event loop around it.
+fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoop<'static, App>), i32> {
+    let cfg = config::load();
+    theme::use_theme(&cfg.theme);
+    let (wl, mut queue) = Wayland::connect().map_err(|e| {
+        crate::warn!("{e}");
+        2
+    })?;
+    let event_loop: EventLoop<'static, App> = EventLoop::try_new().map_err(|e| {
+        crate::warn!("event loop: {e}");
+        2
+    })?;
+    let (ping, ping_source) = calloop::ping::make_ping().map_err(|e| {
+        crate::warn!("event loop: {e}");
+        2
+    })?;
+    let _ = event_loop.handle().insert_source(ping_source, |_, _, _| {});
+    let mut app = App {
+        wl,
+        loop_handle: event_loop.handle(),
+        cfg,
+        session: None,
+        monitors: Vec::new(),
+        pending: None,
+        taken: None,
+        desktop_rx: None,
+        desktop: None,
+        exit: None,
+        waker: Arc::new(move || ping.ping()),
+        clock: Clock::since("region capture", started),
+        first_frame: false,
+        output_file,
+        one_shot: true,
+        finished: None,
+        hold_until: None,
+        paste_rx: None,
+        tray: tray::TrayState::default(),
+        events: None,
+    };
+    // The monitors (and xdg-output's logical layout) arrive in two rounds.
+    for _ in 0..2 {
+        queue.roundtrip(&mut app).map_err(|e| {
+            crate::warn!("Wayland: {e}");
+            2
+        })?;
+    }
+    timing::log(format!("connected to Wayland in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0));
+    WaylandSource::new(app.wl.conn.clone(), queue).insert(event_loop.handle()).map_err(|e| {
+        crate::warn!("Wayland source: {e}");
+        2
+    })?;
+    Ok((app, event_loop))
+}
+
 /// One capture from the command line: the overlay, then the result.
 pub fn run_once(args: &Args) -> i32 {
     let started = Instant::now();
@@ -476,73 +368,30 @@ pub fn run_once(args: &Args) -> i32 {
         crate::render::text::warm_up();
         timing::log(format!("fonts ready at {:.1} ms", started.elapsed().as_secs_f64() * 1000.0));
     });
-    let mut cfg = config::load();
+    let (mut app, mut event_loop) = match setup(started, args.output.clone()) {
+        Ok(x) => x,
+        Err(code) => return code,
+    };
     if args.no_copy {
-        cfg.clipboard = "none".into();
+        app.cfg.clipboard = "none".into();
     }
     if args.no_save {
-        cfg.save_to_disk = false;
+        app.cfg.save_to_disk = false;
     }
-    theme::use_theme(&cfg.theme);
-    let (wl, mut queue) = match Wayland::connect() {
-        Ok(x) => x,
-        Err(e) => {
-            crate::warn!("{e}");
-            return 2;
-        }
-    };
-    let mut event_loop: EventLoop<'static, App> = match EventLoop::try_new() {
-        Ok(l) => l,
-        Err(e) => {
-            crate::warn!("event loop: {e}");
-            return 2;
-        }
-    };
-    let (ping, ping_source) = match calloop::ping::make_ping() {
-        Ok(p) => p,
-        Err(e) => {
-            crate::warn!("event loop: {e}");
-            return 2;
-        }
-    };
-    let _ = event_loop.handle().insert_source(ping_source, |_, _, _| {});
-    let mut app = App {
-        wl,
-        loop_handle: event_loop.handle(),
-        cfg,
-        session: None,
-        monitors: Vec::new(),
-        pending: None,
-        desktop_rx: None,
-        desktop: None,
-        exit: None,
-        waker: Arc::new(move || ping.ping()),
-        clock: Clock::since("region capture", started),
-        first_frame: false,
-        output_file: args.output.clone(),
-        one_shot: true,
-        finished: None,
-        hold_until: None,
-        paste_rx: None,
-    };
-    // The monitors (and xdg-output's logical layout) arrive in two rounds.
-    for _ in 0..2 {
-        if let Err(e) = queue.roundtrip(&mut app) {
-            crate::warn!("Wayland: {e}");
-            return 2;
-        }
+    if let Some(b) = &args.backend {
+        app.cfg.backend = b.clone();
     }
-    timing::log(format!("connected to Wayland in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0));
-    if let Err(e) = WaylandSource::new(app.wl.conn.clone(), queue).insert(event_loop.handle()) {
-        crate::warn!("Wayland source: {e}");
+    let Some(mode) = Mode::parse(args.mode(), args.region.as_deref().and_then(crate::cli::parse_geometry)) else {
+        crate::warn!("unknown capture mode");
         return 2;
-    }
+    };
+    let mut asked = started;
     if args.delay > 0.0 {
         std::thread::sleep(Duration::from_secs_f64(args.delay.min(3600.0)));
+        asked = Instant::now();
     }
-    let request = Request { pin: args.pin, scan: !args.no_scan, record: args.record, image: false };
-    app.clock = Clock::since("region capture", started);
-    app.start_capture(request);
+    let job = Job { mode, pin: args.pin, record: args.record, scan: !args.no_scan, asked };
+    app.start_capture(job);
     app.after_dispatch(); // (it may have ended already)
     while app.exit.is_none() {
         let timeout = app.timeout();

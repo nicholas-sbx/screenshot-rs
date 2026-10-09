@@ -192,6 +192,11 @@ impl Wayland {
             conn,
             qh,
         };
+        let mut wl = wl;
+        // (the clipboard's devices don't wait for the seat's keyboard)
+        for seat in wl.seats.seats() {
+            wl.clipboard.add_seat(&seat, &wl.qh);
+        }
         Ok((wl, queue))
     }
 

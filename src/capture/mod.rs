@@ -146,6 +146,44 @@ pub fn split(plan: &Plan, desktop: Image, cursor: bool) -> Result<Vec<Grabbed>, 
     Ok(out)
 }
 
+/// `area` (global logical pixels) from the monitors' pictures: from one
+/// monitor's own pixels when it's all on that monitor, else from each at
+/// the highest of their scales.
+pub fn compose(screens: &[(IRect, &Image)], area: IRect) -> Result<Image, String> {
+    let scale_of = |r: &IRect, img: &Image| img.width() as f32 / r.w.max(1) as f32;
+    let px = |v: i32, s: f32| (v as f32 * s).round() as i32;
+    let parts: Vec<&(IRect, &Image)> = screens.iter().filter(|(r, _)| r.intersects(&area)).collect();
+    if parts.is_empty() || area.is_empty() {
+        return Err(format!("{}x{}+{}+{} is outside the screens", area.w, area.h, area.x, area.y));
+    }
+    if let Some((r, img)) = parts.iter().find(|(r, _)| r.contains_rect(&area)) {
+        let s = scale_of(r, img);
+        let part = IRect::new(px(area.x - r.x, s), px(area.y - r.y, s), px(area.w, s), px(area.h, s)).intersected(&img.rect());
+        if part.is_empty() {
+            return Err("nothing there".into());
+        }
+        return img.crop(part);
+    }
+    let scale = parts.iter().map(|(r, img)| scale_of(r, img)).fold(0.0f32, f32::max);
+    let mut out = Image::filled(px(area.w, scale).max(1) as u32, px(area.h, scale).max(1) as u32, 0xFF00_0000)?;
+    for (r, img) in parts {
+        let part = r.intersected(&area);
+        let s = scale_of(r, img);
+        let src = IRect::new(px(part.x - r.x, s), px(part.y - r.y, s), px(part.w, s), px(part.h, s)).intersected(&img.rect());
+        let dst = IRect::new(px(part.x - area.x, scale), px(part.y - area.y, scale), px(part.w, scale), px(part.h, scale));
+        if src.is_empty() || dst.is_empty() {
+            continue;
+        }
+        let piece = img.crop(src)?;
+        if (piece.width() as i32, piece.height() as i32) == (dst.w, dst.h) {
+            out.blit(&piece, dst.x, dst.y);
+        } else {
+            out.blit(&piece.scaled_area(dst.w as u32, dst.h as u32)?, dst.x, dst.y);
+        }
+    }
+    Ok(out)
+}
+
 /// The pixels that differ between the picture without the pointer and the
 /// one with it: where (in `plain`'s pixels) and those pixels of `with`.
 /// None when they're the same (the pointer is on another monitor).
@@ -194,6 +232,22 @@ mod tests {
         let (at, patch) = pointer_patch(&plain, &with).unwrap();
         assert_eq!((at, patch.size()), (IPoint::new(100, 50), (16, 24)));
         assert!(pointer_patch(&plain, &plain).is_none());
+    }
+
+    #[test]
+    fn composing_areas() {
+        let a = Image::filled(200, 100, 0xFF00_00FF).unwrap(); // 1x at 0,0
+        let b = Image::filled(400, 200, 0xFF00_FF00).unwrap(); // 2x at 200,0
+        let screens = [(IRect::new(0, 0, 200, 100), &a), (IRect::new(200, 0, 200, 100), &b)];
+        // On one monitor: its own pixels.
+        let one = compose(&screens, IRect::new(210, 10, 50, 20)).unwrap();
+        assert_eq!(one.size(), (100, 40));
+        assert_eq!(one.pixel(0, 0), 0xFF00_FF00);
+        // Across both: at the higher scale.
+        let both = compose(&screens, IRect::new(150, 0, 100, 50)).unwrap();
+        assert_eq!(both.size(), (200, 100));
+        assert_eq!((both.pixel(10, 10), both.pixel(150, 10)), (0xFF00_00FF, 0xFF00_FF00));
+        assert!(compose(&screens, IRect::new(500, 500, 10, 10)).is_err());
     }
 
     #[test]
