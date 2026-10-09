@@ -92,6 +92,9 @@ pub struct Overlay {
     pub base: Arc<Image>,
     pub plain: Option<Arc<Image>>,
     pub with_pointer: Option<Arc<Image>>,
+    /// The mouse pointer as captured: where its pixels go in the picture,
+    /// and those pixels (only these are kept, not a second picture).
+    pub pointer_patch: Option<(IPoint, Arc<Image>)>,
     /// picture pixels per logical pixel
     pub dpr: f32,
     /// top left of this screen in the whole desktop's picture, its pixels
@@ -143,6 +146,7 @@ impl Overlay {
             base,
             plain: None,
             with_pointer: None,
+            pointer_patch: None,
             dpr,
             origin,
             desktop_scale: None,
@@ -299,15 +303,24 @@ impl Overlay {
         Ok(out)
     }
 
-    /// Show the picture with the mouse pointer in it, or without.
+    /// Show the picture with the mouse pointer in it, or without. The one
+    /// with it is made when first wanted, and let go when hidden again.
     pub fn show_pointer(&mut self, show: bool) {
-        if self.plain.is_none() {
-            self.plain = Some(self.base.clone());
-        }
-        if show && let Some(p) = &self.with_pointer {
-            self.base = p.clone();
-        } else if !show && let Some(p) = &self.plain {
-            self.base = p.clone();
+        let plain = self.plain.get_or_insert_with(|| self.base.clone()).clone();
+        if show {
+            if self.with_pointer.is_none()
+                && let Some((at, patch)) = &self.pointer_patch
+            {
+                let mut img = (*plain).clone();
+                img.blit(patch, at.x, at.y);
+                self.with_pointer = Some(Arc::new(img));
+            }
+            if let Some(p) = &self.with_pointer {
+                self.base = p.clone();
+            }
+        } else {
+            self.base = plain;
+            self.with_pointer = None;
         }
         self.damage.set_full();
     }
@@ -959,7 +972,8 @@ fn round_corners(img: &mut Image, radius: f32) {
 /// corners cut off, made once per size and zoom.
 fn loupe_grid(side: i64, cell: i64, offset: i64, radius: f32, u: i64) -> Option<Arc<Image>> {
     use std::sync::Mutex;
-    static GRIDS: Mutex<Vec<((i64, i64, i64, i32, i64), Arc<Image>)>> = Mutex::new(Vec::new());
+    type Key = (i64, i64, i64, i32, i64);
+    static GRIDS: Mutex<Vec<(Key, Arc<Image>)>> = Mutex::new(Vec::new());
     let key = (side, cell, offset, (radius * 100.0) as i32, u);
     let mut grids = GRIDS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, g)) = grids.iter().find(|(k, _)| *k == key) {

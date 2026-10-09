@@ -43,7 +43,7 @@ pub fn mono(px: f32, weight: u16) -> FontSpec {
 }
 
 impl FontSpec {
-    fn key(&self) -> (u32, u16, bool) {
+    fn key(&self) -> FontKey {
         ((self.px * 64.0).round() as u32, self.weight, self.mono)
     }
 }
@@ -142,6 +142,9 @@ struct GlyphKey {
     frac: u8,
 }
 
+/// A font as asked for: (size in 64ths of a pixel, weight, monospace).
+type FontKey = (u32, u16, bool);
+
 struct System {
     db: fontdb::Database,
     faces: Vec<Face>,
@@ -150,8 +153,8 @@ struct System {
     fallback: HashMap<(char, bool), Option<u32>>,
     glyphs: HashMap<GlyphKey, Option<Arc<Glyph>>>,
     glyph_bytes: usize,
-    lines: HashMap<(String, (u32, u16, bool)), Arc<Line>>,
-    metrics: HashMap<(u32, u16, bool), Metrics>,
+    lines: HashMap<(String, FontKey), Arc<Line>>,
+    metrics: HashMap<FontKey, Metrics>,
 }
 
 /// Cached glyph pictures beyond this many bytes are dropped.
@@ -708,7 +711,6 @@ pub fn outline_path(line: &Line, at: Point) -> (Option<tiny_skia::Path>, Vec<(Ar
         }
         // A picture glyph, rendered at 4x the logical size for sharpness.
         let key = GlyphKey { face: g.face, id: g.id, weight: g.weight, size: (g.px * 4.0 * 64.0) as u32, frac: 0 };
-        drop(font);
         if let Some(glyph) = s.glyph(key)
             && glyph.color.is_some()
         {

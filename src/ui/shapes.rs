@@ -153,11 +153,14 @@ pub struct Stroke {
     pub marker: bool,
 }
 
+/// What a cover was made from: where, how big, and the picture's identity.
+type CoverKey = (IRect, usize, usize);
+
 /// Mosaic or blur over what's underneath in the original picture, with
 /// the result kept until the shape or the picture changes.
 #[derive(Debug, Default)]
 pub struct CoverCache {
-    cache: RefCell<Option<((IRect, usize, usize), Image)>>,
+    cache: RefCell<Option<(CoverKey, Image)>>,
 }
 
 impl Clone for CoverCache {
@@ -568,9 +571,9 @@ fn paint_text(p: &mut Painter<'_>, t: &TextShape, color: Color, size: usize) {
             let (ra, ca) = t.edit.row_col(a);
             let (rb, cb) = t.edit.row_col(b);
             let measure = TextMeasure(f);
-            for r in ra..=rb {
+            for (r, line) in lines.iter().enumerate().take(rb + 1).skip(ra) {
                 let x0 = t.edit.x_of(r, if r == ra { ca } else { 0 }, &measure);
-                let x1 = t.edit.x_of(r, if r == rb { cb } else { lines[r].len() }, &measure)
+                let x1 = t.edit.x_of(r, if r == rb { cb } else { line.len() }, &measure)
                     + if r == rb { 0.0 } else { m.avg_char_width / 2.0 };
                 p.fill_rect(Rect::new(t.pos.x + x0, t.pos.y + r as f32 * m.line_spacing, x1 - x0, m.height), shade);
             }

@@ -127,7 +127,7 @@ pub fn layout_row(items: &mut [Item], left: f32, top: f32, height: f32, spacing:
 }
 
 /// Hover and press state of a panel's controls.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Pointer {
     pub hovered: Option<&'static str>,
     pub pressed: Option<&'static str>,
@@ -148,7 +148,7 @@ impl Pointer {
 /// centred alike: `boxes(half, px)` is `half` logical px each way plus `px`
 /// device pixels. (At 125 % or 150 % a ring drawn at logical coordinates
 /// comes out a pixel thicker on one side.)
-pub fn centred_boxes(p: &Painter<'_>, centre: Point) -> impl Fn(f32, i32) -> Rect {
+pub fn centred_boxes(p: &Painter<'_>, centre: Point) -> impl Fn(f32, i32) -> Rect + use<> {
     let dpr = p.scale();
     let d = p.map(centre);
     let (cx, cy) = (d.x.round(), d.y.round());

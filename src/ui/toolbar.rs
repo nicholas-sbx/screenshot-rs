@@ -43,8 +43,7 @@ const SWATCH_COUNT: usize = 7;
 
 impl Toolbar {
     pub fn new(view: &View<'_>) -> Toolbar {
-        let mut t = Toolbar::default();
-        t.items = build(view);
+        let mut t = Toolbar { items: build(view), ..Default::default() };
         let w = layout_row(&mut t.items, 6.0, 6.0, 36.0, 2.0) + 8.0;
         t.size = (w, 48.0);
         t

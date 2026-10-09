@@ -437,7 +437,6 @@ pub fn keysym_to_qt(keysym: u32, unicode: Option<char>) -> i32 {
     let c = unicode.or_else(|| if keysym & 0xff00_0000 == 0x0100_0000 { char::from_u32(keysym & 0x00ff_ffff) } else { None });
     match c {
         Some(c) if c.is_ascii_digit() => c as i32,
-        Some(c) if c.is_numeric() && c.to_digit(10).is_some() => 0x30 + c.to_digit(10).unwrap() as i32,
         Some(c) if !c.is_control() => c.to_uppercase().next().unwrap_or(c) as i32,
         _ => 0,
     }

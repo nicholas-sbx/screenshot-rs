@@ -50,7 +50,7 @@ pub fn clean(value: &str) -> String {
     let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = joined.trim_matches(|c| c == ' ' || c == '.' || c == '_');
     let cut: String = trimmed.chars().take(80).collect();
-    cut.trim_end_matches(|c| c == ' ' || c == '.' || c == '_').to_string()
+    cut.trim_end_matches([' ', '.', '_']).to_string()
 }
 
 /// `fmt` through the C library's strftime for the local time `t`, with
@@ -78,8 +78,9 @@ pub fn strftime(fmt: &str, t: libc::time_t, micros: u32) -> String {
             None => pre.push('%'),
         }
     }
-    // SAFETY: localtime_r fills `tm` from `t`; both are valid locals.
+    // SAFETY: tm is plain data; all zeroes is a valid value.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: localtime_r fills `tm` from `t`; both are valid locals.
     unsafe { libc::localtime_r(&t, &mut tm) };
     // strftime can't tell "empty result" from "buffer too small": try
     // growing buffers, and give up on absurdly long expansions.

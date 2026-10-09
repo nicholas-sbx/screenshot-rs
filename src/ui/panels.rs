@@ -216,6 +216,9 @@ enum Dragging {
     Hues,
 }
 
+/// The square of shades as drawn: (hue, width, height) and its pixels.
+type Shades = ((u32, u32, u32), Image);
+
 /// A square of shades (saturation across, brightness down), a hue bar, the
 /// colour as hex to read or type, and an eyedropper for a colour on the
 /// screen.
@@ -226,7 +229,7 @@ pub struct ColorPicker {
     pub s: f32,
     pub v: f32,
     dragging: Option<Dragging>,
-    shades: RefCell<Option<((u32, u32, u32), Image)>>,
+    shades: RefCell<Option<Shades>>,
     pub hex: LineEdit,
     pub dropper: Item,
     pub ptr: Pointer,
@@ -386,7 +389,7 @@ impl ColorPicker {
         (self.ptr.hovered == Some("dropper")).then(|| self.dropper.hint.clone())
     }
 
-    fn shades_image(&self, scale: f32) -> Option<std::cell::Ref<'_, Option<((u32, u32, u32), Image)>>> {
+    fn shades_image(&self, scale: f32) -> Option<std::cell::Ref<'_, Option<Shades>>> {
         let (w, h) = ((SHADES.w * scale).round() as u32, (SHADES.h * scale).round() as u32);
         let key = ((self.h * 10000.0) as u32, w, h);
         if self.shades.borrow().as_ref().is_none_or(|(k, _)| *k != key) {

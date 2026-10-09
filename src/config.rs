@@ -315,6 +315,7 @@ pub fn home() -> PathBuf {
     }
     // No $HOME: ask the password database.
     let uid = rustix::process::getuid().as_raw();
+    // SAFETY: passwd is plain data; all zeroes is a valid (empty) value.
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
     let mut buf = vec![0 as libc::c_char; 4096];
     let mut result: *mut libc::passwd = std::ptr::null_mut();
