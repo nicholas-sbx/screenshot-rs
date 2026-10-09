@@ -332,7 +332,7 @@ impl App {
 
     /// Open `path` in the annotation editor.
     fn edit(&mut self, path: &str) {
-        crate::warn!("the annotation editor isn't in this build yet ({path})");
+        self.open_editor(std::path::Path::new(path), None);
     }
 
     /// Pin the screenshot a notification was about: where it was taken,
@@ -351,11 +351,6 @@ impl App {
 
     fn show_settings(&mut self) {
         crate::warn!("the settings window isn't in this build yet");
-    }
-
-    /// Pick an image to annotate (the desktop's file dialog).
-    fn choose_image(&mut self) {
-        crate::warn!("the annotation editor isn't in this build yet");
     }
 
     fn quit(&mut self) {

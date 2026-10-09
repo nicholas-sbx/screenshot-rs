@@ -59,6 +59,8 @@ pub enum Owner {
     Pin(u32),
     /// a popup menu, by id
     Menu(u32),
+    /// an annotation editor's window, by id
+    Editor(u32),
 }
 
 /// Something drawn on surfaces: what changed, and how to draw a part of it.

@@ -33,7 +33,13 @@ fn main() -> std::process::ExitCode {
             if args.quit {
                 return std::process::ExitCode::SUCCESS;
             }
-            let code = if args.tray { flatshot::app::run_tray(&args) } else { flatshot::app::run_once(&args) };
+            let code = if args.tray {
+                flatshot::app::run_tray(&args)
+            } else if args.image.is_some() {
+                flatshot::app::run_editor(&args)
+            } else {
+                flatshot::app::run_once(&args)
+            };
             std::process::ExitCode::from(code as u8)
         }
     }

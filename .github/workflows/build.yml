@@ -78,7 +78,7 @@ jobs:
         run: |
           cargo build --locked --examples
           FLATSHOT_SELFTEST_OUT=shots ./target/debug/flatshot --self-test
-      - name: End to end on a headless sway (overlay, pins, instant captures, clipboard, tray app)
+      - name: End to end on a headless sway (overlay, pins, editor, instant captures, clipboard, tray app)
         run: timeout 300 ./tests/e2e.sh
       - uses: actions/upload-artifact@v4
         if: always()
@@ -119,6 +119,8 @@ jobs:
           path: dist/*
 
   install:
+    # (images from the Docker library's mirror on ECR: Docker Hub limits
+    # pulls from shared runners)
     name: install (${{ matrix.image }})
     needs: packages
     runs-on: ubuntu-24.04
@@ -128,17 +130,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: ubuntu:22.04
+          - image: public.ecr.aws/docker/library/ubuntu:22.04
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: ubuntu:24.04
+          - image: public.ecr.aws/docker/library/ubuntu:24.04
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: debian:bookworm
+          - image: public.ecr.aws/docker/library/debian:bookworm
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: debian:trixie
+          - image: public.ecr.aws/docker/library/debian:trixie
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: fedora:latest
+          - image: public.ecr.aws/docker/library/fedora:latest
             install: dnf install -y ./dist/*.rpm
-          - image: archlinux:latest
+          - image: public.ecr.aws/docker/library/archlinux:latest
             install: pacman -Syu --noconfirm && pacman -U --noconfirm ./dist/*.pkg.tar.zst
     steps:
       - uses: actions/download-artifact@v4
@@ -193,7 +195,7 @@ jobs:
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    container: archlinux:latest
+    container: public.ecr.aws/docker/library/archlinux:latest
     permissions:
       contents: write
     steps:

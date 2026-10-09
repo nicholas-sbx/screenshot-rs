@@ -2,6 +2,7 @@
 //! shortcuts, notifications, sounds and the tray.
 
 pub mod notify;
+pub mod portal;
 pub mod shortcuts;
 pub mod sound;
 pub mod tray;

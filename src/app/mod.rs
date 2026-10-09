@@ -3,6 +3,7 @@
 //! the session's outcome to delivery.
 
 mod capture;
+mod editor;
 mod finish;
 mod pins;
 mod tray;
@@ -78,6 +79,11 @@ pub struct App {
     /// captures pinned to the screen
     pins: Vec<pins::Pin>,
     next_pin: u32,
+    /// annotation editor windows
+    editors: Vec<editor::EditorWin>,
+    next_editor: u32,
+    /// "Annotate an image…": the file dialog's answer
+    open_dialog: Option<mpsc::Receiver<Result<Option<std::path::PathBuf>, String>>>,
 }
 
 impl Painted for Session {
@@ -111,6 +117,7 @@ impl App {
         match owner {
             Some(Owner::Pin(id)) => return self.pin_input(id, ev),
             Some(Owner::Menu(id)) => return self.menu_input(id, ev),
+            Some(Owner::Editor(id)) => return self.editor_input(id, ev),
             _ => {}
         }
         let Some(s) = &mut self.session else { return };
@@ -147,6 +154,10 @@ impl App {
 
     /// Text from an input method.
     pub fn commit_string(&mut self, text: &str) {
+        let focus = self.wl.text_focus.as_ref().or(self.wl.keyboard_on.as_ref()).and_then(|id| self.wl.owner_of(id));
+        if let Some(Owner::Editor(id)) = focus {
+            return self.editor_commit_string(id, text);
+        }
         if let Some(s) = &mut self.session {
             s.commit_string(text);
         }
@@ -162,6 +173,7 @@ impl App {
             }
             Some(Owner::Pin(p)) => self.close_pin(p),
             Some(Owner::Menu(p)) => self.close_menu(p),
+            Some(Owner::Editor(e)) => self.editor_close_requested(e),
             None => {}
         }
     }
@@ -196,7 +208,7 @@ impl App {
     fn timeout(&self) -> Option<Duration> {
         let session = self.session.as_ref().and_then(|s| s.next_deadline());
         let taken = self.taken.as_ref().map(|t| t.wait_until);
-        let deadline = [session, self.hold_until, taken].into_iter().flatten().min()?;
+        let deadline = [session, self.hold_until, taken, self.editors_deadline()].into_iter().flatten().min()?;
         Some(deadline.saturating_duration_since(Instant::now()))
     }
 
@@ -220,6 +232,8 @@ impl App {
             self.finish_instant(false);
         }
         self.poll_notifications();
+        self.poll_editors();
+        self.poll_open_dialog();
         if let Some(rx) = &self.paste_rx
             && let Ok(text) = rx.try_recv()
         {
@@ -257,6 +271,7 @@ impl App {
 
     fn redraw(&mut self) {
         self.redraw_pins();
+        self.redraw_editors();
         let Some(s) = &mut self.session else { return };
         let mut drawn = false;
         for i in 0..self.wl.surfaces.len() {
@@ -277,6 +292,10 @@ impl App {
             (Owner::Overlay(o), Some(s)) => s.cursor(o),
             (Owner::Pin(_), _) => CursorShape::Move,
             (Owner::Menu(_), _) => CursorShape::Arrow,
+            (Owner::Editor(id), _) => match self.editors.iter().find(|e| e.id == id) {
+                Some(e) => e.ed.cursor(),
+                None => return,
+            },
             _ => return,
         };
         let icon = match shape {
@@ -300,6 +319,10 @@ impl App {
 
     fn update_text_input(&mut self) {
         let caret = match (&self.session, &self.wl.keyboard_on) {
+            (_, Some(on)) if matches!(self.wl.owner_of(on), Some(Owner::Editor(_))) => match self.wl.owner_of(on) {
+                Some(Owner::Editor(id)) => self.editors.iter().find(|e| e.id == id).filter(|e| e.ed.wants_text()).and_then(|e| e.ed.text_input()),
+                _ => None,
+            },
             (Some(s), Some(on)) => match self.wl.owner_of(on) {
                 Some(Owner::Overlay(o)) => s.text_input(o),
                 _ => None,
@@ -368,6 +391,9 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         events: None,
         pins: Vec::new(),
         next_pin: 0,
+        editors: Vec::new(),
+        next_editor: 0,
+        open_dialog: None,
     };
     // The monitors (and xdg-output's logical layout) arrive in two rounds.
     for _ in 0..2 {
@@ -419,6 +445,34 @@ pub fn run_once(args: &Args) -> i32 {
     let job = Job { mode, pin: args.pin, record: args.record, scan: !args.no_scan, asked };
     app.start_capture(job);
     app.after_dispatch(); // (it may have ended already)
+    while app.exit.is_none() {
+        let timeout = app.timeout();
+        if let Err(e) = event_loop.dispatch(timeout, &mut app) {
+            crate::warn!("event loop: {e}");
+            return 2;
+        }
+        app.after_dispatch();
+    }
+    app.exit.unwrap_or(0)
+}
+
+/// The annotation editor on its own (`flatshot -i FILE`): exits when its
+/// window is closed.
+pub fn run_editor(args: &Args) -> i32 {
+    let started = Instant::now();
+    crate::dbus::connect_early();
+    let _ = std::thread::Builder::new().name("flatshot-fonts".into()).spawn(crate::render::text::warm_up);
+    let (mut app, mut event_loop) = match setup(started, None) {
+        Ok(x) => x,
+        Err(code) => return code,
+    };
+    let Some(image) = &args.image else { return 2 };
+    let path = std::path::PathBuf::from(config::expand_user(image));
+    let save_to = args.output.as_ref().map(|o| std::path::PathBuf::from(config::expand_user(o)));
+    if !app.open_editor(&path, save_to) {
+        return 2;
+    }
+    app.finished = Some(0);
     while app.exit.is_none() {
         let timeout = app.timeout();
         if let Err(e) = event_loop.dispatch(timeout, &mut app) {

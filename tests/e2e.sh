@@ -119,7 +119,19 @@ PY
     [ "$edge" = "400 300 599 399" ] && pass "pin dragged to its place ($edge)" || fail "pin's edge at $edge, wanted 400 300 599 399"
 fi
 
-# 4. Instant captures.
+# 4. The annotation editor: draw a box, save it in place, close.
+cp assets/flatshot.png "$work/edit.png"
+before=$(md5sum < "$work/edit.png")
+$BIN -i "$work/edit.png" > "$work/editor.log" 2>&1 &
+pid=$!
+sleep 1.2
+$EX/inject move 700 500 key b drag 700 450 850 580 sleep 200 key ctrl+s sleep 400 key ctrl+w sleep 300
+for _ in $(seq 30); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
+if kill -0 $pid 2>/dev/null; then fail "the editor didn't close"; kill $pid; else pass "editor closed"; fi
+[ "$(md5sum < "$work/edit.png")" != "$before" ] && pass "editor saved the drawing" || fail "editor didn't save"
+expect_size "edited picture" "$work/edit.png" "256 256"
+
+# 5. Instant captures.
 $BIN -f > /dev/null && expect_size "all screens" "$(newest)" "1600 1000" || fail "--full failed"
 $BIN -r 320x240+10+20 > /dev/null && expect_size "exact region" "$(newest)" "320 240" || fail "--region failed"
 $BIN -l > /dev/null && expect_size "last region" "$(newest)" "320 240" || fail "--last-region failed"
@@ -127,7 +139,7 @@ $BIN -m > /dev/null && expect_size "current monitor" "$(newest)" "1600 1000" || 
 $BIN -r 64x48+0+0 -o "$work/out.png" > /dev/null && expect_size "--output" "$work/out.png" "64 48" || fail "--output failed"
 $BIN -r 64x48+0+0 -o - --no-copy > "$work/stdout.png" && expect_size "PNG to stdout" "$work/stdout.png" "64 48" || fail "-o - failed"
 
-# 5. The tray app, with stand-ins for KDE's services.
+# 6. The tray app, with stand-ins for KDE's services.
 cat > "$work/tray.sh" <<SH
 #!/usr/bin/env bash
 set -u

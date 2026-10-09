@@ -422,7 +422,7 @@ impl App {
                         self.wl.redraw(i, 0, &mut MenuPaint(menu));
                     }
                 }
-                Owner::Overlay(_) => {}
+                _ => {}
             }
         }
     }
