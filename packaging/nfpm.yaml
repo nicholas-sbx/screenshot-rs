@@ -1,0 +1,81 @@
+# One description, three native formats: nfpm package -p deb|rpm|archlinux
+# Paths are relative to the repository root; VERSION and ARCH come from
+# the environment (packaging/build-packages.sh sets them).
+name: flatshot
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+version_schema: none
+release: "1"
+section: graphics
+priority: optional
+maintainer: nicholas-sbx <nicholas-sbx@users.noreply.github.com>
+description: |
+  Region screenshots for Wayland (KDE first) with a floating draw toolbar.
+  Drag to capture instantly, or annotate first with pen, arrows, shapes,
+  text, highlighter, pixelate and counters. QR codes and barcodes on screen
+  are detected with one-click Copy / Open. A single native binary.
+homepage: https://github.com/nicholas-sbx/screenshot-rs
+license: MIT
+
+archlinux:
+  packager: nicholas-sbx <nicholas-sbx@users.noreply.github.com>
+
+contents:
+  - src: ./target/release/flatshot
+    dst: /usr/bin/flatshot
+    file_info:
+      mode: 0755
+  - src: ./packaging/flatshot.desktop
+    dst: /usr/share/applications/flatshot.desktop
+  # KWin's screenshot API for /usr/bin/flatshot (see the file)
+  - src: ./packaging/flatshot-kwin.desktop
+    dst: /usr/share/applications/flatshot-kwin.desktop
+  # Flatshot's notification events, for KDE's per-event notification settings
+  - src: ./assets/flatshot.notifyrc
+    dst: /usr/share/knotifications6/flatshot.notifyrc
+  - src: ./assets/flatshot.notifyrc
+    dst: /usr/share/knotifications5/flatshot.notifyrc
+  - src: ./assets/flatshot.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/flatshot.svg
+  - src: ./assets/flatshot.png
+    dst: /usr/share/icons/hicolor/256x256/apps/flatshot.png
+  - src: ./LICENSE
+    dst: /usr/share/licenses/flatshot/LICENSE
+  - src: ./README.md
+    dst: /usr/share/doc/flatshot/README.md
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.35)
+      - libgcc-s1
+      - libxkbcommon0
+    recommends:
+      - fonts-dejavu-core | fonts-noto-core
+      - wl-clipboard
+      - xdg-utils
+    suggests:
+      - kde-spectacle | grim
+      - libnotify-bin
+  rpm:
+    depends:
+      - glibc >= 2.35
+      - libgcc
+      - libxkbcommon
+    recommends:
+      - dejavu-sans-fonts
+      - wl-clipboard
+      - xdg-utils
+  archlinux:
+    depends:
+      - glibc
+      - gcc-libs
+      - libxkbcommon
+      - ttf-font
+    recommends:
+      - wl-clipboard
+      - xdg-utils
+    suggests:
+      - spectacle
+      - grim

@@ -247,12 +247,7 @@ impl Menu {
         Vec::new()
     }
 
-    fn get_layout(
-        &self,
-        parent_id: i32,
-        recursion_depth: i32,
-        _property_names: Vec<String>,
-    ) -> zbus::fdo::Result<(u32, Layout)> {
+    fn get_layout(&self, parent_id: i32, recursion_depth: i32, _property_names: Vec<String>) -> zbus::fdo::Result<(u32, Layout)> {
         let Ok(s) = self.state.lock() else { return Err(zbus::fdo::Error::Failed("busy".into())) };
         let children = |s: &State| -> Vec<OwnedValue> {
             s.items.iter().enumerate().map(|(i, item)| layout_value(i as i32 + 1, properties(item, s.recording), Vec::new())).collect()

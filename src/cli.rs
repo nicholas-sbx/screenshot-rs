@@ -182,10 +182,10 @@ pub fn parse(argv: &[String]) -> Parsed {
                     _ => return error(format!("argument -d/--delay: invalid float value: '{v}'")),
                 },
                 "--region" => {
-                    if let Some(other) = instant.replace("-r/--region") {
-                        if other != "-r/--region" {
-                            return error(format!("argument -r/--region: not allowed with argument {other}"));
-                        }
+                    if let Some(other) = instant.replace("-r/--region")
+                        && other != "-r/--region"
+                    {
+                        return error(format!("argument -r/--region: not allowed with argument {other}"));
                     }
                     a.region = Some(v);
                 }
@@ -231,10 +231,10 @@ pub fn parse(argv: &[String]) -> Parsed {
                     "--window" => "-w/--window",
                     _ => "-l/--last-region",
                 };
-                if let Some(other) = instant.replace(this) {
-                    if other != this {
-                        return error(format!("argument {this}: not allowed with argument {other}"));
-                    }
+                if let Some(other) = instant.replace(this)
+                    && other != this
+                {
+                    return error(format!("argument {this}: not allowed with argument {other}"));
                 }
             }
             let _ = short;

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Flatshot screen capture
+Comment=Lets Flatshot take the screen through KWin's screenshot API
+Exec=/usr/bin/flatshot
+Icon=flatshot
+NoDisplay=true
+Terminal=false
+# KWin serves its screenshot API only to the executables named (by their
+# absolute path) in a desktop file with this key: it grants it to
+# /usr/bin/flatshot, and nothing else.
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2

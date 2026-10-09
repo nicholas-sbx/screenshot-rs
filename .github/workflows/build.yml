@@ -1,0 +1,247 @@
+# Tests every push and pull request. A push to main whose Cargo.toml
+# version has no v<version> tag yet also builds the packages, installs
+# them on Debian, Ubuntu, Fedora and Arch, publishes them as a GitHub
+# release, and updates the pacman repository (the "pacman" release).
+# "Run workflow" in the Actions tab does the same on demand.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  NFPM_VERSION: "2.43.0"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        run: |
+          version=$(sed -nE 's/^version = "(.*)"/\1/p' Cargo.toml | head -n1)
+          [ -n "$version" ] || { echo "::error::no version in Cargo.toml"; exit 1; }
+          release=false
+          if [ "$GITHUB_EVENT_NAME" != pull_request ] \
+             && [ "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}" ] \
+             && ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            release=true
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "version $version, release: $release" >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Faster apt
+        run: |
+          echo 'set man-db/auto-update false' | sudo debconf-communicate >/dev/null 2>&1 || true
+          sudo rm -f /var/lib/man-db/auto-update
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev sway wl-clipboard dbus fonts-dejavu-core
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test --locked
+      - name: Self-test
+        run: |
+          cargo build --locked --examples
+          FLATSHOT_SELFTEST_OUT=shots ./target/debug/flatshot --self-test
+      - name: End to end on a headless sway (overlay, instant captures, clipboard, tray app)
+        run: timeout 300 ./tests/e2e.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: self-test-frames
+          path: shots/
+          if-no-files-found: ignore
+
+  packages:
+    needs: version
+    # The oldest supported base (glibc 2.35): the binary runs on it and newer.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install nfpm
+        run: |
+          curl -fsSL -o /tmp/nfpm.deb "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb"
+          sudo dpkg -i /tmp/nfpm.deb
+      - name: Build the packages
+        run: ./packaging/build-packages.sh
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+      - name: The release binary passes its self-test
+        run: ./target/release/flatshot --self-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/*
+
+  install:
+    name: install (${{ matrix.image }})
+    needs: packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:22.04
+            install: apt-get update -q && apt-get install -y -q ./dist/*.deb
+          - image: ubuntu:24.04
+            install: apt-get update -q && apt-get install -y -q ./dist/*.deb
+          - image: debian:bookworm
+            install: apt-get update -q && apt-get install -y -q ./dist/*.deb
+          - image: debian:trixie
+            install: apt-get update -q && apt-get install -y -q ./dist/*.deb
+          - image: fedora:latest
+            install: dnf install -y ./dist/*.rpm
+          - image: archlinux:latest
+            install: pacman -Syu --noconfirm && pacman -U --noconfirm ./dist/*.pkg.tar.zst
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: Install the package
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: ${{ matrix.install }}
+      - name: Check the installed package
+        run: |
+          command -v flatshot
+          flatshot --version
+          grep -qx 'Exec=/usr/bin/flatshot' /usr/share/applications/flatshot-kwin.desktop
+          grep -qx 'X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2' /usr/share/applications/flatshot-kwin.desktop
+          test -f /usr/share/knotifications6/flatshot.notifyrc
+          test -f /usr/share/icons/hicolor/scalable/apps/flatshot.svg
+          flatshot --self-test
+
+  release:
+    needs: [version, test, packages, install]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: Flatshot ${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: dist/*
+
+  pacman-repo:
+    # A pacman repository on the fixed "pacman" release, updated by each
+    # release:
+    #   [flatshot]
+    #   SigLevel = Optional TrustAll
+    #   Server = https://github.com/<owner>/<repo>/releases/download/pacman
+    # With a PACMAN_GPG_KEY secret (an armored private key), the packages
+    # and the database are signed too.
+    needs: [version, release]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container: archlinux:latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: Build the repository database
+        env:
+          PACMAN_GPG_KEY: ${{ secrets.PACMAN_GPG_KEY }}
+        run: |
+          pacman -Syu --noconfirm --needed gnupg
+          mkdir repo
+          cp dist/*.pkg.tar.zst repo/
+          cd repo
+          sign=()
+          if [ -n "${PACMAN_GPG_KEY:-}" ]; then
+            printf '%s\n' "$PACMAN_GPG_KEY" | gpg --batch --import
+            key=$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
+            for p in ./*.pkg.tar.zst; do gpg --batch --yes --detach-sign --local-user "$key" "$p"; done
+            sign=(--sign --key "$key")
+          fi
+          repo-add "${sign[@]}" flatshot.db.tar.gz ./*.pkg.tar.zst
+          # Release assets can't be links: real copies under the names pacman asks for.
+          for f in flatshot.db flatshot.files; do
+            rm -f "$f" "$f.sig"
+            cp "$f.tar.gz" "$f"
+            [ -f "$f.tar.gz.sig" ] && cp "$f.tar.gz.sig" "$f.sig"
+          done
+          ls -l
+      - name: Install from the repository with pacman
+        run: |
+          printf '\n[flatshot]\nSigLevel = Optional TrustAll\nServer = file://%s/repo\n' "$PWD" >> /etc/pacman.conf
+          pacman -Sy --noconfirm flatshot
+          flatshot --version
+          flatshot --self-test
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pacman
+          name: Pacman repository
+          prerelease: true
+          make_latest: false
+          body: |
+            Flatshot's pacman repository. Add this to `/etc/pacman.conf`:
+
+            ```ini
+            [flatshot]
+            SigLevel = Optional TrustAll
+            Server = https://github.com/${{ github.repository }}/releases/download/pacman
+            ```
+
+            Then `sudo pacman -Sy flatshot`. New versions arrive with `sudo pacman -Syu`.
+          files: repo/*

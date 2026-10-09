@@ -1,0 +1,64 @@
+# Maintainer: nicholas-sbx <nicholas-sbx@users.noreply.github.com>
+#
+# Builds Flatshot from a release's source. The ready-made package (and a
+# pacman repository with it) comes with each GitHub release; see README.md.
+# To build the code you have checked out instead: FLATSHOT_SRC=$PWD/../.. makepkg
+pkgname=flatshot
+pkgver=0.9.0
+pkgrel=1
+pkgdesc="Region screenshots for Wayland (KDE first) with a floating draw toolbar and QR code scanning"
+arch=('x86_64' 'aarch64')
+url="https://github.com/nicholas-sbx/screenshot-rs"
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'libxkbcommon' 'ttf-font')
+makedepends=('cargo')
+optdepends=(
+    'wl-clipboard: keep the clipboard after a one-off capture exits'
+    'xdg-utils: open captures and links'
+    'spectacle: capture fallback on KDE'
+    'grim: capture fallback on wlroots compositors'
+)
+options=('!lto')
+if [ -z "${FLATSHOT_SRC:-}" ]; then
+    source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+    sha256sums=('SKIP')
+fi
+
+_src() {
+    if [ -n "${FLATSHOT_SRC:-}" ]; then
+        echo "$FLATSHOT_SRC"
+    else
+        echo "$srcdir/screenshot-rs-$pkgver"
+    fi
+}
+
+prepare() {
+    cd "$(_src)"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$(_src)"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR="$srcdir/target"
+    cargo build --frozen --release
+}
+
+check() {
+    cd "$(_src)"
+    "$srcdir/target/release/flatshot" --self-test
+}
+
+package() {
+    cd "$(_src)"
+    install -Dm755 "$srcdir/target/release/flatshot" "$pkgdir/usr/bin/flatshot"
+    install -Dm644 packaging/flatshot.desktop "$pkgdir/usr/share/applications/flatshot.desktop"
+    install -Dm644 packaging/flatshot-kwin.desktop "$pkgdir/usr/share/applications/flatshot-kwin.desktop"
+    install -Dm644 assets/flatshot.notifyrc "$pkgdir/usr/share/knotifications6/flatshot.notifyrc"
+    install -Dm644 assets/flatshot.notifyrc "$pkgdir/usr/share/knotifications5/flatshot.notifyrc"
+    install -Dm644 assets/flatshot.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/flatshot.svg"
+    install -Dm644 assets/flatshot.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/flatshot.png"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

@@ -141,10 +141,10 @@ pub fn key_name(k: i32) -> String {
     if let Some((_, name)) = NAMES.iter().find(|(code, _)| *code == k) {
         return (*name).to_string();
     }
-    if (0x21..0x0100_0000).contains(&k) {
-        if let Some(c) = char::from_u32(k as u32) {
-            return c.to_uppercase().collect();
-        }
+    if (0x21..0x0100_0000).contains(&k)
+        && let Some(c) = char::from_u32(k as u32)
+    {
+        return c.to_uppercase().collect();
     }
     String::new()
 }
@@ -201,10 +201,10 @@ fn key_from_name(name: &str) -> Option<i32> {
         return None;
     }
     let lower = name.to_ascii_lowercase();
-    if let Some(n) = lower.strip_prefix('f').and_then(|d| d.parse::<i32>().ok()) {
-        if (1..=35).contains(&n) {
-            return Some(key::F1 + n - 1);
-        }
+    if let Some(n) = lower.strip_prefix('f').and_then(|d| d.parse::<i32>().ok())
+        && (1..=35).contains(&n)
+    {
+        return Some(key::F1 + n - 1);
     }
     if let Some((code, _)) = NAMES.iter().find(|(_, n)| n.eq_ignore_ascii_case(name)) {
         return Some(*code);
