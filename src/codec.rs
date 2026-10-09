@@ -113,10 +113,7 @@ fn from_channels(w: u32, h: u32, buf: &[u8], channels: usize, line: usize) -> Re
 pub fn decode_jpeg(bytes: &[u8]) -> Result<Image, String> {
     use zune_core::colorspace::ColorSpace;
     use zune_core::options::DecoderOptions;
-    let opts = DecoderOptions::default()
-        .jpeg_set_out_colorspace(ColorSpace::RGB)
-        .set_max_width(MAX_SIDE as usize)
-        .set_max_height(MAX_SIDE as usize);
+    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB).set_max_width(MAX_SIDE as usize).set_max_height(MAX_SIDE as usize);
     let mut dec = zune_jpeg::JpegDecoder::new_with_options(zune_core::bytestream::ZCursor::new(bytes), opts);
     dec.decode_headers().map_err(|e| format!("JPEG: {e:?}"))?;
     let info = dec.info().ok_or("JPEG: no size")?;
@@ -266,8 +263,7 @@ pub fn encode_jpeg(img: &Image, quality: u8) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let enc = jpeg_encoder::Encoder::new(&mut out, quality.clamp(1, 100));
     // Opaque pictures are BGRA with alpha 255: the encoder drops it.
-    enc.encode(img.data(), img.width() as u16, img.height() as u16, jpeg_encoder::ColorType::Bgra)
-        .map_err(|e| e.to_string())?;
+    enc.encode(img.data(), img.width() as u16, img.height() as u16, jpeg_encoder::ColorType::Bgra).map_err(|e| e.to_string())?;
     Ok(out)
 }
 

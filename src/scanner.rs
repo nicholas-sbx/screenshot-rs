@@ -72,12 +72,8 @@ fn code_box_center(corners: &[Point]) -> Point {
 fn scan_group(luma: &[u8], w: u32, h: u32, formats: &[F], inverted: bool) -> Vec<Code> {
     let Ok(source) = Luma8Source::new_with_slice(luma, w, h) else { return Vec::new() };
     let mut bitmap = BinaryBitmap::new(HybridBinarizer::new(source));
-    let hints = DecodeHints {
-        PossibleFormats: Some(formats.iter().copied().collect()),
-        TryHarder: Some(true),
-        AlsoInverted: Some(inverted),
-        ..Default::default()
-    };
+    let hints =
+        DecodeHints { PossibleFormats: Some(formats.iter().copied().collect()), TryHarder: Some(true), AlsoInverted: Some(inverted), ..Default::default() };
     let mut reader = GenericMultipleBarcodeReader::new(MultiUseMultiFormatReader::default());
     let Ok(results) = reader.decode_multiple_with_hints(&mut bitmap, &hints) else { return Vec::new() };
     let mut codes = Vec::new();

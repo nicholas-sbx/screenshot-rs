@@ -165,9 +165,7 @@ impl Config {
             _ => "#FF4FA3".into(),
         };
         let keys = match data.get("keys") {
-            Some(Value::Object(m)) => {
-                m.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect()
-            }
+            Some(Value::Object(m)) => m.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect(),
             _ => BTreeMap::new(),
         };
         let record_fps = i("record_fps", 30);
@@ -257,10 +255,7 @@ impl Config {
         put("default_tool", self.default_tool.clone().into());
         put("default_color", self.default_color.into());
         put("custom_color", self.custom_color.clone().into());
-        put(
-            "keys",
-            Value::Object(self.keys.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect()),
-        );
+        put("keys", Value::Object(self.keys.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect()));
         put("default_size", self.default_size.into());
         put("record_dir", self.record_dir.clone().into());
         put("record_filename", self.record_filename.clone().into());

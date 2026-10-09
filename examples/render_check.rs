@@ -35,7 +35,9 @@ fn main() {
         p.draw_text(Rect::new(620.0, 340.0, 120.0, 28.0), Align::Center, "Pin · 820 × 560", render::font(12.0, render::DEMIBOLD), c.on_accent);
         let line = text::shape("flatshot", render::font(38.0, render::BOLD));
         let (path, _) = text::outline_path(&line, Point::new(10.0, 400.0));
-        if let Some(path) = path { p.fill_path(&path, render::Color::rgb(0xFF6A3D)); }
+        if let Some(path) = path {
+            p.fill_path(&path, render::Color::rgb(0xFF6A3D));
+        }
     }
     std::fs::write(&out, flatshot::codec::encode_png(&img, false).unwrap()).unwrap();
     println!("wrote {out}");

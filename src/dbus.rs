@@ -35,13 +35,7 @@ pub fn connect_early() {
 /// Is `name` owned on the session bus?
 pub fn has_owner(name: &str) -> bool {
     let Ok(conn) = session() else { return false };
-    let Ok(reply) = conn.call_method(
-        Some("org.freedesktop.DBus"),
-        "/org/freedesktop/DBus",
-        Some("org.freedesktop.DBus"),
-        "NameHasOwner",
-        &(name,),
-    ) else {
+    let Ok(reply) = conn.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "NameHasOwner", &(name,)) else {
         return false;
     };
     reply.body().deserialize::<bool>().unwrap_or(false)

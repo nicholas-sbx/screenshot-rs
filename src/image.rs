@@ -62,11 +62,7 @@ impl Image {
     pub fn new(width: u32, height: u32) -> Result<Image, String> {
         // (fresh mappings and calloc'd memory are zero already)
         let len = check(width, height)?;
-        let pixels = if len >= MAP_ABOVE {
-            Pixels::Map(Mapping::anonymous(len, false).map_err(|e| e.to_string())?)
-        } else {
-            Pixels::Heap(vec![0; len])
-        };
+        let pixels = if len >= MAP_ABOVE { Pixels::Map(Mapping::anonymous(len, false).map_err(|e| e.to_string())?) } else { Pixels::Heap(vec![0; len]) };
         Ok(Image { width, height, pixels })
     }
 
@@ -74,11 +70,7 @@ impl Image {
     /// memory is faulted in now when `populate`.
     pub fn new_populated(width: u32, height: u32) -> Result<Image, String> {
         let len = check(width, height)?;
-        let pixels = if len >= MAP_ABOVE {
-            Pixels::Map(Mapping::anonymous(len, true).map_err(|e| e.to_string())?)
-        } else {
-            Pixels::Heap(vec![0; len])
-        };
+        let pixels = if len >= MAP_ABOVE { Pixels::Map(Mapping::anonymous(len, true).map_err(|e| e.to_string())?) } else { Pixels::Heap(vec![0; len]) };
         Ok(Image { width, height, pixels })
     }
 

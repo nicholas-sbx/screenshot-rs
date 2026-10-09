@@ -9,10 +9,10 @@ use tiny_skia::PathBuilder;
 use crate::geom::{IRect, Point, Rect};
 use crate::image::Image;
 use crate::keyseq;
+use crate::render::Painter;
 use crate::render::paint::{Align, Pen, polygon};
 use crate::render::text::{self, BOLD};
 use crate::render::theme::{self, Color, OUTLINE_DARK, OUTLINE_LIGHT, SIZES};
-use crate::render::Painter;
 use crate::ui::textedit::{KeyResult, Measure, TextEdit};
 
 /// How the keys held while drawing change a shape: Shift squares it (or
@@ -76,10 +76,7 @@ impl Tool {
 
     /// The tools that draw in the chosen colour.
     pub fn uses_color(self) -> bool {
-        matches!(
-            self,
-            Tool::Pen | Tool::Line | Tool::Arrow | Tool::Rect | Tool::Solid | Tool::Ellipse | Tool::Marker | Tool::Text | Tool::Counter
-        )
+        matches!(self, Tool::Pen | Tool::Line | Tool::Arrow | Tool::Rect | Tool::Solid | Tool::Ellipse | Tool::Marker | Tool::Text | Tool::Counter)
     }
 
     /// Tools dragged out from a corner (Shift/Ctrl/Alt change them).
@@ -227,12 +224,7 @@ impl Shape {
     }
 
     pub fn text(pos: Point, color: Color, size: usize) -> Shape {
-        Shape {
-            kind: Kind::Text(TextShape { pos, edit: TextEdit::default(), editing: true, replaces: None }),
-            color,
-            size,
-            hidden: false,
-        }
+        Shape { kind: Kind::Text(TextShape { pos, edit: TextEdit::default(), editing: true, replaces: None }), color, size, hidden: false }
     }
 
     pub fn counter(pos: Point, color: Color, size: usize, number: u32) -> Shape {
@@ -428,8 +420,8 @@ fn paint_cover(p: &mut Painter<'_>, r: Rect, base: &Image, dpr: f32, size: usize
     if r.w < 2.0 || r.h < 2.0 {
         return;
     }
-    let src = IRect::new((r.x * dpr).round() as i32, (r.y * dpr).round() as i32, (r.w * dpr).round() as i32, (r.h * dpr).round() as i32)
-        .intersected(&base.rect());
+    let src =
+        IRect::new((r.x * dpr).round() as i32, (r.y * dpr).round() as i32, (r.w * dpr).round() as i32, (r.h * dpr).round() as i32).intersected(&base.rect());
     if src.is_empty() {
         return;
     }
@@ -544,12 +536,7 @@ pub fn copy_for_editing(s: &Shape, index: usize) -> Option<Shape> {
     let mut edit = TextEdit::new(&t.edit.text);
     edit.place(edit.text.len(), false);
     Some(Shape {
-        kind: Kind::Text(TextShape {
-            pos: t.pos,
-            edit,
-            editing: true,
-            replaces: Some((index, t.edit.text.clone(), t.pos, s.color, s.size)),
-        }),
+        kind: Kind::Text(TextShape { pos: t.pos, edit, editing: true, replaces: Some((index, t.edit.text.clone(), t.pos, s.color, s.size)) }),
         color: s.color,
         size: s.size,
         hidden: false,
@@ -573,8 +560,7 @@ fn paint_text(p: &mut Painter<'_>, t: &TextShape, color: Color, size: usize) {
             let measure = TextMeasure(f);
             for (r, line) in lines.iter().enumerate().take(rb + 1).skip(ra) {
                 let x0 = t.edit.x_of(r, if r == ra { ca } else { 0 }, &measure);
-                let x1 = t.edit.x_of(r, if r == rb { cb } else { line.len() }, &measure)
-                    + if r == rb { 0.0 } else { m.avg_char_width / 2.0 };
+                let x1 = t.edit.x_of(r, if r == rb { cb } else { line.len() }, &measure) + if r == rb { 0.0 } else { m.avg_char_width / 2.0 };
                 p.fill_rect(Rect::new(t.pos.x + x0, t.pos.y + r as f32 * m.line_spacing, x1 - x0, m.height), shade);
             }
         }

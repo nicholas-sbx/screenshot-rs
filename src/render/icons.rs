@@ -14,9 +14,42 @@ use crate::render::theme::Color;
 
 /// Every icon's name.
 pub const NAMES: &[&str] = &[
-    "region", "pen", "line", "arrow", "rect", "solid", "ellipse", "marker", "text", "pixelate", "blur", "counter", "undo",
-    "redo", "screen", "copy", "open", "close", "check", "codes", "codes-off", "pin", "record", "mic", "speaker",
-    "cursor", "cursor-off", "pause", "resume", "stop", "trash", "magnet", "eyedropper", "fit", "save", "save-as",
+    "region",
+    "pen",
+    "line",
+    "arrow",
+    "rect",
+    "solid",
+    "ellipse",
+    "marker",
+    "text",
+    "pixelate",
+    "blur",
+    "counter",
+    "undo",
+    "redo",
+    "screen",
+    "copy",
+    "open",
+    "close",
+    "check",
+    "codes",
+    "codes-off",
+    "pin",
+    "record",
+    "mic",
+    "speaker",
+    "cursor",
+    "cursor-off",
+    "pause",
+    "resume",
+    "stop",
+    "trash",
+    "magnet",
+    "eyedropper",
+    "fit",
+    "save",
+    "save-as",
 ];
 
 struct Ctx<'a, 'b> {
@@ -31,7 +64,6 @@ impl Ctx<'_, '_> {
             self.p.stroke_path(&path, self.pen);
         }
     }
-
 
     fn lines(&mut self, segs: &[&[(f32, f32)]]) {
         let path = polylines(segs);
@@ -125,11 +157,7 @@ fn draw_icon(c: &mut Ctx<'_, '_>, name: &str) {
             c.lines(&[&[(9.0, 14.0), (7.5, 17.5), (11.0, 17.5), (13.0, 17.0)]]);
             c.p.fill_rect(Rect::new(4.0, 19.5, 16.0, 2.0), color.with_alpha_f(color.a as f32 / 255.0 * 0.55));
         }
-        "text" => c.lines(&[
-            &[(6.0, 8.0), (6.0, 5.5), (18.0, 5.5), (18.0, 8.0)],
-            &[(12.0, 5.5), (12.0, 19.0)],
-            &[(9.5, 19.0), (14.5, 19.0)],
-        ]),
+        "text" => c.lines(&[&[(6.0, 8.0), (6.0, 5.5), (18.0, 5.5), (18.0, 8.0)], &[(12.0, 5.5), (12.0, 19.0)], &[(9.5, 19.0), (14.5, 19.0)]]),
         "pixelate" => {
             for i in 0..3 {
                 for j in 0..3 {
@@ -165,11 +193,7 @@ fn draw_icon(c: &mut Ctx<'_, '_>, name: &str) {
             c.rrect(-2.6, -4.2, 5.2, 6.4, 2.6);
             c.p.restore();
         }
-        "save" => c.lines(&[
-            &[(12.0, 4.0), (12.0, 14.0)],
-            &[(7.5, 9.5), (12.0, 14.0), (16.5, 9.5)],
-            &[(4.0, 14.0), (4.0, 19.5), (20.0, 19.5), (20.0, 14.0)],
-        ]),
+        "save" => c.lines(&[&[(12.0, 4.0), (12.0, 14.0)], &[(7.5, 9.5), (12.0, 14.0), (16.5, 9.5)], &[(4.0, 14.0), (4.0, 19.5), (20.0, 19.5), (20.0, 14.0)]]),
         "save-as" => {
             c.lines(&[&[(4.0, 14.0), (4.0, 19.5), (20.0, 19.5), (20.0, 14.0)]]);
             let body = c.closed(&[(8.0, 15.5), (8.7, 12.4), (15.6, 5.5), (18.5, 8.4), (11.6, 15.3)]);
@@ -272,11 +296,9 @@ fn draw_icon(c: &mut Ctx<'_, '_>, name: &str) {
             c.stroke(body);
         }
         "stop" => c.p.fill_rounded_rect(Rect::new(7.0, 7.0, 10.0, 10.0), 2.0, color),
-        "trash" => c.lines(&[
-            &[(4.5, 7.0), (19.5, 7.0)],
-            &[(9.5, 7.0), (9.5, 4.5), (14.5, 4.5), (14.5, 7.0)],
-            &[(6.5, 7.0), (7.5, 19.5), (16.5, 19.5), (17.5, 7.0)],
-        ]),
+        "trash" => {
+            c.lines(&[&[(4.5, 7.0), (19.5, 7.0)], &[(9.5, 7.0), (9.5, 4.5), (14.5, 4.5), (14.5, 7.0)], &[(6.5, 7.0), (7.5, 19.5), (16.5, 19.5), (17.5, 7.0)]])
+        }
         "magnet" => {
             // A horseshoe magnet, tilted: a U-shaped bar with its poles marked off.
             c.p.save();
@@ -342,14 +364,7 @@ pub fn paint(p: &mut Painter<'_>, name: &str, rect: Rect, color: Color) {
         return;
     }
     let (fx, fy) = (d.x - d.x.floor(), d.y - d.y.floor());
-    let key = Key {
-        name,
-        w: (d.w * 4.0).round() as u32,
-        h: (d.h * 4.0).round() as u32,
-        color,
-        fx: (fx * 4.0).round() as u8,
-        fy: (fy * 4.0).round() as u8,
-    };
+    let key = Key { name, w: (d.w * 4.0).round() as u32, h: (d.h * 4.0).round() as u32, color, fx: (fx * 4.0).round() as u8, fy: (fy * 4.0).round() as u8 };
     let cached = {
         let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         cache.get_or_insert_with(HashMap::new).get(&key).cloned()
@@ -396,4 +411,3 @@ pub fn draw_direct(p: &mut Painter<'_>, name: &str, rect: Rect, color: Color) {
     draw_icon(&mut ctx, name);
     p.restore();
 }
-

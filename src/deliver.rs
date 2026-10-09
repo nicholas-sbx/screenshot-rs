@@ -208,7 +208,13 @@ pub fn show_in_folder(path: &Path) -> bool {
     let uri = util::file_uri(path);
     if let Ok(conn) = crate::dbus::session()
         && conn
-            .call_method(Some("org.freedesktop.FileManager1"), "/org/freedesktop/FileManager1", Some("org.freedesktop.FileManager1"), "ShowItems", &(vec![uri.as_str()], ""))
+            .call_method(
+                Some("org.freedesktop.FileManager1"),
+                "/org/freedesktop/FileManager1",
+                Some("org.freedesktop.FileManager1"),
+                "ShowItems",
+                &(vec![uri.as_str()], ""),
+            )
             .is_ok()
     {
         return true;

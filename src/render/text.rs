@@ -231,8 +231,7 @@ pub fn primary_family(mono: bool) -> String {
     let mut s = sys();
     let Some(face) = s.primary_face(mono, MEDIUM) else { return "none".into() };
     let id = s.by_id.iter().find(|(_, v)| **v == face).map(|(k, _)| *k);
-    id.and_then(|id| s.db.face(id).map(|f| f.families.first().map(|f| f.0.clone()).unwrap_or_default()))
-        .unwrap_or_default()
+    id.and_then(|id| s.db.face(id).map(|f| f.families.first().map(|f| f.0.clone()).unwrap_or_default())).unwrap_or_default()
 }
 
 impl System {
@@ -434,14 +433,7 @@ impl System {
         let k = spec.px / upem;
         let mut x = x0;
         for (info, pos) in buf.glyph_infos().iter().zip(buf.glyph_positions()) {
-            line.glyphs.push(Placed {
-                face,
-                id: info.glyph_id,
-                weight: spec.weight,
-                px: spec.px,
-                x: x + pos.x_offset as f32 * k,
-                y: -pos.y_offset as f32 * k,
-            });
+            line.glyphs.push(Placed { face, id: info.glyph_id, weight: spec.weight, px: spec.px, x: x + pos.x_offset as f32 * k, y: -pos.y_offset as f32 * k });
             x += pos.x_advance as f32 * k;
         }
         x
@@ -602,16 +594,7 @@ pub fn metrics(spec: FontSpec) -> Metrics {
 /// Draw a shaped line with its baseline starting at `at` (logical), through
 /// `t` (logical to device), clipped to `clip` (device) and `mask`.
 #[allow(clippy::too_many_arguments)]
-pub fn draw(
-    pm: &mut PixmapMut<'_>,
-    t: Transform,
-    line: &Line,
-    at: Point,
-    color: Color,
-    opacity: f32,
-    clip: Option<IRect>,
-    mask: Option<&Mask>,
-) {
+pub fn draw(pm: &mut PixmapMut<'_>, t: Transform, line: &Line, at: Point, color: Color, opacity: f32, clip: Option<IRect>, mask: Option<&Mask>) {
     if line.glyphs.is_empty() || opacity <= 0.0 || color.a == 0 {
         return;
     }
@@ -714,12 +697,8 @@ pub fn outline_path(line: &Line, at: Point) -> (Option<tiny_skia::Path>, Vec<(Ar
         if let Some(glyph) = s.glyph(key)
             && glyph.color.is_some()
         {
-            let r = crate::geom::Rect::new(
-                at.x + g.x + glyph.left as f32 / 4.0,
-                at.y + g.y + glyph.top as f32 / 4.0,
-                glyph.w as f32 / 4.0,
-                glyph.h as f32 / 4.0,
-            );
+            let r =
+                crate::geom::Rect::new(at.x + g.x + glyph.left as f32 / 4.0, at.y + g.y + glyph.top as f32 / 4.0, glyph.w as f32 / 4.0, glyph.h as f32 / 4.0);
             pictures.push((glyph, r));
         }
     }

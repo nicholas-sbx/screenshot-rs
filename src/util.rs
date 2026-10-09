@@ -114,7 +114,7 @@ pub fn spawn_detached(argv: &[&OsStr], env: &[(&str, &OsStr)]) -> bool {
             libc::setsid();
             match libc::fork() {
                 -1 => Err(std::io::Error::last_os_error()),
-                0 => Ok(()),        // the grandchild goes on to exec
+                0 => Ok(()),         // the grandchild goes on to exec
                 _ => libc::_exit(0), // the middle one leaves at once
             }
         });

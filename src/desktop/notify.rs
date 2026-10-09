@@ -101,9 +101,9 @@ fn ini_section(text: &str, section: &str) -> Vec<(String, String)> {
 /// binary), a copy goes in ~/.local/share.
 pub fn install_events() {
     for version in ["knotifications6", "knotifications5"] {
-        let present = crate::config::data_dirs().iter().any(|d| {
-            util::read_limited(&d.join(version).join("flatshot.notifyrc"), 64 << 10).is_ok_and(|t| t == NOTIFYRC.as_bytes())
-        });
+        let present = crate::config::data_dirs()
+            .iter()
+            .any(|d| util::read_limited(&d.join(version).join("flatshot.notifyrc"), 64 << 10).is_ok_and(|t| t == NOTIFYRC.as_bytes()));
         if present {
             continue;
         }

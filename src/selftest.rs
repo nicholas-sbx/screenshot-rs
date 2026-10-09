@@ -64,10 +64,7 @@ pub fn fake_desktop(w: u32, h: u32) -> Result<Image, String> {
     let mut img = Image::new(w, h)?;
     {
         let mut p = Painter::new(img.pixmap_mut(), 1.0);
-        let stops = vec![
-            tiny_skia::GradientStop::new(0.0, sk(Color::rgb(0x2B3A55))),
-            tiny_skia::GradientStop::new(1.0, sk(Color::rgb(0x5C4B6E))),
-        ];
+        let stops = vec![tiny_skia::GradientStop::new(0.0, sk(Color::rgb(0x2B3A55))), tiny_skia::GradientStop::new(1.0, sk(Color::rgb(0x5C4B6E)))];
         if let (Some(shader), Some(path)) = (
             tiny_skia::LinearGradient::new(
                 tiny_skia::Point::from_xy(0.0, 0.0),
@@ -172,11 +169,7 @@ fn toolbar_item(s: &Session, o: usize, id: &str) -> Result<Point, String> {
 }
 
 fn session(cfg: Config, request: Request, screens: Vec<Screen>, rec: FakeRecorder) -> Session {
-    Session::new(
-        Setup { cfg, request, screens, pointer_taken: false, cursor: None, primary: 0, can_record: true },
-        Box::new(rec),
-        no_wake(),
-    )
+    Session::new(Setup { cfg, request, screens, pointer_taken: false, cursor: None, primary: 0, can_record: true }, Box::new(rec), no_wake())
 }
 
 fn image_screen(img: Arc<Image>, logical: (i32, i32)) -> Screen {
@@ -184,13 +177,7 @@ fn image_screen(img: Arc<Image>, logical: (i32, i32)) -> Screen {
 }
 
 fn test_config(tmp: &Path) -> Config {
-    Config {
-        save_dir: tmp.join("shots").to_string_lossy().into_owned(),
-        notify: false,
-        clipboard: "none".into(),
-        dim_opacity: 45,
-        ..Default::default()
-    }
+    Config { save_dir: tmp.join("shots").to_string_lossy().into_owned(), notify: false, clipboard: "none".into(), dim_opacity: 45, ..Default::default() }
 }
 
 pub fn run() -> i32 {
@@ -240,10 +227,12 @@ fn all(tmp: &Path, out: &Option<PathBuf>) -> R {
 fn overlay_basics(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     let holders = Arc::strong_count(&desktop);
     let cfg = test_config(tmp);
-    let mut s = session(cfg, Request { image: true, ..Default::default() }, vec![image_screen(desktop.clone(), (1600, 1000))], FakeRecorder {
-        problem: None,
-        span: false,
-    });
+    let mut s = session(
+        cfg,
+        Request { image: true, ..Default::default() },
+        vec![image_screen(desktop.clone(), (1600, 1000))],
+        FakeRecorder { problem: None, span: false },
+    );
     check!(s.overlays.len() == 1, "no overlay was created");
     check!(s.st.toolbar_overlay == Some(0) && s.overlays[0].toolbar_visible, "toolbar not on the active monitor");
     check!(s.st.dim.a == (45.0f32 * 2.55).round_ties_even() as u8);
@@ -354,10 +343,12 @@ fn overlay_basics(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
 
 /// Keys: tools, colours, sizes, typing, undo, Enter and Esc.
 fn keys_and_text(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
-    let mut s = session(test_config(tmp), Request { image: true, ..Default::default() }, vec![image_screen(desktop.clone(), (1600, 1000))], FakeRecorder {
-        problem: None,
-        span: false,
-    });
+    let mut s = session(
+        test_config(tmp),
+        Request { image: true, ..Default::default() },
+        vec![image_screen(desktop.clone(), (1600, 1000))],
+        FakeRecorder { problem: None, span: false },
+    );
     s.pointer_enter(0, Point::new(800.0, 500.0));
     tap(&mut s, 0, 0x54, "t", 0);
     check!(s.st.tool == Tool::Text, "{:?}", s.st.tool);
@@ -434,10 +425,12 @@ fn keys_and_text(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
 fn pointer_and_panels(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     let mut cfg = test_config(tmp);
     cfg.rainbow = true;
-    let mut s = session(cfg, Request { image: true, ..Default::default() }, vec![image_screen(desktop.clone(), (1600, 1000))], FakeRecorder {
-        problem: None,
-        span: false,
-    });
+    let mut s = session(
+        cfg,
+        Request { image: true, ..Default::default() },
+        vec![image_screen(desktop.clone(), (1600, 1000))],
+        FakeRecorder { problem: None, span: false },
+    );
     s.pointer_enter(0, Point::new(800.0, 700.0));
     check!(s.cursor(0) == CursorShape::Crosshair);
     // The crosshair keeps following the pointer over the toolbar's buttons;
@@ -497,10 +490,12 @@ fn pointer_and_panels(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) ->
     // typing hex), Enter in the hex field doesn't capture, a click
     // elsewhere closes it, the eyedropper takes a pixel, and it's
     // remembered. Esc closes it and cancels, as ever.
-    let mut s = session(test_config(tmp), Request { image: true, ..Default::default() }, vec![image_screen(desktop.clone(), (1600, 1000))], FakeRecorder {
-        problem: None,
-        span: false,
-    });
+    let mut s = session(
+        test_config(tmp),
+        Request { image: true, ..Default::default() },
+        vec![image_screen(desktop.clone(), (1600, 1000))],
+        FakeRecorder { problem: None, span: false },
+    );
     s.pointer_enter(0, Point::new(800.0, 700.0));
     tap(&mut s, 0, 0x38, "8", 0);
     check!(s.st.color_index == CUSTOM && Some(s.st.custom_color) == Color::parse(&config::load().custom_color), "{:?}", s.st.custom_color);
@@ -563,10 +558,12 @@ fn pointer_and_panels(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) ->
 /// Snapping: off by default and free; on, a selection's corner jumps to the
 /// window's edge (the light window starts at 120, 140).
 fn snapping(tmp: &Path, desktop: Arc<Image>) -> R {
-    let mut s = session(test_config(tmp), Request { image: true, ..Default::default() }, vec![image_screen(desktop.clone(), (1600, 1000))], FakeRecorder {
-        problem: None,
-        span: false,
-    });
+    let mut s = session(
+        test_config(tmp),
+        Request { image: true, ..Default::default() },
+        vec![image_screen(desktop.clone(), (1600, 1000))],
+        FakeRecorder { problem: None, span: false },
+    );
     check!(!s.st.snap_edges, "snapping is on by default");
     s.pointer_enter(0, Point::new(124.0, 145.0));
     tap(&mut s, 0, 0x47, "g", 0);
@@ -600,11 +597,7 @@ fn snapping(tmp: &Path, desktop: Arc<Image>) -> R {
 fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     let mut cfg = test_config(tmp);
     cfg.record_countdown = 2;
-    let screen = Screen {
-        output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 1600, 1000), scale: 1.0 },
-        picture: desktop.clone(),
-        pointer: None,
-    };
+    let screen = Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 1600, 1000), scale: 1.0 }, picture: desktop.clone(), pointer: None };
     let mut s = session(cfg, Request { record: true, ..Default::default() }, vec![screen], FakeRecorder { problem: None, span: false });
     check!(s.st.tool == Tool::Record && s.st.can_record);
     s.pointer_enter(0, Point::new(300.0, 300.0));

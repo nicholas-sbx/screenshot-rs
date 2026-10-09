@@ -273,22 +273,46 @@ impl TextEdit {
             return KeyResult::Commit;
         }
         if k == key::BACKSPACE {
-            let range = if a != b { (a, b) } else if ctrl { (self.word_left(a), a) } else { (self.prev(a), a) };
+            let range = if a != b {
+                (a, b)
+            } else if ctrl {
+                (self.word_left(a), a)
+            } else {
+                (self.prev(a), a)
+            };
             self.delete(range.0, range.1);
             return KeyResult::Used;
         }
         if k == key::DELETE {
-            let range = if a != b { (a, b) } else if ctrl { (a, self.word_right(a)) } else { (a, self.next(a)) };
+            let range = if a != b {
+                (a, b)
+            } else if ctrl {
+                (a, self.word_right(a))
+            } else {
+                (a, self.next(a))
+            };
             self.delete(range.0, range.1);
             return KeyResult::Used;
         }
         if k == key::LEFT {
-            let to = if ctrl { self.word_left(self.cursor) } else if a != b && !shift { a } else { self.prev(self.cursor) };
+            let to = if ctrl {
+                self.word_left(self.cursor)
+            } else if a != b && !shift {
+                a
+            } else {
+                self.prev(self.cursor)
+            };
             self.place(to, shift);
             return KeyResult::Used;
         }
         if k == key::RIGHT {
-            let to = if ctrl { self.word_right(self.cursor) } else if a != b && !shift { b } else { self.next(self.cursor) };
+            let to = if ctrl {
+                self.word_right(self.cursor)
+            } else if a != b && !shift {
+                b
+            } else {
+                self.next(self.cursor)
+            };
             self.place(to, shift);
             return KeyResult::Used;
         }

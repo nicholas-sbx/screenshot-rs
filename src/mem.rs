@@ -38,8 +38,7 @@ impl Mapping {
             flags |= MapFlags::POPULATE;
         }
         // SAFETY: a fresh anonymous mapping aliases nothing.
-        let ptr = unsafe { rustix::mm::mmap_anonymous(std::ptr::null_mut(), len, ProtFlags::READ | ProtFlags::WRITE, flags) }
-            .map_err(io::Error::from)?;
+        let ptr = unsafe { rustix::mm::mmap_anonymous(std::ptr::null_mut(), len, ProtFlags::READ | ProtFlags::WRITE, flags) }.map_err(io::Error::from)?;
         // (No MADV_HUGEPAGE: with the usual THP setting, defrag=madvise, a
         // fault in such a mapping compacts memory first, synchronously, and
         // a 4K picture took 130 ms to copy instead of a few.)
@@ -59,8 +58,7 @@ impl Mapping {
             flags |= MapFlags::POPULATE;
         }
         // SAFETY: mapping a memfd of exactly `len` bytes that we just made.
-        let ptr = unsafe { rustix::mm::mmap(std::ptr::null_mut(), len, ProtFlags::READ | ProtFlags::WRITE, flags, &fd, 0) }
-            .map_err(io::Error::from)?;
+        let ptr = unsafe { rustix::mm::mmap(std::ptr::null_mut(), len, ProtFlags::READ | ProtFlags::WRITE, flags, &fd, 0) }.map_err(io::Error::from)?;
         Ok(Mapping { ptr: NonNull::new(ptr.cast()).ok_or_else(|| io::Error::other("mmap gave null"))?, len, fd: Some(fd) })
     }
 

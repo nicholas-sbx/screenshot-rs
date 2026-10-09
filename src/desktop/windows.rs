@@ -123,8 +123,7 @@ fn kwin(timeout: Duration) -> Option<Desktop> {
     let name = format!("flatshot-windows-{token}");
     let result = (|| {
         write_private(&file, &script).ok()?;
-        conn.call_method(Some(KWIN), "/Scripting", Some("org.kde.kwin.Scripting"), "loadScript", &(file.to_string_lossy().as_ref(), name.as_str()))
-            .ok()?;
+        conn.call_method(Some(KWIN), "/Scripting", Some("org.kde.kwin.Scripting"), "loadScript", &(file.to_string_lossy().as_ref(), name.as_str())).ok()?;
         conn.call_method(Some(KWIN), "/Scripting", Some("org.kde.kwin.Scripting"), "start", &()).ok()?;
         rx.recv_timeout(timeout).ok()
     })();
@@ -198,9 +197,7 @@ fn sway(sock: &std::path::Path) -> Option<Desktop> {
             Some(IRect::new(g("x")?, g("y")?, g("width")?, g("height")?))
         });
         let is_window = (kind == "con" || kind == "floating_con") && node.get("pid").is_some();
-        if is_window
-            && let Some(rect) = rect.filter(|r| r.w > 0 && r.h > 0)
-        {
+        if is_window && let Some(rect) = rect.filter(|r| r.w > 0 && r.h > 0) {
             let app = node.get("app_id").and_then(|v| v.as_str()).or_else(|| node.pointer("/window_properties/class").and_then(|v| v.as_str())).unwrap_or("");
             let title = node.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let w = Window { rect, title: title.chars().take(MAX_TITLE).collect(), app: app.chars().take(MAX_TITLE).collect() };
@@ -294,7 +291,9 @@ mod tests {
 
     #[test]
     fn kwin_report() {
-        let d = parse_kwin(r#"{"windows": [[120, 140, 820, 560, "Notes — Kate", "kate"], [1060, 240, 225, 225, "QR card", "viewer"], ["x"], [0, 0, -5, 10, "bad", ""]], "active": 0, "cursor": [300, 400]}"#);
+        let d = parse_kwin(
+            r#"{"windows": [[120, 140, 820, 560, "Notes — Kate", "kate"], [1060, 240, 225, 225, "QR card", "viewer"], ["x"], [0, 0, -5, 10, "bad", ""]], "active": 0, "cursor": [300, 400]}"#,
+        );
         assert_eq!(d.windows.iter().map(|w| w.title.as_str()).collect::<Vec<_>>(), ["QR card", "Notes — Kate"]);
         assert_eq!(d.active.as_ref().map(|w| w.app.as_str()), Some("kate"));
         assert_eq!(d.cursor, Some(Point::new(300.0, 400.0)));

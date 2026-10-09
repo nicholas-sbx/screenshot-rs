@@ -208,8 +208,7 @@ impl App {
             }
         }
         self.monitors = monitors.clone();
-        let mut pending =
-            Pending { request, monitors, plan, backend: "none", source: Source::Screencopy, rest: order, errors: Vec::new() };
+        let mut pending = Pending { request, monitors, plan, backend: "none", source: Source::Screencopy, rest: order, errors: Vec::new() };
         if self.next_backend(&mut pending) {
             self.pending = Some(pending);
         }
@@ -315,23 +314,11 @@ impl App {
                 (Some(a), None) | (None, Some(a)) => (a, None),
                 (None, None) => return self.fail(&format!("nothing captured on {}", mon.name)),
             };
-            screens.push(Screen {
-                output: Output { name: mon.name.clone(), rect: mon.rect, scale: mon.scale as f32 },
-                picture: Arc::new(picture),
-                pointer,
-            });
+            screens.push(Screen { output: Output { name: mon.name.clone(), rect: mon.rect, scale: mon.scale as f32 }, picture: Arc::new(picture), pointer });
         }
         let detail = screens.iter().map(|s| format!("{} × {}", s.picture.width(), s.picture.height())).collect::<Vec<_>>().join(", ");
         self.clock.step("screenshot", format!("{detail} via {}", p.backend));
-        let setup = Setup {
-            cfg: self.cfg.clone(),
-            request: p.request,
-            screens,
-            pointer_taken: both,
-            cursor: None,
-            primary: 0,
-            can_record: true,
-        };
+        let setup = Setup { cfg: self.cfg.clone(), request: p.request, screens, pointer_taken: both, cursor: None, primary: 0, can_record: true };
         let mut session = Session::new(setup, Box::new(NoRecorder), self.waker.clone());
         session.clock = self.clock.clone();
         if let Some(d) = &self.desktop {

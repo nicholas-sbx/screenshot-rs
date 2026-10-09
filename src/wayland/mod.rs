@@ -413,10 +413,7 @@ impl Wayland {
             Some(r) if self.text_focus.is_some() => {
                 if !self.text_enabled {
                     t.enable();
-                    t.set_content_type(
-                        zwp_text_input_v3::ContentHint::Spellcheck,
-                        zwp_text_input_v3::ContentPurpose::Normal,
-                    );
+                    t.set_content_type(zwp_text_input_v3::ContentHint::Spellcheck, zwp_text_input_v3::ContentPurpose::Normal);
                     self.text_enabled = true;
                 }
                 t.set_cursor_rectangle(r.x.round() as i32, r.y.round() as i32, r.w.round().max(1.0) as i32, r.h.round() as i32);

@@ -53,7 +53,13 @@ impl Wayland {
         let Some(manager) = &self.screencopy else { return Err("the compositor has no wlr-screencopy".into()) };
         self.captures.clear();
         for (i, m) in monitors.iter().enumerate() {
-            let wants: &[bool] = if both { &[false, true] } else if cursor { &[true] } else { &[false] };
+            let wants: &[bool] = if both {
+                &[false, true]
+            } else if cursor {
+                &[true]
+            } else {
+                &[false]
+            };
             for &c in wants {
                 let id = self.captures.len();
                 let frame = manager.capture_output(c as i32, &m.output, &self.qh, FrameData(id));

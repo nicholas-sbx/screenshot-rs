@@ -168,8 +168,8 @@ pub fn read_exactly(fd: &OwnedFd, into: &mut [u8]) -> Result<(), String> {
     let mut got = 0;
     while got < into.len() {
         let mut fds = [PollFd::new(fd, PollFlags::IN)];
-        let ready = rustix::event::poll(&mut fds, Some(&rustix::time::Timespec { tv_sec: 15, tv_nsec: 0 }))
-            .map_err(|e| format!("waiting for the picture: {e}"))?;
+        let ready =
+            rustix::event::poll(&mut fds, Some(&rustix::time::Timespec { tv_sec: 15, tv_nsec: 0 })).map_err(|e| format!("waiting for the picture: {e}"))?;
         if ready == 0 {
             return Err("no picture came from KWin".into());
         }

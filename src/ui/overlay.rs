@@ -14,10 +14,10 @@ use std::sync::Arc;
 
 use crate::geom::{Damage, IPoint, IRect, Point, Rect};
 use crate::image::{self, Canvas, Image};
+use crate::render::Painter;
 use crate::render::paint::{Align, Pen};
 use crate::render::text::{self, BOLD, DEMIBOLD, MEDIUM};
 use crate::render::theme::{self, Color};
-use crate::render::Painter;
 use crate::ui::panels::{CodeChip, ColorPicker, RecordPanel};
 use crate::ui::shapes::{Shape, Tool};
 use crate::ui::snapping::{EdgeMaps, py_round};
@@ -269,12 +269,7 @@ impl Overlay {
         for (yk, y) in ys {
             for (xk, x) in xs {
                 if (xk, yk) != (None, None) && (at.x - x).abs() <= grab && (at.y - y).abs() <= grab {
-                    return Some(Handle::Edges {
-                        left: xk == Some(false),
-                        right: xk == Some(true),
-                        top: yk == Some(false),
-                        bottom: yk == Some(true),
-                    });
+                    return Some(Handle::Edges { left: xk == Some(false), right: xk == Some(true), top: yk == Some(false), bottom: yk == Some(true) });
                 }
             }
         }
@@ -295,8 +290,7 @@ impl Overlay {
         let dpr = self.dpr;
         match rect {
             None => self.base.rect(),
-            Some(r) => IRect::new(py_round(r.x * dpr), py_round(r.y * dpr), py_round(r.w * dpr), py_round(r.h * dpr))
-                .intersected(&self.base.rect()),
+            Some(r) => IRect::new(py_round(r.x * dpr), py_round(r.y * dpr), py_round(r.w * dpr), py_round(r.h * dpr)).intersected(&self.base.rect()),
         }
     }
 
@@ -478,11 +472,7 @@ impl Overlay {
             }
             elements.push(Element { id: Id::Selection, bounds: b, key: hash(&(rect_key(sel), &label, st.theme_key)) });
         } else if let Some(r) = self.rec_rect {
-            elements.push(Element {
-                id: Id::Selection,
-                bounds: self.dev(r.adjusted(-2.0, -2.0, 2.0, 2.0), 2),
-                key: hash(&(rect_key(r), st.theme_key)),
-            });
+            elements.push(Element { id: Id::Selection, bounds: self.dev(r.adjusted(-2.0, -2.0, 2.0, 2.0), 2), key: hash(&(rect_key(r), st.theme_key)) });
             if let Some(n) = st.countdown {
                 let size = 56f32.max(140f32.min(r.w * 0.6).min(r.h * 0.6));
                 let bx = Rect::new(r.center().x - size / 2.0, r.center().y - size / 2.0, size, size);
@@ -501,16 +491,8 @@ impl Overlay {
             let at = self.snap_point.unwrap_or(pos);
             let (x, y) = (py_round(at.x) as f32 + 0.5, py_round(at.y) as f32 + 0.5);
             let color = self.mark_color(st);
-            elements.push(Element {
-                id: Id::CrossV,
-                bounds: self.dev(Rect::new(x - 1.0, 0.0, 2.0, self.height()), 1),
-                key: hash(&(color, (x * 2.0) as i32)),
-            });
-            elements.push(Element {
-                id: Id::CrossH,
-                bounds: self.dev(Rect::new(0.0, y - 1.0, self.width(), 2.0), 1),
-                key: hash(&(color, (y * 2.0) as i32)),
-            });
+            elements.push(Element { id: Id::CrossV, bounds: self.dev(Rect::new(x - 1.0, 0.0, 2.0, self.height()), 1), key: hash(&(color, (x * 2.0) as i32)) });
+            elements.push(Element { id: Id::CrossH, bounds: self.dev(Rect::new(0.0, y - 1.0, self.width(), 2.0), 1), key: hash(&(color, (y * 2.0) as i32)) });
         }
         if let Some(at) = self.loupe_at(st) {
             let (bounds, key) = self.loupe_bounds_key(st, at);
@@ -618,7 +600,11 @@ impl Overlay {
     fn selection_pill_rect(&self, sel: Rect, label: &str) -> Rect {
         let here = sel.intersected(&self.rect());
         let anchor = if here.is_empty() { sel } else { here };
-        pill_rect(label, Point::new(anchor.left(), anchor.top() - 10.0), PillStyle { anchor_bottom: true, keep_inside: true, accent: true, ..Default::default() })
+        pill_rect(
+            label,
+            Point::new(anchor.left(), anchor.top() - 10.0),
+            PillStyle { anchor_bottom: true, keep_inside: true, accent: true, ..Default::default() },
+        )
     }
 
     /// The hint text, where it goes, and how opaque it is.
@@ -626,9 +612,7 @@ impl Overlay {
         let text = hint_text(st, self);
         let w = text::width(&text, text::font(12.0, MEDIUM)) + 28.0;
         let at = Point::new((self.width() - w) / 2.0, (self.height() - 28.0) / 2.0);
-        let near = self.cursor_pos.is_some_and(|c| {
-            Rect::new(at.x, at.y, w, 28.0).adjusted(-HINT_NEAR, -HINT_NEAR, HINT_NEAR, HINT_NEAR).contains(c)
-        });
+        let near = self.cursor_pos.is_some_and(|c| Rect::new(at.x, at.y, w, 28.0).adjusted(-HINT_NEAR, -HINT_NEAR, HINT_NEAR, HINT_NEAR).contains(c));
         (text, at, if near { 0.3 } else { 1.0 })
     }
 
@@ -978,8 +962,20 @@ fn round_corners(img: &mut Image, radius: f32) {
     let ri = r.ceil() as i64;
     for y in 0..h {
         for x in 0..w {
-            let cx = if x < ri { r } else if x >= w - ri { w as f32 - r } else { continue };
-            let cy = if y < ri { r } else if y >= h - ri { h as f32 - r } else { continue };
+            let cx = if x < ri {
+                r
+            } else if x >= w - ri {
+                w as f32 - r
+            } else {
+                continue;
+            };
+            let cy = if y < ri {
+                r
+            } else if y >= h - ri {
+                h as f32 - r
+            } else {
+                continue;
+            };
             // coverage of the pixel by the circle at (cx, cy)
             let (fx, fy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
             let inside_x = (x as f32 + 0.5 < r && fx < 0.0) || (x as f32 + 0.5 > w as f32 - r && fx > 0.0);

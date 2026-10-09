@@ -12,7 +12,10 @@ use crate::render::{Painter, icons};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Look {
     /// An icon button: `size` square.
-    Icon { icon: &'static str, size: f32 },
+    Icon {
+        icon: &'static str,
+        size: f32,
+    },
     /// One of the toolbar's colours (0-6).
     Swatch(usize),
     /// Your own colour, with a rainbow dot.
@@ -20,9 +23,19 @@ pub enum Look {
     /// The three stroke sizes as dots, `0..=2` selected.
     Size(usize),
     /// A labelled button: text, an icon or the record dot, a key badge.
-    Chip { text: String, icon: Option<&'static str>, primary: bool, key: String, on: Option<bool> },
+    Chip {
+        text: String,
+        icon: Option<&'static str>,
+        primary: bool,
+        key: String,
+        on: Option<bool>,
+    },
     /// A row of options, one selected (the recording format).
-    Choice { options: Vec<(String, String, bool)>, value: String, hover: Option<usize> },
+    Choice {
+        options: Vec<(String, String, bool)>,
+        value: String,
+        hover: Option<usize>,
+    },
     Divider,
     Grip,
 }
@@ -48,18 +61,7 @@ pub struct Item {
 
 impl Item {
     pub fn new(id: &'static str, look: Look, hint: impl Into<String>) -> Item {
-        Item {
-            id,
-            rect: Rect::default(),
-            look,
-            hint: hint.into(),
-            enabled: true,
-            active: false,
-            dimmed: false,
-            toggled: None,
-            tint: None,
-            selected: false,
-        }
+        Item { id, rect: Rect::default(), look, hint: hint.into(), enabled: true, active: false, dimmed: false, toggled: None, tint: None, selected: false }
     }
 
     /// The fixed size this control takes in a row.

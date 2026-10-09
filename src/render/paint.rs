@@ -7,8 +7,8 @@
 //! out right. Blending treats the channels alike, so nothing else changes.
 
 use tiny_skia::{
-    FillRule, FilterQuality, LineCap, LineJoin, Mask, Paint, PathBuilder, Pattern, PixmapMut, PixmapPaint, PixmapRef,
-    Shader, SpreadMode, Stroke, StrokeDash, Transform,
+    FillRule, FilterQuality, LineCap, LineJoin, Mask, Paint, PathBuilder, Pattern, PixmapMut, PixmapPaint, PixmapRef, Shader, SpreadMode, Stroke, StrokeDash,
+    Transform,
 };
 
 use crate::geom::{IRect, Point, Rect};

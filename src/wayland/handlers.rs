@@ -2,13 +2,10 @@
 //! monitors, the keyboard, the pointer and touch.
 
 use smithay_client_toolkit::compositor::CompositorHandler;
+use smithay_client_toolkit::data_device_manager::WritePipe;
 use smithay_client_toolkit::data_device_manager::data_device::DataDeviceHandler;
 use smithay_client_toolkit::data_device_manager::data_offer::{DataOfferHandler, DragOffer};
 use smithay_client_toolkit::data_device_manager::data_source::DataSourceHandler;
-use smithay_client_toolkit::data_device_manager::WritePipe;
-use wayland_client::protocol::wl_data_device_manager::DndAction;
-use wayland_client::protocol::wl_data_device::WlDataDevice;
-use wayland_client::protocol::wl_data_source::WlDataSource;
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers};
@@ -19,6 +16,9 @@ use smithay_client_toolkit::shell::wlr_layer::{LayerShellHandler, LayerSurface, 
 use smithay_client_toolkit::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{delegate_dispatch2, delegate_registry, registry_handlers};
+use wayland_client::protocol::wl_data_device::WlDataDevice;
+use wayland_client::protocol::wl_data_device_manager::DndAction;
+use wayland_client::protocol::wl_data_source::WlDataSource;
 use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface, wl_touch};
 use wayland_client::{Connection, Proxy, QueueHandle};
 
@@ -68,7 +68,10 @@ impl LayerShellHandler for App {
                 s.logical = (w, h);
             }
             if !s.configured {
-                crate::timing::log(format!("overlay configured at {w} × {h} ({:?})", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros() % 1_000_000).unwrap_or(0)));
+                crate::timing::log(format!(
+                    "overlay configured at {w} × {h} ({:?})",
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros() % 1_000_000).unwrap_or(0)
+                ));
             }
             s.configured = true;
         }
@@ -195,16 +198,7 @@ impl KeyboardHandler for App {
         self.key_event(event, false, false);
     }
 
-    fn update_modifiers(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: u32,
-        m: Modifiers,
-        _: RawModifiers,
-        _: u32,
-    ) {
+    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: RawModifiers, _: u32) {
         let mut mods = 0;
         if m.ctrl {
             mods |= keyseq::CTRL;

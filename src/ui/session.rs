@@ -101,9 +101,17 @@ pub struct RecordJob {
 pub enum Outcome {
     /// A picture to save / copy (or pin). `at`: where it came from, in
     /// global logical pixels (None for a picture that wasn't the screen).
-    Image { image: Image, shot: Shot, at: Option<IRect>, pin: bool },
+    Image {
+        image: Image,
+        shot: Shot,
+        at: Option<IRect>,
+        pin: bool,
+    },
     /// The colour under the pointer, to copy.
-    Color { hex: String, rgb: (u8, u8, u8) },
+    Color {
+        hex: String,
+        rgb: (u8, u8, u8),
+    },
     /// A code's text, to copy.
     CodeText(String),
     /// A code's link, to open.
@@ -560,10 +568,7 @@ impl Session {
                 if let Some(tb) = &mut ov.toolbar {
                     if let Some(g) = tb.grab {
                         let target = (pos - g).round();
-                        tb.pos = Point::new(
-                            (target.x as f32).min(w - tb.size.0 - 8.0).max(8.0),
-                            (target.y as f32).min(h - tb.size.1 - 8.0).max(8.0),
-                        );
+                        tb.pos = Point::new((target.x as f32).min(w - tb.size.0 - 8.0).max(8.0), (target.y as f32).min(h - tb.size.1 - 8.0).max(8.0));
                         moved = true;
                     } else {
                         let over = tb.item_at(pos).map(|it| it.id);
@@ -583,10 +588,7 @@ impl Session {
                 if let Some(chip) = ov.chips.get_mut(i) {
                     if let Some(g) = chip.grab {
                         let target = (pos - g).round();
-                        chip.pos = Point::new(
-                            (target.x as f32).min(w - chip.size.0 - 8.0).max(8.0),
-                            (target.y as f32).min(h - chip.size.1 - 8.0).max(8.0),
-                        );
+                        chip.pos = Point::new((target.x as f32).min(w - chip.size.0 - 8.0).max(8.0), (target.y as f32).min(h - chip.size.1 - 8.0).max(8.0));
                     } else {
                         let over = chip.item_at(pos).map(|it| it.id);
                         chip.ptr.hovered = over.filter(|id| Some(*id) == chip.ptr.pressed);
@@ -685,11 +687,7 @@ impl Session {
                 let (_, shape) = self.st.text_edit.as_mut().expect("checked");
                 let size = shape.size;
                 let Some(t) = shape.as_text_mut() else { return };
-                if matches!(action, Some("undo") | Some("redo")) && t.edit.undo_edit(action == Some("redo")) {
-                    KeyResult::Used
-                } else {
-                    t.key(press, size)
-                }
+                if matches!(action, Some("undo") | Some("redo")) && t.edit.undo_edit(action == Some("redo")) { KeyResult::Used } else { t.key(press, size) }
             };
             match result {
                 KeyResult::Ignored => {}
@@ -948,13 +946,9 @@ impl Session {
                 continue;
             }
             let d = ov.dpr;
-            let src = IRect::new(
-                py_round((part.x - g.x) as f32 * d),
-                py_round((part.y - g.y) as f32 * d),
-                py_round(part.w as f32 * d),
-                py_round(part.h as f32 * d),
-            )
-            .intersected(&ov.base.rect());
+            let src =
+                IRect::new(py_round((part.x - g.x) as f32 * d), py_round((part.y - g.y) as f32 * d), py_round(part.w as f32 * d), py_round(part.h as f32 * d))
+                    .intersected(&ov.base.rect());
             let dst = IRect::new(
                 ((part.x - area.x) as f32 * scale).round() as i32,
                 ((part.y - area.y) as f32 * scale).round() as i32,
@@ -1485,11 +1479,7 @@ impl Session {
         });
         shot.monitor = ov.output.name.clone();
         let g = ov.output.rect;
-        let at = if self.request.image {
-            None
-        } else {
-            Some(rect.map(|r| r.aligned()).unwrap_or(IRect::new(0, 0, g.w, g.h)).translated(g.x, g.y))
-        };
+        let at = if self.request.image { None } else { Some(rect.map(|r| r.aligned()).unwrap_or(IRect::new(0, 0, g.w, g.h)).translated(g.x, g.y)) };
         self.name_source(&mut shot, window);
         let pin = self.st.pin_mode;
         // The overlay goes (and with it what else held its picture), so a
@@ -1637,8 +1627,7 @@ impl Session {
         if !show {
             return;
         }
-        let formats: Vec<(String, String, bool)> =
-            RECORD_FORMATS.iter().map(|(v, l)| (v.to_string(), l.to_string(), self.problem_for(v).is_none())).collect();
+        let formats: Vec<(String, String, bool)> = RECORD_FORMATS.iter().map(|(v, l)| (v.to_string(), l.to_string(), self.problem_for(v).is_none())).collect();
         let problem = self.record_problem();
         let cfg = &self.st.cfg;
         let view = RecordView {
@@ -1841,11 +1830,7 @@ impl Session {
         if ov.picker_open() && ov.picker.as_ref().is_some_and(|p| p.rect().contains(pos)) {
             return Some(Float::Picker);
         }
-        if ov.rec_rect.is_some()
-            && ov.rec_drag.is_none()
-            && self.st.countdown.is_none()
-            && ov.panel.as_ref().is_some_and(|p| p.rect().contains(pos))
-        {
+        if ov.rec_rect.is_some() && ov.rec_drag.is_none() && self.st.countdown.is_none() && ov.panel.as_ref().is_some_and(|p| p.rect().contains(pos)) {
             return Some(Float::Panel);
         }
         if ov.toolbar_visible && ov.toolbar.as_ref().is_some_and(|t| t.rect().contains(pos)) {
@@ -1963,10 +1948,7 @@ impl Session {
     fn press(&mut self, o: usize, button: Button, pos: Point, mods: i32) {
         // The picker closes on a press anywhere but on it or its swatch
         // (and the press goes on to do what it does).
-        if self.overlays.iter().any(|ov| ov.picker_open())
-            && self.float_at(o, pos) != Some(Float::Picker)
-            && !self.on_custom_swatch(o, pos)
-        {
+        if self.overlays.iter().any(|ov| ov.picker_open()) && self.float_at(o, pos) != Some(Float::Picker) && !self.on_custom_swatch(o, pos) {
             self.close_picker();
         }
         let hover = self.hover_at(o, pos);

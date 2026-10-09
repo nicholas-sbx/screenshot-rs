@@ -42,7 +42,13 @@ impl FakeServer {
             let (conn, click) = (conn.clone(), click.clone());
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(500));
-                let r = zbus::block_on(conn.emit_signal(None::<()>, "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "ActionInvoked", &(id, click.as_str())));
+                let r = zbus::block_on(conn.emit_signal(
+                    None::<()>,
+                    "/org/freedesktop/Notifications",
+                    "org.freedesktop.Notifications",
+                    "ActionInvoked",
+                    &(id, click.as_str()),
+                ));
                 println!("clicked {click} on {id}: {r:?}");
             });
         }

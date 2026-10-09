@@ -7,10 +7,10 @@ use std::cell::RefCell;
 use crate::geom::{Point, Rect};
 use crate::image::Image;
 use crate::keys::KeyPress;
+use crate::render::Painter;
 use crate::render::paint::{Align, Pen, sk};
 use crate::render::text::{self, MEDIUM};
 use crate::render::theme::{self, Color};
-use crate::render::Painter;
 use crate::ui::textedit::{KeyResult, TextEdit};
 use crate::ui::widgets::{Item, Look, Pointer, layout_row, paint_item, paint_panel};
 use crate::util;
@@ -255,8 +255,7 @@ pub enum PickerEvent {
 
 impl ColorPicker {
     pub fn new(color: Color) -> ColorPicker {
-        let mut dropper =
-            Item::new("dropper", Look::Icon { icon: "eyedropper", size: 28.0 }, "Take a colour from the screen  ·  then click a pixel");
+        let mut dropper = Item::new("dropper", Look::Icon { icon: "eyedropper", size: 28.0 }, "Take a colour from the screen  ·  then click a pixel");
         dropper.rect = Rect::new(178.0, 166.0, 28.0, 28.0);
         let mut picker = ColorPicker {
             pos: Point::ZERO,

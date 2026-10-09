@@ -125,8 +125,7 @@ fn parse_signed(s: &str) -> Option<i32> {
     Some(if neg { -v } else { v })
 }
 
-const WITH_VALUE: &[(&str, &str)] =
-    &[("-d", "--delay"), ("-r", "--region"), ("-o", "--output"), ("-i", "--image"), ("", "--backend")];
+const WITH_VALUE: &[(&str, &str)] = &[("-d", "--delay"), ("-r", "--region"), ("-o", "--output"), ("-i", "--image"), ("", "--backend")];
 const FLAGS: &[(&str, &str)] = &[
     ("-f", "--full"),
     ("-m", "--monitor"),

@@ -196,7 +196,8 @@ impl App {
                 _ if copied => "Screenshot copied",
                 _ => "Screenshot taken",
             };
-            let note = notify::Note { summary: summary.into(), body: bits.join("  ·  "), image: result.path.clone(), event: "screenshot", ..Default::default() };
+            let note =
+                notify::Note { summary: summary.into(), body: bits.join("  ·  "), image: result.path.clone(), event: "screenshot", ..Default::default() };
             self.notify(note);
             self.clock.step("notified", "");
         }

@@ -12,9 +12,9 @@ use std::os::fd::OwnedFd;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
+use smithay_client_toolkit::data_device_manager::DataDeviceManagerState;
 use smithay_client_toolkit::data_device_manager::data_device::DataDevice;
 use smithay_client_toolkit::data_device_manager::data_source::CopyPasteSource;
-use smithay_client_toolkit::data_device_manager::DataDeviceManagerState;
 use smithay_client_toolkit::dispatch2::Dispatch2;
 use wayland_client::backend::ObjectData;
 use wayland_client::protocol::wl_seat::WlSeat;

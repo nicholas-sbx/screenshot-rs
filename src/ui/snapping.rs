@@ -110,17 +110,7 @@ impl Cand {
 /// along each candidate position (`first`, `first` + 1, ...), sampled at
 /// `along`. See the Python version's `_candidates`.
 #[allow(clippy::too_many_arguments)]
-fn candidates(
-    lines: &[Vec<u8>],
-    first: i64,
-    at: i64,
-    along: Range,
-    at_along: i64,
-    radius: i64,
-    strong: i64,
-    min_run: i64,
-    rounding: i64,
-) -> Vec<Cand> {
+fn candidates(lines: &[Vec<u8>], first: i64, at: i64, along: Range, at_along: i64, radius: i64, strong: i64, min_run: i64, rounding: i64) -> Vec<Cand> {
     let n = along.len();
     let at_index = (0..n).min_by_key(|&i| (along.get(i) - at_along).abs()).unwrap_or(0) as i64;
     let near = (radius / along.step.max(1)).max(1);
@@ -308,8 +298,7 @@ pub fn snap(maps: &EdgeMaps, x: f32, y: f32, dpr: f32, distance: i64, sensitivit
     // Vertical edges near x: each candidate column, sampled down the rows around y.
     let (c0, c1) = ((px - radius).max(1), (px + radius + 1).min(w));
     let rows = Range { start: (py - reach).max(0), stop: (py + reach + 1).min(h), step };
-    let columns: Vec<Vec<u8>> =
-        (c0..c1).map(|c| (0..rows.len()).map(|i| maps.v[(rows.get(i) * w + c) as usize]).collect()).collect();
+    let columns: Vec<Vec<u8>> = (c0..c1).map(|c| (0..rows.len()).map(|i| maps.v[(rows.get(i) * w + c) as usize]).collect()).collect();
     let xs = candidates(&columns, c0, px, rows, py, radius, strong, min_run, rounding / step);
     // Horizontal edges near y: each candidate row, sampled along the columns around x.
     let (r0, r1) = ((py - radius).max(1), (py + radius + 1).min(h));

@@ -94,11 +94,7 @@ fn grab_kwin(plan: &Plan) -> Result<Vec<Grabbed>, String> {
             }
         }
         let (pictures, times) = kwin::capture(&wants)?;
-        crate::timing::log(format!(
-            "KWin answered in {:.0} ms, pixels in {:.0} ms",
-            times.replied.as_secs_f64() * 1000.0,
-            times.pixels.as_secs_f64() * 1000.0
-        ));
+        crate::timing::log(format!("KWin answered in {:.0} ms, pixels in {:.0} ms", times.replied.as_secs_f64() * 1000.0, times.pixels.as_secs_f64() * 1000.0));
         return Ok(index.into_iter().zip(pictures).map(|((monitor, cursor), picture)| Grabbed { monitor, cursor, picture }).collect());
     }
     let wants: Vec<kwin::Want> = variants.iter().map(|&c| kwin::Want { screen: None, cursor: c }).collect();

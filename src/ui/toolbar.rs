@@ -119,26 +119,18 @@ fn build(v: &View<'_>) -> Vec<Item> {
         s.enabled = !recording;
         items.push(s);
     }
-    let mut custom = Item::new(
-        "color.8",
-        Look::CustomSwatch(v.custom_color),
-        km.hint("Your own colour", "color.8") + "  ·  click to choose it",
-    );
+    let mut custom = Item::new("color.8", Look::CustomSwatch(v.custom_color), km.hint("Your own colour", "color.8") + "  ·  click to choose it");
     custom.selected = v.color_index == SWATCH_COUNT;
     custom.enabled = !recording;
     items.push(custom);
     let keys: Vec<String> = [km.label("size.down"), km.label("size.up")].into_iter().filter(|k| !k.is_empty()).collect();
-    let mut size = Item::new(
-        "size",
-        Look::Size(v.size),
-        if keys.is_empty() { "Stroke size".to_string() } else { format!("Stroke size  ·  {}", keys.join(" ")) },
-    );
+    let mut size =
+        Item::new("size", Look::Size(v.size), if keys.is_empty() { "Stroke size".to_string() } else { format!("Stroke size  ·  {}", keys.join(" ")) });
     size.enabled = !recording;
     items.push(size);
     items.push(Item::new("divider.colors", Look::Divider, ""));
 
-    let found =
-        if v.code_count > 0 { format!("{} code{} found", v.code_count, if v.code_count != 1 { "s" } else { "" }) } else { "No codes found".into() };
+    let found = if v.code_count > 0 { format!("{} code{} found", v.code_count, if v.code_count != 1 { "s" } else { "" }) } else { "No codes found".into() };
     let mut codes = if v.codes_visible {
         Item::new("codes", Look::Icon { icon: "codes", size: 36.0 }, km.hint("Hide QR / barcodes", "codes") + &format!("  ·  {found}"))
     } else {
@@ -150,9 +142,7 @@ fn build(v: &View<'_>) -> Vec<Item> {
     let mut snap = Item::new(
         "snap",
         Look::Icon { icon: "magnet", size: 36.0 },
-        km.hint("Snap selections to edges in the picture", "snap")
-            + "  ·  "
-            + if v.snap { "on (hold Ctrl to place freely)" } else { "off" },
+        km.hint("Snap selections to edges in the picture", "snap") + "  ·  " + if v.snap { "on (hold Ctrl to place freely)" } else { "off" },
     );
     snap.toggled = Some(v.snap);
     items.push(snap);
@@ -161,8 +151,7 @@ fn build(v: &View<'_>) -> Vec<Item> {
         let mut pointer = Item::new(
             "pointer",
             Look::Icon { icon: if shown { "cursor" } else { "cursor-off" }, size: 36.0 },
-            km.hint(if shown { "Hide the mouse pointer" } else { "Show the mouse pointer" }, "pointer")
-                + if shown { "  ·  shown in the capture" } else { "" },
+            km.hint(if shown { "Hide the mouse pointer" } else { "Show the mouse pointer" }, "pointer") + if shown { "  ·  shown in the capture" } else { "" },
         );
         pointer.toggled = Some(shown);
         pointer.enabled = !recording;
@@ -178,10 +167,7 @@ fn build(v: &View<'_>) -> Vec<Item> {
     let mut pin = Item::new(
         "pin",
         Look::Icon { icon: "pin", size: 36.0 },
-        km.hint(
-            if v.pin_mode { "Pinning: the capture stays on screen, not saved" } else { "Pin the capture to the screen instead of saving it" },
-            "pin",
-        ),
+        km.hint(if v.pin_mode { "Pinning: the capture stays on screen, not saved" } else { "Pin the capture to the screen instead of saving it" }, "pin"),
     );
     pin.active = v.pin_mode;
     pin.enabled = !recording;

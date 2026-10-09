@@ -62,10 +62,7 @@ pub fn groups() -> Vec<(&'static str, Vec<&'static str>)> {
     let actions = |f: &dyn Fn(&str) -> bool| BINDINGS.iter().map(|b| b.0).filter(|a| f(a)).collect::<Vec<_>>();
     vec![
         ("Tools", actions(&|a| a.starts_with("tool."))),
-        (
-            "Colours, sizes and undo",
-            actions(&|a| a.starts_with("color.") || a.starts_with("size.") || a == "undo" || a == "redo"),
-        ),
+        ("Colours, sizes and undo", actions(&|a| a.starts_with("color.") || a.starts_with("size.") || a == "undo" || a == "redo")),
         ("While capturing", vec!["codes", "pin", "snap", "pointer", "copy_color"]),
         ("Annotation editor", vec!["save", "save_as", "copy", "fit", "actual_size", "zoom_in", "zoom_out", "close"]),
     ]

@@ -89,14 +89,7 @@ impl Dispatch2<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, App> for FrameDa
 pub struct TextInputData;
 
 impl Dispatch2<zwp_text_input_v3::ZwpTextInputV3, App> for TextInputData {
-    fn event(
-        &self,
-        app: &mut App,
-        _: &zwp_text_input_v3::ZwpTextInputV3,
-        event: zwp_text_input_v3::Event,
-        _: &Connection,
-        _: &QueueHandle<App>,
-    ) {
+    fn event(&self, app: &mut App, _: &zwp_text_input_v3::ZwpTextInputV3, event: zwp_text_input_v3::Event, _: &Connection, _: &QueueHandle<App>) {
         match event {
             zwp_text_input_v3::Event::Enter { surface } => app.wl.text_focus = Some(surface.id()),
             zwp_text_input_v3::Event::Leave { .. } => {
