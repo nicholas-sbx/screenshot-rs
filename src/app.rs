@@ -2,7 +2,7 @@
 //! (later) the tray app. Ties the compositor's events to the session and
 //! the session's outcome to delivery.
 
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use calloop::{EventLoop, LoopHandle};
@@ -11,7 +11,7 @@ use smithay_client_toolkit::seat::pointer::CursorIcon;
 use wayland_client::backend::ObjectId;
 use wayland_client::protocol::wl_output;
 
-use crate::capture;
+use crate::capture::{self, Grabbed, Plan};
 use crate::cli::Args;
 use crate::config::{self, Config};
 use crate::geom::{Damage, IRect, Point};
@@ -39,12 +39,24 @@ pub enum Input {
     Modifiers(i32),
 }
 
+/// Where a capture's pictures will come from.
+enum Source {
+    /// the Wayland connection (wlr-screencopy)
+    Screencopy,
+    /// a worker thread (KWin, the portal, a program), with which backend
+    Worker(mpsc::Receiver<Result<Vec<Grabbed>, String>>),
+}
+
 /// A capture being taken.
 struct Pending {
     request: Request,
     monitors: Vec<Monitor>,
-    /// pictures with and without the pointer are taken
-    both: bool,
+    plan: Plan,
+    backend: &'static str,
+    source: Source,
+    /// the backends left to try if this one fails, and why the others did
+    rest: Vec<&'static str>,
+    errors: Vec<String>,
 }
 
 pub struct App {
@@ -150,33 +162,123 @@ impl App {
 
     /// Take the screens for a capture with `request`.
     fn start_capture(&mut self, request: Request) {
-        self.clock = Clock::new("region capture");
         let monitors = self.wl.monitors();
         if monitors.is_empty() {
             return self.fail("no monitors found");
         }
         // The pointer can be shown or not in the overlay: take both (unless
         // the settings say always or never).
-        let both = self.cfg.region_pointer == "toggle" && !request.image;
-        let cursor = self.cfg.region_pointer == "shown";
-        if let Err(e) = self.wl.start_screencopy(&monitors, cursor, both) {
-            return self.fail(&e);
+        let plan = Plan {
+            monitors: monitors.iter().map(|m| (m.name.clone(), m.rect)).collect(),
+            each_screen: self.cfg.screenshot_method == "screens",
+            cursor: self.cfg.region_pointer == "shown",
+            both: self.cfg.region_pointer == "toggle" && !request.image,
+        };
+        let order = capture::backend_order(&self.cfg.backend, self.wl.screencopy.is_some());
+        // The overlay's surfaces are made now and configured while the
+        // screen is taken: the first frame can go up as the pixels arrive.
+        let namespace = layer_namespace();
+        for (o, mon) in monitors.iter().enumerate() {
+            if let Err(e) = self.wl.add_overlay(Owner::Overlay(o), mon, &namespace) {
+                return self.fail(&e);
+            }
         }
-        self.pending = Some(Pending { request, monitors, both });
+        self.monitors = monitors.clone();
+        let mut pending =
+            Pending { request, monitors, plan, backend: "none", source: Source::Screencopy, rest: order, errors: Vec::new() };
+        if self.next_backend(&mut pending) {
+            self.pending = Some(pending);
+        }
+    }
+
+    /// Start the next backend of `p`; false (and the capture failed) if none is left.
+    fn next_backend(&mut self, p: &mut Pending) -> bool {
+        while !p.rest.is_empty() {
+            let backend = p.rest.remove(0);
+            p.backend = backend;
+            if backend == "screencopy" {
+                match self.wl.start_screencopy(&p.monitors, p.plan.cursor, p.plan.both) {
+                    Ok(()) => {
+                        p.source = Source::Screencopy;
+                        return true;
+                    }
+                    Err(e) => {
+                        p.errors.push(format!("screencopy: {e}"));
+                        continue;
+                    }
+                }
+            }
+            let (tx, rx) = mpsc::channel();
+            let (plan, waker) = (p.plan.clone(), self.waker.clone());
+            let started = std::thread::Builder::new().name("flatshot-capture".into()).spawn(move || {
+                let _ = tx.send(capture::grab(backend, &plan));
+                waker();
+            });
+            match started {
+                Ok(_) => {
+                    p.source = Source::Worker(rx);
+                    return true;
+                }
+                Err(e) => p.errors.push(format!("{backend}: {e}")),
+            }
+        }
+        let why = if p.errors.is_empty() { "no way to capture the screen here".to_string() } else { p.errors.join("\n  ") };
+        self.fail(&format!("could not capture the screen\n  {why}"));
+        false
+    }
+
+    /// The capture in progress, if its pictures are in (or it failed).
+    fn poll_capture(&mut self) {
+        let Some(p) = &mut self.pending else { return };
+        let result = match &p.source {
+            Source::Screencopy if self.wl.screencopy_done() => {
+                let mut out = Vec::new();
+                let mut err = None;
+                for (monitor, cursor, r) in self.wl.take_screencopy() {
+                    match r {
+                        Ok(picture) => out.push(Grabbed { monitor, cursor, picture }),
+                        Err(e) => err = Some(e),
+                    }
+                }
+                match err {
+                    Some(e) => Err(e),
+                    None => Ok(out),
+                }
+            }
+            Source::Worker(rx) => match rx.try_recv() {
+                Ok(r) => r,
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => Err("the capture stopped".into()),
+            },
+            _ => return,
+        };
+        let Some(mut p) = self.pending.take() else { return };
+        match result {
+            Ok(grabbed) => self.captured(p, grabbed),
+            Err(e) => {
+                p.errors.push(format!("{}: {e}", p.backend));
+                if self.next_backend(&mut p) {
+                    self.pending = Some(p);
+                }
+            }
+        }
     }
 
     /// The screens are in: show the overlays.
-    fn captured(&mut self) {
-        let Some(p) = self.pending.take() else { return };
-        let results = self.wl.take_screencopy();
+    fn captured(&mut self, p: Pending, grabbed: Vec<Grabbed>) {
         let n = p.monitors.len();
         let mut plain: Vec<Option<Image>> = (0..n).map(|_| None).collect();
         let mut with: Vec<Option<Image>> = (0..n).map(|_| None).collect();
-        for (m, cursor, r) in results {
-            match r {
-                Ok(img) if cursor => with[m] = Some(img),
-                Ok(img) => plain[m] = Some(img),
-                Err(e) => return self.fail(&format!("could not capture {}: {e}", p.monitors[m].name)),
+        let mut both = false;
+        for g in grabbed {
+            if g.monitor >= n {
+                continue;
+            }
+            if g.cursor && p.plan.both {
+                with[g.monitor] = Some(g.picture);
+                both = true;
+            } else {
+                plain[g.monitor] = Some(g.picture);
             }
         }
         let mut screens = Vec::with_capacity(n);
@@ -196,27 +298,20 @@ impl App {
             });
         }
         let detail = screens.iter().map(|s| format!("{} × {}", s.picture.width(), s.picture.height())).collect::<Vec<_>>().join(", ");
-        self.clock.step("screenshot", format!("{detail} via screencopy"));
+        self.clock.step("screenshot", format!("{detail} via {}", p.backend));
         let setup = Setup {
             cfg: self.cfg.clone(),
             request: p.request,
             screens,
-            pointer_taken: p.both,
+            pointer_taken: both,
             cursor: None,
             primary: 0,
             can_record: true,
         };
-        let session = Session::new(setup, Box::new(NoRecorder), self.waker.clone());
-        let namespace = layer_namespace();
-        for (o, mon) in p.monitors.iter().enumerate() {
-            if let Err(e) = self.wl.add_overlay(Owner::Overlay(o), mon, &namespace) {
-                return self.fail(&e);
-            }
-        }
-        self.monitors = p.monitors;
+        let mut session = Session::new(setup, Box::new(NoRecorder), self.waker.clone());
+        session.clock = self.clock.clone();
         self.session = Some(session);
         self.first_frame = true;
-        self.clock.step("overlays made", "");
     }
 
     fn fail(&mut self, message: &str) {
@@ -242,9 +337,7 @@ impl App {
 
     /// After each round of events: finish what's ready, draw what changed.
     pub fn after_dispatch(&mut self) {
-        if self.pending.is_some() && self.wl.screencopy_done() {
-            self.captured();
-        }
+        self.poll_capture();
         if let Some(s) = &mut self.session {
             s.poll();
             if s.next_deadline().is_some_and(|d| d <= Instant::now()) {
@@ -378,6 +471,7 @@ pub fn run_once(args: &Args) -> i32 {
     let started = Instant::now();
     // Find the fonts while the screen is being captured, so the first frame
     // doesn't wait for them.
+    crate::dbus::connect_early();
     let _ = std::thread::Builder::new().name("flatshot-fonts".into()).spawn(move || {
         crate::render::text::warm_up();
         timing::log(format!("fonts ready at {:.1} ms", started.elapsed().as_secs_f64() * 1000.0));
@@ -441,6 +535,7 @@ pub fn run_once(args: &Args) -> i32 {
         std::thread::sleep(Duration::from_secs_f64(args.delay.min(3600.0)));
     }
     let request = Request { pin: args.pin, scan: !args.no_scan, record: args.record, image: false };
+    app.clock = Clock::since("region capture", started);
     app.start_capture(request);
     while app.exit.is_none() {
         let timeout = app.timeout();

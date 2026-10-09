@@ -6,6 +6,7 @@ pub mod capture;
 pub mod cli;
 pub mod codec;
 pub mod config;
+pub mod dbus;
 pub mod geom;
 pub mod image;
 pub mod ipc;
