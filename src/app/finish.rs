@@ -1,0 +1,216 @@
+//! What a finished session's outcome becomes: a file, the clipboard, a
+//! notification, a sound (or a pin).
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use super::App;
+use crate::config;
+use crate::deliver;
+use crate::desktop::{notify, sound};
+use crate::geom::IRect;
+use crate::image::Image;
+use crate::template::Shot;
+use crate::ui::session::Outcome;
+use crate::util;
+use crate::wayland::clipboard::{Slot, TEXT_MIMES};
+
+/// How long a one-off capture stays to serve the clipboard, when nothing
+/// else can (no wl-copy to hand it to).
+const HOLD_CLIPBOARD: Duration = Duration::from_secs(600);
+
+fn text_mimes() -> Vec<String> {
+    TEXT_MIMES.iter().map(|m| m.to_string()).collect()
+}
+
+impl App {
+    /// The session ended: deliver what came of it.
+    pub(super) fn finish(&mut self, outcome: Outcome) {
+        let from_screen = self.session.as_ref().is_some_and(|s| !s.request.image);
+        if let Some(s) = &self.session {
+            self.clock = s.clock.clone(); // (with the session's steps)
+        }
+        // Without data-control, the clipboard can only be had while an
+        // overlay has the keyboard: it's claimed now, and what goes in it
+        // follows once it's ready.
+        let slot = self.claim_clipboard(&outcome);
+        self.close_session();
+        let _ = self.wl.conn.flush();
+        let code = match outcome {
+            Outcome::Image { image, shot, at, pin } => self.deliver_image(image, shot, at.filter(|_| from_screen), pin, slot),
+            Outcome::Color { hex, rgb: (r, g, b) } => {
+                let copied = self.copy_text(&hex, slot);
+                println!("{hex}");
+                if self.cfg.notify {
+                    let summary = if copied { format!("Copied colour {hex}") } else { format!("Colour {hex}") };
+                    self.notify(notify::Note { summary, body: format!("rgb({r}, {g}, {b})"), event: "copied", ..Default::default() });
+                }
+                0
+            }
+            Outcome::CodeText(text) => {
+                let copied = self.copy_text(&text, slot);
+                println!("{text}");
+                if self.cfg.notify {
+                    let summary = if copied { "Copied from code" } else { "Code" };
+                    let body = util::elide(&util::displayable(&text), 300);
+                    self.notify(notify::Note { summary: summary.into(), body, event: "copied", ..Default::default() });
+                }
+                0
+            }
+            Outcome::OpenLink(url) => {
+                // (only http(s), mailto: and the like are offered as links)
+                if !util::spawn(&["xdg-open", &url]) {
+                    crate::warn!("could not open {url}");
+                }
+                0
+            }
+            Outcome::Record(_) => 0,
+            Outcome::Cancelled => 1,
+            Outcome::Failed(e) => {
+                self.report_failure("Screenshot failed", &e);
+                2
+            }
+        };
+        self.ended(code);
+    }
+
+    /// The session is over with `code`: a one-off capture exits once
+    /// nothing is left for it to do.
+    pub(super) fn ended(&mut self, code: i32) {
+        if self.one_shot {
+            self.finished = Some(code);
+            if self.wl.clipboard.holds() {
+                self.hold_until = Some(Instant::now() + HOLD_CLIPBOARD);
+            }
+        }
+    }
+
+    /// Is a one-off capture done with everything (the clipboard served
+    /// long enough, no pins left)?
+    pub(super) fn may_exit(&self) -> bool {
+        let holding = self.wl.clipboard.holds() && self.hold_until.is_some_and(|t| Instant::now() < t);
+        !holding
+    }
+
+    /// Will a one-off capture hand what it copies to wl-copy (so it can
+    /// end now, with the clipboard still served)?
+    fn hand_off(&self) -> bool {
+        self.one_shot && self.wl.clipboard.without_focus() && util::have("wl-copy")
+    }
+
+    /// Own the clipboard for what `outcome` copies, before the overlays go.
+    fn claim_clipboard(&mut self, outcome: &Outcome) -> Option<Arc<Slot>> {
+        let mimes = match outcome {
+            Outcome::Image { pin: false, .. } => match self.cfg.clipboard.as_str() {
+                "image" => vec!["image/png".to_string()],
+                "path" if self.output_file.as_deref() != Some("-") => text_mimes(),
+                _ => return None,
+            },
+            Outcome::Color { .. } | Outcome::CodeText(_) => text_mimes(),
+            _ => return None,
+        };
+        if self.hand_off() {
+            return None;
+        }
+        let slot = Arc::new(Slot::default());
+        self.wl.clipboard.offer(mimes, slot.clone(), self.wl.serial, &self.wl.qh).then_some(slot)
+    }
+
+    /// Put `data` (as `mimes`) on the clipboard: into the claimed `slot`,
+    /// else handed to wl-copy, else owned now (with data-control).
+    fn fill_clipboard(&mut self, mimes: Vec<String>, data: Arc<Vec<u8>>, slot: Option<Arc<Slot>>) -> bool {
+        if let Some(slot) = slot {
+            slot.fill(data);
+            return true;
+        }
+        if self.hand_off() {
+            return deliver::hand_to_wl_copy(&mimes[0], &data);
+        }
+        self.wl.clipboard.offer(mimes, Slot::ready(data), self.wl.serial, &self.wl.qh)
+    }
+
+    fn copy_text(&mut self, text: &str, slot: Option<Arc<Slot>>) -> bool {
+        self.fill_clipboard(text_mimes(), Arc::new(text.as_bytes().to_vec()), slot)
+    }
+
+    /// Text copied while a session goes on (a code's text from the picker...).
+    pub(super) fn copy_now(&mut self, text: &str) {
+        let slot = Slot::ready(Arc::new(text.as_bytes().to_vec()));
+        if !self.wl.clipboard.offer(text_mimes(), slot, self.wl.serial, &self.wl.qh) {
+            crate::warn!("could not copy: no clipboard");
+        }
+    }
+
+    fn deliver_image(&mut self, image: Image, shot: Shot, at: Option<IRect>, pin: bool, slot: Option<Arc<Slot>>) -> i32 {
+        if let Some(a) = at {
+            config::update_state(vec![("last_region", serde_json::json!([a.x, a.y, a.w, a.h]))]);
+        }
+        if pin {
+            // (pins come with the next step; until then a pin is delivered as usual)
+            crate::warn!("pinning isn't available in this build yet");
+        }
+        let result = match deliver::deliver(&image, &self.cfg, self.output_file.as_deref(), &shot, &mut self.clock) {
+            Ok(r) => r,
+            Err(e) => {
+                if slot.is_some() {
+                    self.wl.clipboard.withdraw();
+                }
+                self.report_failure("Screenshot failed", &e);
+                return 2;
+            }
+        };
+        drop(image);
+        if result.saved
+            && let Some(p) = &result.path
+        {
+            println!("{}", p.display());
+        }
+        let copied = match result.clip.clone() {
+            Some((mimes, data)) => {
+                let ok = self.fill_clipboard(mimes, data, slot);
+                self.clock.step(if ok { "copied" } else { "not copied" }, "");
+                ok
+            }
+            None => {
+                if slot.is_some() {
+                    self.wl.clipboard.withdraw();
+                }
+                false
+            }
+        };
+        let _ = self.wl.conn.flush();
+        if self.cfg.sound {
+            sound::play(&self.cfg.sound_file);
+        }
+        if self.cfg.notify {
+            let (w, h) = result.size;
+            let mut bits = vec![format!("{w} × {h}")];
+            if copied {
+                bits.push(if self.cfg.clipboard == "path" { "path copied" } else { "copied to clipboard" }.to_string());
+            }
+            let summary = match &result.path {
+                Some(p) if result.saved => {
+                    bits.insert(0, util::displayable(&notify::file_name(p)));
+                    "Screenshot saved"
+                }
+                _ if copied => "Screenshot copied",
+                _ => "Screenshot taken",
+            };
+            let note = notify::Note { summary: summary.into(), body: bits.join("  ·  "), image: result.path.clone(), event: "screenshot", ..Default::default() };
+            self.notify(note);
+            self.clock.step("notified", "");
+        }
+        0
+    }
+
+    /// Pop up `note` (or do what its event is set to do instead).
+    pub(super) fn notify(&mut self, note: notify::Note) {
+        notify::send_now(&note, false);
+    }
+
+    /// Say what went wrong: on stderr, and in a notification.
+    pub(super) fn report_failure(&mut self, summary: &str, message: &str) {
+        crate::warn!("{message}");
+        self.notify(notify::Note { summary: summary.into(), body: message.into(), urgent: true, event: "failed", ..Default::default() });
+    }
+}

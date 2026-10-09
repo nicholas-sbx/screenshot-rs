@@ -2,6 +2,13 @@
 //! monitors, the keyboard, the pointer and touch.
 
 use smithay_client_toolkit::compositor::CompositorHandler;
+use smithay_client_toolkit::data_device_manager::data_device::DataDeviceHandler;
+use smithay_client_toolkit::data_device_manager::data_offer::{DataOfferHandler, DragOffer};
+use smithay_client_toolkit::data_device_manager::data_source::DataSourceHandler;
+use smithay_client_toolkit::data_device_manager::WritePipe;
+use wayland_client::protocol::wl_data_device_manager::DndAction;
+use wayland_client::protocol::wl_data_device::WlDataDevice;
+use wayland_client::protocol::wl_data_source::WlDataSource;
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers};
@@ -92,9 +99,12 @@ impl SeatHandler for App {
         &mut self.wl.seats
     }
 
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+    fn new_seat(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        self.wl.clipboard.add_seat(&seat, qh);
+    }
 
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
+        self.wl.clipboard.add_seat(&seat, qh);
         match capability {
             Capability::Keyboard if self.wl.keyboard.is_none() => {
                 let handle = self.loop_handle.clone();
@@ -328,6 +338,35 @@ impl TouchHandler for App {
             self.input(Some(surface), Input::Button(smithay_client_toolkit::seat::pointer::BTN_LEFT, false, at));
         }
     }
+}
+
+impl DataDeviceHandler for App {
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64, _: &wl_surface::WlSurface) {}
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+}
+
+impl DataSourceHandler for App {
+    fn accept_mime(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: Option<String>) {}
+
+    fn send_request(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, mime: String, fd: WritePipe) {
+        self.wl.clipboard.send(&mime, fd.into());
+    }
+
+    fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource) {
+        self.wl.clipboard.core_cancelled(source);
+    }
+
+    fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+    fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: DndAction) {}
+}
+
+impl DataOfferHandler for App {
+    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
+    fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
 }
 
 impl ShmHandler for App {

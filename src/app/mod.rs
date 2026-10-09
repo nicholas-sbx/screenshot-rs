@@ -2,6 +2,8 @@
 //! (later) the tray app. Ties the compositor's events to the session and
 //! the session's outcome to delivery.
 
+mod finish;
+
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -18,10 +20,9 @@ use crate::geom::{Damage, IRect, Point};
 use crate::image::{Canvas, Image};
 use crate::keys::KeyPress;
 use crate::render::theme;
-use crate::template::{self, Shot};
 use crate::timing::{self, Clock};
 use crate::ui::overlay::Output;
-use crate::ui::session::{Button, CursorShape, Outcome, RecordSupport, Request, Screen, Session, Setup, Waker};
+use crate::ui::session::{Button, CursorShape, Effect, RecordSupport, Request, Screen, Session, Setup, Waker};
 use crate::ui::state::Desktop;
 use crate::wayland::{Monitor, Owner, Painted, Wayland};
 
@@ -76,6 +77,14 @@ pub struct App {
     clock: Clock,
     first_frame: bool,
     output_file: Option<String>,
+    /// one capture from the command line (not the tray app)
+    one_shot: bool,
+    /// a one-off capture's exit code, once its session is over
+    finished: Option<i32>,
+    /// until when it stays to serve the clipboard
+    hold_until: Option<Instant>,
+    /// the clipboard's text, being read for the session
+    paste_rx: Option<mpsc::Receiver<Option<String>>>,
 }
 
 impl Painted for Session {
@@ -333,9 +342,10 @@ impl App {
     }
 
     fn fail(&mut self, message: &str) {
-        crate::warn!("{message}");
         self.close_session();
-        self.exit = Some(2);
+        self.pending = None;
+        self.report_failure("Screenshot failed", message);
+        self.ended(2);
     }
 
     fn close_session(&mut self) {
@@ -349,7 +359,8 @@ impl App {
 
     /// How long the loop may sleep.
     fn timeout(&self) -> Option<Duration> {
-        let deadline = self.session.as_ref().and_then(|s| s.next_deadline())?;
+        let session = self.session.as_ref().and_then(|s| s.next_deadline());
+        let deadline = [session, self.hold_until].into_iter().flatten().min()?;
         Some(deadline.saturating_duration_since(Instant::now()))
     }
 
@@ -367,20 +378,39 @@ impl App {
                 self.desktop = Some(d);
             }
         }
+        if let Some(rx) = &self.paste_rx
+            && let Ok(text) = rx.try_recv()
+        {
+            self.paste_rx = None;
+            if let (Some(s), Some(text)) = (&mut self.session, text) {
+                s.paste(&text);
+            }
+        }
         if let Some(s) = &mut self.session {
             s.poll();
             if s.next_deadline().is_some_and(|d| d <= Instant::now()) {
                 s.on_timer(Instant::now());
             }
-            let _ = s.take_effects(); // (the clipboard comes with delivery)
-            if let Some(outcome) = s.take_outcome() {
-                self.finish(outcome);
+            for effect in s.take_effects() {
+                match effect {
+                    Effect::Clipboard(text) => self.copy_now(&text),
+                    Effect::Paste => self.paste_rx = Some(self.wl.clipboard.paste_text(self.waker.clone())),
+                }
             }
+        }
+        if let Some(outcome) = self.session.as_mut().and_then(|s| s.take_outcome()) {
+            self.finish(outcome);
         }
         self.redraw();
         self.update_cursor();
         self.update_text_input();
         let _ = self.wl.conn.flush();
+        if let Some(code) = self.finished
+            && self.exit.is_none()
+            && self.may_exit()
+        {
+            self.exit = Some(code);
+        }
     }
 
     fn redraw(&mut self) {
@@ -428,58 +458,6 @@ impl App {
             _ => None,
         };
         self.wl.set_text_input(caret);
-    }
-
-    /// The session ended: deliver what came of it.
-    fn finish(&mut self, outcome: Outcome) {
-        self.close_session();
-        let _ = self.wl.conn.flush();
-        self.exit = Some(match outcome {
-            Outcome::Image { image, shot, .. } => match self.save(&image, &shot) {
-                Ok(path) => {
-                    println!("{path}");
-                    0
-                }
-                Err(e) => {
-                    crate::warn!("{e}");
-                    2
-                }
-            },
-            Outcome::Color { hex, .. } => {
-                println!("{hex}");
-                0
-            }
-            Outcome::CodeText(text) | Outcome::OpenLink(text) => {
-                println!("{text}");
-                0
-            }
-            Outcome::Record(_) => 0,
-            Outcome::Cancelled => 1,
-            Outcome::Failed(e) => {
-                crate::warn!("{e}");
-                2
-            }
-        });
-    }
-
-    /// (Until delivery is in: save the picture where the settings say.)
-    fn save(&mut self, image: &Image, shot: &Shot) -> Result<String, String> {
-        let ext = match self.cfg.format.as_str() {
-            "jpg" | "jpeg" => "jpg",
-            "webp" => "webp",
-            _ => "png",
-        };
-        let path = match &self.output_file {
-            Some(p) => std::path::PathBuf::from(p),
-            None => template::screenshot_path(&self.cfg, shot, image.size(), ext, false),
-        };
-        let bytes = crate::codec::encode(image, ext, self.cfg.quality.clamp(1, 100) as u8)?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
-        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-        self.clock.step("saved", path.display().to_string());
-        Ok(path.display().to_string())
     }
 }
 
@@ -555,6 +533,10 @@ pub fn run_once(args: &Args) -> i32 {
         clock: Clock::since("region capture", started),
         first_frame: false,
         output_file: args.output.clone(),
+        one_shot: true,
+        finished: None,
+        hold_until: None,
+        paste_rx: None,
     };
     // The monitors (and xdg-output's logical layout) arrive in two rounds.
     for _ in 0..2 {
@@ -574,6 +556,7 @@ pub fn run_once(args: &Args) -> i32 {
     let request = Request { pin: args.pin, scan: !args.no_scan, record: args.record, image: false };
     app.clock = Clock::since("region capture", started);
     app.start_capture(request);
+    app.after_dispatch(); // (it may have ended already)
     while app.exit.is_none() {
         let timeout = app.timeout();
         if let Err(e) = event_loop.dispatch(timeout, &mut app) {

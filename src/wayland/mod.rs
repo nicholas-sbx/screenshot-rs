@@ -3,6 +3,7 @@
 //! memory buffers (no GPU context to set up, nothing to wait for), and only
 //! the parts that changed are redrawn, once per frame of the display.
 
+pub mod clipboard;
 pub mod handlers;
 pub mod protocols;
 pub mod screencopy;
@@ -149,6 +150,7 @@ pub struct Wayland {
     pub surfaces: Vec<Surf>,
     pub buffer_released: bool,
     pub captures: Vec<screencopy::Grab>,
+    pub clipboard: clipboard::Clipboard,
 }
 
 impl Wayland {
@@ -186,6 +188,7 @@ impl Wayland {
             surfaces: Vec::new(),
             buffer_released: false,
             captures: Vec::new(),
+            clipboard: clipboard::Clipboard::bind(&globals, &qh),
             conn,
             qh,
         };

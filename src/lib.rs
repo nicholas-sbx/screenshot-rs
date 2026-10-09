@@ -7,6 +7,7 @@ pub mod cli;
 pub mod codec;
 pub mod config;
 pub mod dbus;
+pub mod deliver;
 pub mod desktop;
 pub mod geom;
 pub mod image;

@@ -355,6 +355,18 @@ pub fn data_home() -> PathBuf {
     xdg_dir("XDG_DATA_HOME", ".local/share")
 }
 
+/// Where shared data is looked for: the user's own first, then the system's.
+pub fn data_dirs() -> Vec<PathBuf> {
+    let rest = std::env::var("XDG_DATA_DIRS").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    let mut dirs = vec![data_home()];
+    for d in rest.split(':').map(PathBuf::from).filter(|d| d.is_absolute()) {
+        if !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    dirs
+}
+
 pub fn config_path() -> PathBuf {
     config_home().join("flatshot").join("config.json")
 }
