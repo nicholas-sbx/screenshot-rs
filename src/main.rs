@@ -37,6 +37,8 @@ fn main() -> std::process::ExitCode {
                 flatshot::app::run_tray(&args)
             } else if args.image.is_some() {
                 flatshot::app::run_editor(&args)
+            } else if args.settings {
+                flatshot::app::run_settings()
             } else {
                 flatshot::app::run_once(&args)
             };

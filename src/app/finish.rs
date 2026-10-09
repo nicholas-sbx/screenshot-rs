@@ -90,7 +90,7 @@ impl App {
     /// long enough, no pins left)?
     pub(super) fn may_exit(&self) -> bool {
         let holding = self.wl.clipboard.holds() && self.hold_until.is_some_and(|t| Instant::now() < t);
-        !holding && !self.has_pins() && !self.has_editors()
+        !holding && !self.has_pins() && !self.has_editors() && !self.has_settings()
     }
 
     /// Will a one-off capture hand what it copies to wl-copy (so it can

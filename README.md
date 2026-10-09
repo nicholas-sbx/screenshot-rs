@@ -59,7 +59,7 @@ Or `packaging/arch/PKGBUILD` with `makepkg`, or `packaging/build-packages.sh` (w
 ## Getting started
 
 1. Start **Flatshot** from the app menu. This runs `flatshot --tray`, and the icon appears in the system tray.
-2. On KDE the shortcuts are registered for you: <kbd>Ctrl</kbd>+<kbd>Print</kbd> (region), <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Print</kbd> (active window) and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Print</kbd> (all screens). Change them, or set keys for current monitor, last region, pin and record, in **System Settings → Shortcuts → Flatshot**.
+2. On KDE the shortcuts are registered for you: <kbd>Ctrl</kbd>+<kbd>Print</kbd> (region), <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Print</kbd> (active window) and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Print</kbd> (all screens). Change them, or set keys for current monitor, last region, pin and record, on the Shortcuts page of Flatshot's settings (or in **System Settings → Shortcuts → Flatshot**).
 3. On other desktops, bind the command `flatshot` (or `flatshot --full`, ...) in your desktop's keyboard settings: it hands the capture to the running tray app at once, or captures by itself when there is none.
 
 Replacing the Python Flatshot: starting this one's tray app asks the old one to quit, and takes over its shortcuts and settings (`~/.config/flatshot/config.json` is shared).
@@ -93,6 +93,8 @@ flatshot -r 800x600+100+50    an exact area (logical pixels)
 flatshot -d 3                 after 3 seconds
 flatshot -o file.png          save there ("-" writes PNG to stdout)
 flatshot --no-copy --no-save  just print the path / don't keep a file
+flatshot -i picture.png       annotate a picture
+flatshot --settings           the settings window
 flatshot --tray               the tray app
 flatshot --quit               stop the tray app
 flatshot -v                   how long each step takes, on stderr
@@ -110,7 +112,7 @@ Exit codes: 0 captured, 1 cancelled, 2 failed.
 | Shortcuts | KGlobalAccel | your compositor's key bindings | your desktop's key bindings |
 | Clipboard | data-control (after the overlay is gone) | data-control | while the overlay has the keyboard |
 
-Settings live in `~/.config/flatshot/config.json` (the same file and keys as the Python Flatshot); `flatshot --print-config` shows them all.
+Change settings in the settings window (the tray menu's **Settings…**, or `flatshot --settings`): they apply from the next capture. They live in `~/.config/flatshot/config.json` (the same file and keys as the Python Flatshot); `flatshot --print-config` shows them all.
 
 ## Security
 

@@ -76,9 +76,9 @@ jobs:
         run: cargo test --locked
       - name: Self-test
         run: |
-          cargo build --locked --examples
+          cargo build --locked --bins --examples
           FLATSHOT_SELFTEST_OUT=shots ./target/debug/flatshot --self-test
-      - name: End to end on a headless sway (overlay, pins, editor, instant captures, clipboard, tray app)
+      - name: End to end on a headless sway (overlay, pins, editor, settings, instant captures, clipboard, tray app)
         run: timeout 300 ./tests/e2e.sh
       - uses: actions/upload-artifact@v4
         if: always()

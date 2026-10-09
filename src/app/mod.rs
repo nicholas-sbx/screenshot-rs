@@ -6,9 +6,11 @@ mod capture;
 mod editor;
 mod finish;
 mod pins;
+mod settings;
 mod tray;
 
 pub use capture::{Job, Mode, last_region};
+pub use settings::run_settings;
 pub use tray::{replace_older_tray, run_tray};
 
 use std::sync::{Arc, mpsc};
@@ -84,6 +86,8 @@ pub struct App {
     next_editor: u32,
     /// "Annotate an image…": the file dialog's answer
     open_dialog: Option<mpsc::Receiver<Result<Option<std::path::PathBuf>, String>>>,
+    /// the settings window
+    settings: Option<settings::SettingsWin>,
 }
 
 impl Painted for Session {
@@ -118,6 +122,7 @@ impl App {
             Some(Owner::Pin(id)) => return self.pin_input(id, ev),
             Some(Owner::Menu(id)) => return self.menu_input(id, ev),
             Some(Owner::Editor(id)) => return self.editor_input(id, ev),
+            Some(Owner::Settings) => return self.settings_input(ev),
             _ => {}
         }
         let Some(s) = &mut self.session else { return };
@@ -155,8 +160,10 @@ impl App {
     /// Text from an input method.
     pub fn commit_string(&mut self, text: &str) {
         let focus = self.wl.text_focus.as_ref().or(self.wl.keyboard_on.as_ref()).and_then(|id| self.wl.owner_of(id));
-        if let Some(Owner::Editor(id)) = focus {
-            return self.editor_commit_string(id, text);
+        match focus {
+            Some(Owner::Editor(id)) => return self.editor_commit_string(id, text),
+            Some(Owner::Settings) => return self.settings_commit_string(text),
+            _ => {}
         }
         if let Some(s) = &mut self.session {
             s.commit_string(text);
@@ -174,6 +181,7 @@ impl App {
             Some(Owner::Pin(p)) => self.close_pin(p),
             Some(Owner::Menu(p)) => self.close_menu(p),
             Some(Owner::Editor(e)) => self.editor_close_requested(e),
+            Some(Owner::Settings) => self.close_settings(),
             None => {}
         }
     }
@@ -234,6 +242,7 @@ impl App {
         self.poll_notifications();
         self.poll_editors();
         self.poll_open_dialog();
+        self.poll_settings();
         if let Some(rx) = &self.paste_rx
             && let Ok(text) = rx.try_recv()
         {
@@ -272,6 +281,7 @@ impl App {
     fn redraw(&mut self) {
         self.redraw_pins();
         self.redraw_editors();
+        self.redraw_settings();
         let Some(s) = &mut self.session else { return };
         let mut drawn = false;
         for i in 0..self.wl.surfaces.len() {
@@ -294,6 +304,10 @@ impl App {
             (Owner::Menu(_), _) => CursorShape::Arrow,
             (Owner::Editor(id), _) => match self.editors.iter().find(|e| e.id == id) {
                 Some(e) => e.ed.cursor(),
+                None => return,
+            },
+            (Owner::Settings, _) => match &self.settings {
+                Some(w) => w.s.cursor(),
                 None => return,
             },
             _ => return,
@@ -319,8 +333,9 @@ impl App {
 
     fn update_text_input(&mut self) {
         let caret = match (&self.session, &self.wl.keyboard_on) {
-            (_, Some(on)) if matches!(self.wl.owner_of(on), Some(Owner::Editor(_))) => match self.wl.owner_of(on) {
+            (_, Some(on)) if matches!(self.wl.owner_of(on), Some(Owner::Editor(_) | Owner::Settings)) => match self.wl.owner_of(on) {
                 Some(Owner::Editor(id)) => self.editors.iter().find(|e| e.id == id).filter(|e| e.ed.wants_text()).and_then(|e| e.ed.text_input()),
+                Some(Owner::Settings) => self.settings.as_ref().filter(|w| w.s.wants_text()).and_then(|w| w.s.text_input()),
                 _ => None,
             },
             (Some(s), Some(on)) => match self.wl.owner_of(on) {
@@ -394,6 +409,7 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         editors: Vec::new(),
         next_editor: 0,
         open_dialog: None,
+        settings: None,
     };
     // The monitors (and xdg-output's logical layout) arrive in two rounds.
     for _ in 0..2 {

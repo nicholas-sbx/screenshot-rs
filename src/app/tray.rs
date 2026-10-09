@@ -35,6 +35,8 @@ pub enum Event {
     TrayShown(Tray),
     /// the menu's entries, with their shortcuts
     Menu(Vec<MenuItem>),
+    /// KDE's shortcuts are registered, or can't be
+    ShortcutsReady(bool),
 }
 
 /// What a notification's buttons act on.
@@ -54,6 +56,8 @@ pub struct TrayState {
     note_events: Option<std::sync::mpsc::Receiver<NoteEvent>>,
     pub targets: HashMap<u64, NoteTarget>,
     ipc: Option<ipc::Server>,
+    /// KDE's shortcuts are registered (None: still at it)
+    pub shortcuts: Option<bool>,
 }
 
 /// The menu: (key, label); shortcuts' keys are filled in when known.
@@ -171,9 +175,13 @@ impl App {
                 let _ = to_main.send(Event::Shortcut(e, Instant::now()));
             }) {
                 Ok(()) => {
+                    let _ = tx.send(Event::ShortcutsReady(true));
                     let _ = tx.send(Event::Menu(menu_items(&shortcut_keys())));
                 }
-                Err(e) => crate::warn!("global shortcuts unavailable ({e})"),
+                Err(e) => {
+                    crate::warn!("global shortcuts unavailable ({e})");
+                    let _ = tx.send(Event::ShortcutsReady(false));
+                }
             }
             notify::install_events();
         });
@@ -187,6 +195,7 @@ impl App {
                 self.shortcut(&action, Duration::ZERO, at);
             }
             Event::Shortcut(ShortcutEvent::Changed, _) => {
+                self.shortcuts_changed();
                 if self.tray.tray.is_some() {
                     let tx = self.events.clone();
                     let _ = std::thread::Builder::new().name("flatshot-keys".into()).spawn(move || {
@@ -197,6 +206,10 @@ impl App {
                 }
             }
             Event::TrayShown(t) => self.tray.tray = Some(t),
+            Event::ShortcutsReady(ok) => {
+                self.tray.shortcuts = Some(ok);
+                self.shortcuts_ready(ok);
+            }
             Event::Menu(items) => {
                 if let Some(t) = &self.tray.tray {
                     t.set_items(items);
@@ -347,10 +360,6 @@ impl App {
         let now: Vec<(String, IRect, f64)> = self.wl.monitors().into_iter().map(|m| (m.name, m.rect, m.scale as f64)).collect();
         let same = at.is_some() && now == layout;
         self.pin(std::sync::Arc::new(image), at.filter(|_| same), at.map(|a| (a.w as u32, a.h as u32)));
-    }
-
-    fn show_settings(&mut self) {
-        crate::warn!("the settings window isn't in this build yet");
     }
 
     fn quit(&mut self) {

@@ -404,6 +404,13 @@ impl App {
         }
     }
 
+    /// The colour theme changed: the pins' edges follow.
+    pub(super) fn restyle_pins(&mut self) {
+        for pin in &mut self.pins {
+            pin.dirty = true;
+        }
+    }
+
     /// Draw the pins (and their menus) that changed.
     pub(super) fn redraw_pins(&mut self) {
         for i in 0..self.wl.surfaces.len() {

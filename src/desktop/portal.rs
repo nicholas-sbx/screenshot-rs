@@ -115,9 +115,21 @@ pub fn save_file(title: &str, current: &Path, list: &[(String, Vec<String>)], cu
 
 /// The desktop's "Open" dialog, starting in `folder`. None if cancelled.
 pub fn open_file(title: &str, folder: &Path, list: &[(String, Vec<String>)]) -> Result<Option<PathBuf>, String> {
+    open(title, folder, list, false)
+}
+
+/// The desktop's folder chooser, starting in `folder`. None if cancelled.
+pub fn choose_folder(title: &str, folder: &Path) -> Result<Option<PathBuf>, String> {
+    open(title, folder, &[], true)
+}
+
+fn open(title: &str, folder: &Path, list: &[(String, Vec<String>)], directory: bool) -> Result<Option<PathBuf>, String> {
     let mut options: HashMap<&'static str, Value<'static>> = HashMap::new();
     options.insert("modal", Value::Bool(true));
     options.insert("multiple", Value::Bool(false));
+    if directory {
+        options.insert("directory", Value::Bool(true));
+    }
     if folder.is_dir() {
         options.insert("current_folder", Value::from(folder_bytes(folder)));
     }

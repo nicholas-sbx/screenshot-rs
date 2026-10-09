@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end checks on a headless sway: captures driven by a virtual
 # pointer and keyboard, instant captures, the clipboard, and the tray app
-# against stand-ins for KDE's shortcut service, tray and notifications.
+# against stand-ins for KDE's shortcut service, tray and notifications,
+# and the editor and settings windows.
 #
 # Needs sway, wl-clipboard and dbus (dbus-run-session); run from the
 # repository root after `cargo build --examples`. BIN picks the flatshot
@@ -131,7 +132,17 @@ if kill -0 $pid 2>/dev/null; then fail "the editor didn't close"; kill $pid; els
 [ "$(md5sum < "$work/edit.png")" != "$before" ] && pass "editor saved the drawing" || fail "editor didn't save"
 expect_size "edited picture" "$work/edit.png" "256 256"
 
-# 5. Instant captures.
+# 5. The settings window: a change is saved at once; Esc closes it.
+$BIN --settings > "$work/settings.log" 2>&1 &
+pid=$!
+sleep 1.2
+# The Capture page, then its first row's slider (screen shading) near its left end.
+$EX/inject click 57 93 sleep 300 click 1360 105 sleep 300 key Escape sleep 300
+for _ in $(seq 30); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
+if kill -0 $pid 2>/dev/null; then fail "the settings window didn't close"; kill $pid; else pass "settings closed with Esc"; fi
+grep -q '"dim_opacity": 15,' "$XDG_CONFIG_HOME/flatshot/config.json" && pass "setting saved" || fail "setting not saved"
+
+# 6. Instant captures.
 $BIN -f > /dev/null && expect_size "all screens" "$(newest)" "1600 1000" || fail "--full failed"
 $BIN -r 320x240+10+20 > /dev/null && expect_size "exact region" "$(newest)" "320 240" || fail "--region failed"
 $BIN -l > /dev/null && expect_size "last region" "$(newest)" "320 240" || fail "--last-region failed"
@@ -139,7 +150,7 @@ $BIN -m > /dev/null && expect_size "current monitor" "$(newest)" "1600 1000" || 
 $BIN -r 64x48+0+0 -o "$work/out.png" > /dev/null && expect_size "--output" "$work/out.png" "64 48" || fail "--output failed"
 $BIN -r 64x48+0+0 -o - --no-copy > "$work/stdout.png" && expect_size "PNG to stdout" "$work/stdout.png" "64 48" || fail "-o - failed"
 
-# 6. The tray app, with stand-ins for KDE's services.
+# 7. The tray app, with stand-ins for KDE's services.
 cat > "$work/tray.sh" <<SH
 #!/usr/bin/env bash
 set -u

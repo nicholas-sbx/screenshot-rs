@@ -327,11 +327,22 @@ pub fn home() -> PathBuf {
 }
 
 fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
+    // (unit tests never touch the real settings)
+    #[cfg(test)]
+    if var != "XDG_DATA_HOME" {
+        return test_home().join(fallback);
+    }
     match std::env::var_os(var) {
         // The spec says relative values are invalid and must be ignored.
         Some(v) if Path::new(&v).is_absolute() => PathBuf::from(v),
         _ => home().join(fallback),
     }
+}
+
+#[cfg(test)]
+fn test_home() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| std::env::temp_dir().join(format!("flatshot-test-{}", std::process::id()))).clone()
 }
 
 pub fn config_home() -> PathBuf {

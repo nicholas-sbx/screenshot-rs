@@ -61,6 +61,8 @@ pub enum Owner {
     Menu(u32),
     /// an annotation editor's window, by id
     Editor(u32),
+    /// the settings window
+    Settings,
 }
 
 /// Something drawn on surfaces: what changed, and how to draw a part of it.

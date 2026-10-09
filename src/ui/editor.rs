@@ -249,6 +249,11 @@ impl Editor {
         self.damaged = true;
     }
 
+    /// The colour theme changed: all of it is drawn again.
+    pub fn restyle(&mut self) {
+        self.damaged = true;
+    }
+
     pub fn set_scale(&mut self, scale: f32) {
         if (scale - self.scale).abs() > 1e-3 {
             self.scale = scale;
