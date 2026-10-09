@@ -10,6 +10,14 @@ fn main() -> std::process::ExitCode {
             eprintln!("{text}");
             std::process::ExitCode::from(2)
         }
-        flatshot::cli::Parsed::Run(_args) => std::process::ExitCode::SUCCESS,
+        flatshot::cli::Parsed::Run(args) => {
+            if args.verbose {
+                flatshot::timing::enable();
+            }
+            if args.self_test {
+                return std::process::ExitCode::from(flatshot::selftest::run() as u8);
+            }
+            std::process::ExitCode::SUCCESS
+        }
     }
 }

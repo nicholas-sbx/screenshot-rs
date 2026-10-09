@@ -12,6 +12,7 @@ pub mod keyseq;
 pub mod mem;
 pub mod render;
 pub mod scanner;
+pub mod selftest;
 pub mod template;
 pub mod timing;
 pub mod ui;
