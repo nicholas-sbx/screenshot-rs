@@ -287,7 +287,8 @@ pub fn encode_webp_lossless(img: &Image, alpha: bool) -> Result<Vec<u8>, String>
 
 /// (config value, label, lossy) for each format Flatshot can write here.
 pub fn writable_formats() -> Vec<(&'static str, &'static str, bool)> {
-    let mut out = vec![("png", "PNG", false), ("jpg", "JPEG", true), ("webp", "WebP", false)];
+    // (WebP is lossy, with a quality, through cwebp; lossless without it)
+    let mut out = vec![("png", "PNG", false), ("jpg", "JPEG", true), ("webp", "WebP", crate::util::have("cwebp"))];
     if crate::util::have("avifenc") {
         out.push(("avif", "AVIF", true));
     }
