@@ -53,7 +53,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 rustix = { version = "1", features = ["fs", "mm", "pipe", "net", "process", "thread", "event", "time", "stdio", "rand", "system"] }
 libc = "0.2"
 # X11 sessions (the keymap is compiled by libxkbcommon, as on Wayland).
-x11rb = { version = "0.14", default-features = false, features = ["allow-unsafe-code", "randr", "shm", "xfixes", "xkb", "cursor", "resource_manager"] }
+x11rb = { version = "0.14", default-features = false, features = ["randr", "shm", "xfixes", "xkb", "cursor", "resource_manager"] }
 xkbcommon = { version = "0.8", default-features = false }
 
 [dev-dependencies]
