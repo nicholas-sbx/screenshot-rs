@@ -1,6 +1,6 @@
 [package]
 name = "flatshot"
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.88"
 description = "ShareX-style region screenshots for Wayland and X11 (KDE first) with a floating draw toolbar and QR/barcode scanning"
