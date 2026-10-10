@@ -44,6 +44,8 @@ pub enum Request {
     BlockShortcuts(bool),
     /// the colour theme changed: everything repaints
     ThemeChanged,
+    /// the tray icon's look changed: the tray shows it at once
+    TrayIconChanged(String),
     CopyText(String),
     Paste,
     /// Esc or Ctrl+W: done with the window
@@ -294,6 +296,13 @@ impl Settings {
             rows: vec![
                 Row::new("theme", "Theme", "For the toolbar, the settings and the other panels. Your drawing colours stay the same.", Control::None)
                     .below(Control::Segmented { options: theme_options, dots, value: theme_value }),
+                Row::new(
+                    "tray_icon",
+                    "Tray icon",
+                    "White and black are plain outlines, for panels that use symbolic icons. Auto picks white or black to suit a dark or light desktop.",
+                    Control::None,
+                )
+                .below(seg(&[("color", "Colour"), ("theme", "Theme"), ("white", "White"), ("black", "Black"), ("auto", "Auto")], &c.tray_icon)),
                 Row::new("autostart", "Start at login", "Keeps Flatshot RS in the system tray so shortcuts work.", Control::Toggle(autostart::enabled())),
                 Row::new(
                     "config_folder",
@@ -1022,6 +1031,9 @@ impl Settings {
                 if id == "theme" {
                     theme::use_theme(&v);
                     self.requests.push(Request::ThemeChanged);
+                }
+                if id == "tray_icon" {
+                    self.requests.push(Request::TrayIconChanged(v.clone()));
                 }
                 let json = if id == "record_fps" { Value::from(v.parse::<i64>().unwrap_or(30)) } else { Value::from(v.clone()) };
                 self.set(id, json);

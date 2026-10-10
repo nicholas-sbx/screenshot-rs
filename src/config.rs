@@ -24,6 +24,8 @@ pub const BACKENDS: &[&str] = &["auto", "kwin", "screencopy", "portal", "spectac
 pub const RECORD_FORMATS: &[&str] = &["mp4", "webm", "gif"];
 pub const RECORD_FPS: &[i64] = &[24, 30, 60];
 pub const REGION_POINTER: &[&str] = &["toggle", "hidden", "shown"];
+/// The tray icon's looks (desktop::tray::STYLES).
+pub const TRAY_ICONS: &[&str] = &["color", "theme", "white", "black", "auto"];
 pub const SCREENSHOT_METHODS: &[&str] = &["desktop", "screens"];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +49,8 @@ pub struct Config {
     pub sound: bool,
     pub sound_file: String,
     pub theme: String,
+    /// color | theme | white | black | auto (white or black, like the desktop)
+    pub tray_icon: String,
     // Capture
     /// screen shading in %, 0 turns it off
     pub dim_opacity: i64,
@@ -183,6 +187,7 @@ impl Config {
             sound: b("sound", false),
             sound_file: s("sound_file", ""),
             theme: s("theme", "ember"),
+            tray_icon: one_of(get_str(data, "tray_icon"), TRAY_ICONS, "color"),
             dim_opacity: i("dim_opacity", 60).clamp(0, 90),
             show_loupe: b("show_loupe", true),
             loupe_size: i("loupe_size", 120).clamp(LOUPE_SIZES.0, LOUPE_SIZES.1),
@@ -234,6 +239,7 @@ impl Config {
         put("sound", self.sound.into());
         put("sound_file", self.sound_file.clone().into());
         put("theme", self.theme.clone().into());
+        put("tray_icon", self.tray_icon.clone().into());
         put("dim_opacity", self.dim_opacity.into());
         put("show_loupe", self.show_loupe.into());
         put("loupe_size", self.loupe_size.into());

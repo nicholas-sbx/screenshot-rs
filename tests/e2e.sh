@@ -239,6 +239,12 @@ echo "forged to \$me" >> "$work/tray-test.log"
 sleep 0.5
 $BIN -r 100x50+0+0 > "$work/forwarded.log" 2>&1; echo "forwarded \$?" >> "$work/tray-test.log"
 sleep 2.5
+# Restart: the tray app starts again in its own place (the same process,
+# a fresh program), serving the same socket.
+ipc() { python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall((sys.argv[2] + "\\n").encode()); print(s.makefile().readline().strip())' "$XDG_RUNTIME_DIR/flatshot-rs/ipc" "\$1"; }
+ipc restart > /dev/null
+sleep 2
+ipc status | grep -q '"pid"' && echo "restarted: \$(grep -c 'tray app ready' "$work/tray.log")" >> "$work/tray-test.log"
 $BIN --quit; echo "quit \$?" >> "$work/tray-test.log"
 sleep 1
 pgrep -f -- "$BIN --tray" > /dev/null && echo "still running" >> "$work/tray-test.log" || echo "gone" >> "$work/tray-test.log"
@@ -261,6 +267,7 @@ fi
 grep -q "command: rect:100x50+0+0" "$work/tray.log" && pass "command forwarded" || fail "command not forwarded"
 [ $((after - before)) -ge 3 ] && pass "tray captures saved ($((after - before)))" || fail "tray saved $((after - before)) captures"
 grep -q 'actions=\["default", "Open"' "$work/notify.log" && pass "notification with buttons" || fail "no notification buttons"
+grep -q "restarted: 2" "$work/tray-test.log" && pass "tray restarts" || fail "tray didn't restart: $(grep restarted "$work/tray-test.log")"
 grep -q "quit 0" "$work/tray-test.log" && grep -q "gone" "$work/tray-test.log" && pass "tray quits" || fail "tray didn't quit"
 
 kill $keeper 2>/dev/null || true

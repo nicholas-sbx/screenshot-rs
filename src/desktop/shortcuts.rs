@@ -144,8 +144,16 @@ pub fn start(events: impl Fn(ShortcutEvent) + Send + 'static) -> Result<(), Stri
                     events(ShortcutEvent::Pressed(action));
                 }
             }
+            // (KF6's, then KF5's: the same, with the keys as KF5 had them)
             (Some(IFACE), Some("yourShortcutsChanged")) => {
                 if let Ok((id, _)) = msg.body().deserialize::<(Vec<String>, Vec<(Vec<i32>,)>)>()
+                    && id.first().map(String::as_str) == Some(COMPONENT)
+                {
+                    events(ShortcutEvent::Changed);
+                }
+            }
+            (Some(IFACE), Some("yourShortcutGotChanged")) => {
+                if let Ok((id, _)) = msg.body().deserialize::<(Vec<String>, Vec<i32>)>()
                     && id.first().map(String::as_str) == Some(COMPONENT)
                 {
                     events(ShortcutEvent::Changed);

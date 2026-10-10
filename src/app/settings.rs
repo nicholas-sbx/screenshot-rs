@@ -262,7 +262,9 @@ impl App {
                         e.ed.restyle();
                     }
                     self.restyle_pins();
+                    self.update_tray_icon(None); // (the theme style's colours)
                 }
+                Request::TrayIconChanged(style) => self.update_tray_icon(Some(style)),
                 Request::CopyText(text) => {
                     let mimes = TEXT_MIMES.iter().map(|m| m.to_string()).collect();
                     self.dpy.offer(mimes, Slot::ready(Arc::new(text.into_bytes())));

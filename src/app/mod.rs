@@ -91,6 +91,8 @@ pub struct App {
     recording: Option<recording::RecordingRun>,
     /// the tray app quits once the recording is saved
     quit_after_recording: bool,
+    /// the tray app starts again once it has quit
+    restarting: bool,
 }
 
 impl Painted for Session {
@@ -434,6 +436,7 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         settings: None,
         recording: None,
         quit_after_recording: false,
+        restarting: false,
     };
     match queue {
         Some(mut queue) => {

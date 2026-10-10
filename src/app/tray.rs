@@ -42,6 +42,8 @@ pub enum Event {
     ShortcutsReady(bool),
     /// no D-Bus tray: why
     NoTray(String),
+    /// the desktop's colour scheme changed (for the "auto" icon)
+    SchemeChanged,
 }
 
 /// What a notification's buttons act on.
@@ -67,6 +69,8 @@ pub struct TrayState {
     keys: HashMap<String, String>,
     /// the icon in an X11 panel's tray (XEmbed), without a D-Bus tray
     embedded: Option<Embedded>,
+    /// the icon's look (the tray_icon setting)
+    icon_style: String,
 }
 
 /// The tray icon embedded in an X11 panel, and its menu (ours: the panel
@@ -75,14 +79,15 @@ pub struct TrayState {
 struct Embedded {
     menu: Option<Menu>,
     recording: bool,
+    style: String,
     /// as last drawn: its size (device pixels) and whether recording
     drawn: Option<((u32, u32), bool)>,
     image: Option<Image>,
 }
 
 /// The menu's keys, as the popup menu has them.
-const MENU_KEYS: [&str; 12] =
-    ["region", "monitor", "screen", "last", "pin", "record", "region-delayed", "window-delayed", "annotate", "folder", "settings", "quit"];
+const MENU_KEYS: [&str; 14] =
+    ["region", "window", "monitor", "screen", "last", "pin", "record", "region-delayed", "window-delayed", "annotate", "folder", "settings", "restart", "quit"];
 
 struct IconPaint<'a> {
     e: &'a mut Embedded,
@@ -95,7 +100,7 @@ impl Painted for IconPaint<'_> {
         if self.e.drawn == Some(now) {
             return Damage::new();
         }
-        self.e.image = crate::desktop::tray::icon_image(self.size.0.min(self.size.1).max(1), self.e.recording);
+        self.e.image = crate::desktop::tray::icon_image(self.size.0.min(self.size.1).max(1), self.e.recording, &self.e.style);
         self.e.drawn = Some(now);
         Damage::full()
     }
@@ -133,7 +138,9 @@ impl Painted for IconPaint<'_> {
 fn menu_items(keys: &HashMap<String, String>, recording: bool) -> Vec<MenuItem> {
     let k = |a: &str| keys.get(a).cloned().unwrap_or_default();
     let label = |a: &str| if a == "record" && recording { "Stop recording" } else { shortcuts::label(a) };
-    let mut items: Vec<MenuItem> = ["region", "monitor", "screen", "last", "pin", "record"].iter().map(|a| MenuItem::new(a, label(a), &k(a))).collect();
+    // (Active window: the window active before the menu, once the menu has gone.)
+    let mut items: Vec<MenuItem> =
+        ["region", "window", "monitor", "screen", "last", "pin", "record"].iter().map(|a| MenuItem::new(a, label(a), &k(a))).collect();
     items.extend([
         MenuItem::separator(),
         MenuItem::new("region-delayed", "Capture region in 3 seconds", ""),
@@ -143,6 +150,7 @@ fn menu_items(keys: &HashMap<String, String>, recording: bool) -> Vec<MenuItem> 
         MenuItem::new("folder", "Open screenshots folder", ""),
         MenuItem::new("settings", "Settings…", ""),
         MenuItem::separator(),
+        MenuItem::new("restart", &format!("Restart {}", crate::APP_NAME), ""),
         MenuItem::new("quit", &format!("Quit {}", crate::APP_NAME), ""),
     ]);
     items
@@ -224,13 +232,21 @@ impl App {
         // The rest talks to the desktop, which can be slow to answer (at
         // login): in the background, each reporting back when done.
         let tx = events.clone();
+        self.tray.icon_style = self.cfg.tray_icon.clone();
+        let style = self.tray.icon_style.clone();
         let _ = std::thread::Builder::new().name("flatshot-start".into()).spawn(move || {
             let shown = {
                 let tx = tx.clone();
-                Tray::show(menu_items(&HashMap::new(), false), move |e| {
+                Tray::show(menu_items(&HashMap::new(), false), &style, move |e| {
                     let _ = tx.send(Event::Tray(e));
                 })
             };
+            let scheme = tx.clone();
+            if let Err(e) = crate::desktop::tray::watch_color_scheme(move || {
+                let _ = scheme.send(Event::SchemeChanged);
+            }) {
+                timing::log(format!("not following the colour scheme: {e}"));
+            }
             match shown {
                 Ok(t) => {
                     let _ = tx.send(Event::TrayShown(t));
@@ -280,7 +296,7 @@ impl App {
                 // (an X11 panel without the D-Bus tray: its own)
                 Ok(()) => {
                     timing::log("tray icon embedded in the panel (XEmbed)");
-                    self.tray.embedded = Some(Embedded { recording: self.is_recording(), ..Default::default() });
+                    self.tray.embedded = Some(Embedded { recording: self.is_recording(), style: self.tray.icon_style.clone(), ..Default::default() });
                 }
                 Err(e) if self.dpy.is_x11() => crate::warn!("{why}; {e}: running in the background anyway"),
                 Err(_) => crate::warn!("{why}; running in the background anyway"),
@@ -288,6 +304,11 @@ impl App {
             Event::ShortcutsReady(ok) => {
                 self.tray.shortcuts = Some(ok);
                 self.shortcuts_ready(ok);
+            }
+            Event::SchemeChanged => {
+                if self.tray.icon_style == "auto" {
+                    self.update_tray_icon(None);
+                }
             }
             Event::Keys(keys) => {
                 self.tray.keys = keys;
@@ -306,6 +327,7 @@ impl App {
                     crate::deliver::open_file(&folder);
                 }
                 "settings" => self.show_settings(),
+                "restart" => self.restart(),
                 "quit" => self.quit(),
                 action => self.shortcut(action, MENU_DELAY, Instant::now()),
             },
@@ -417,6 +439,26 @@ impl App {
         }
     }
 
+    /// Show the tray icon in `style` (the setting), or again in the one it
+    /// has (the theme's or the desktop's colours changed).
+    pub(super) fn update_tray_icon(&mut self, style: Option<String>) {
+        if let Some(s) = style {
+            self.tray.icon_style = s;
+        }
+        let style = self.tray.icon_style.clone();
+        if let Some(t) = &self.tray.tray {
+            let t = t.clone();
+            let s = style.clone();
+            // ("auto" asks the portal: not on the event loop)
+            let _ = std::thread::Builder::new().name("flatshot-icon".into()).spawn(move || t.set_style(&s));
+        }
+        if let Some(e) = &mut self.tray.embedded {
+            e.style = crate::desktop::tray::resolve_style(&style).into();
+            e.drawn = None;
+            self.redraw_tray_icon();
+        }
+    }
+
     /// Draw the embedded tray icon and its menu, if they changed.
     pub(super) fn redraw_tray_icon(&mut self) {
         let Some(e) = &mut self.tray.embedded else { return };
@@ -460,6 +502,7 @@ impl App {
                 self.edit(path);
             }
             "settings" => self.show_settings(),
+            "restart" => self.restart(),
             "quit" => self.quit(),
             "record" => self.record(delay),
             _ => {
@@ -539,6 +582,13 @@ impl App {
         self.pin(std::sync::Arc::new(image), at.filter(|_| same), at.map(|a| (a.w as u32, a.h as u32)));
     }
 
+    /// Quit (saving a recording first) and start again: picks up an
+    /// upgrade, or gets a stuck helper going again.
+    fn restart(&mut self) {
+        self.restarting = true;
+        self.quit();
+    }
+
     fn quit(&mut self) {
         if self.is_recording() {
             // Save what was recorded first.
@@ -579,5 +629,28 @@ pub fn run_tray(_args: &Args) -> i32 {
     if let Some(n) = &app.tray.notifier {
         n.flush(Duration::from_secs(2));
     }
-    app.exit.unwrap_or(0)
+    let code = app.exit.unwrap_or(0);
+    if app.restarting {
+        drop(app); // (closes the tray's socket and lock first)
+        restart();
+    }
+    code
+}
+
+/// Start the tray app again in this process's place: the same program (as
+/// it is now on disk, after an upgrade) with the same arguments.
+fn restart() {
+    use std::os::unix::process::CommandExt;
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if !args.iter().any(|a| a == "--tray") {
+        args.push("--tray".into());
+    }
+    // (/proc/self/exe names the old file once it's replaced: the path instead)
+    let exe = std::env::current_exe().map(|p| {
+        let s = p.to_string_lossy();
+        s.strip_suffix(" (deleted)").map(std::path::PathBuf::from).unwrap_or_else(|| p.clone())
+    });
+    let Ok(exe) = exe else { return crate::warn!("could not start again: where is this program?") };
+    let e = std::process::Command::new(&exe).args(&args).exec();
+    crate::warn!("could not start again: {e}");
 }
