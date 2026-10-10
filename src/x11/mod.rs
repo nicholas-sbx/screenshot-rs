@@ -127,6 +127,8 @@ struct Surf {
     transparent: bool,
     argb: bool,
     logical: (u32, u32),
+    /// where it is in the root window (device pixels; unmanaged windows)
+    origin: (i32, i32),
     mapped: bool,
     configured: bool,
     bufs: Vec<Buf>,
@@ -175,6 +177,9 @@ pub struct X11 {
     queued: VecDeque<Event>,
     /// where the pointer was, in the root window, while a button is held
     drag: Option<(i16, i16)>,
+    /// the overlay a button went down on: until it's let go, the pointer's
+    /// events are its (as on Wayland), wherever the pointer is
+    held: Option<xproto::Window>,
 }
 
 /// Is this an X11 session (no Wayland compositor to use)?
@@ -307,6 +312,7 @@ impl X11 {
             grab: None,
             queued: VecDeque::new(),
             drag: None,
+            held: None,
         };
         x.name_window(helper, "Flatshot");
         let _ = x.conn.flush();
@@ -319,6 +325,21 @@ impl X11 {
 
     fn logical(&self, x: i16, y: i16) -> (f64, f64) {
         (x as f64 / self.scale as f64, y as f64 / self.scale as f64)
+    }
+
+    /// Whose a pointer event on `window` at `root` (device pixels, in the
+    /// root window) is, and where on it (logical): while a button is held
+    /// on an overlay, that overlay's, even past its edge.
+    fn pointer_target(&self, window: xproto::Window, at: (i16, i16), root: (i16, i16)) -> (Option<Owner>, (f64, f64)) {
+        if let Some(h) = self.held
+            && h != window
+            && let Some(s) = self.surfaces.iter().find(|s| s.win == h)
+        {
+            let x = (root.0 as i32 - s.origin.0) as f64 / self.scale as f64;
+            let y = (root.1 as i32 - s.origin.1) as f64 / self.scale as f64;
+            return (Some(s.owner), (x, y));
+        }
+        (self.owner_of(window), self.logical(at.0, at.1))
     }
 
     // -- monitors ------------------------------------------------------------------------
@@ -343,6 +364,10 @@ impl X11 {
                 out.push(Monitor { output: Output::X11(m.name), name, rect, scale: s });
             }
         }
+        // (a monitor holding others whole is an output's own, left over
+        // when it's been split into monitors of its own: theirs count)
+        let all: Vec<IRect> = out.iter().map(|m| m.rect).collect();
+        out.retain(|m| !all.iter().any(|r| *r != m.rect && m.rect.contains_rect(r)));
         if out.is_empty() {
             // (no RandR: the whole screen)
             let r = &self.conn.setup().roots[self.screen];
@@ -408,6 +433,7 @@ impl X11 {
             transparent,
             argb,
             logical: size,
+            origin: at,
             mapped: false,
             // (unmanaged windows are as made; others once mapped)
             configured: unmanaged,
@@ -1089,8 +1115,7 @@ impl App {
                 let pressed = e.response_type & 0x7f == xproto::BUTTON_PRESS_EVENT;
                 let x = self.x11();
                 x.mods = keyboard::mods_of(e.state.into());
-                let at = x.logical(e.event_x, e.event_y);
-                let mut owner = x.owner_of(e.event);
+                let (mut owner, at) = x.pointer_target(e.event, (e.event_x, e.event_y), (e.root_x, e.root_y));
                 // A menu holds the pointer: a click outside it dismisses it.
                 if let Some(s) = x.surfaces.iter().find(|s| s.win == e.event && s.kind == Kind::Popup)
                     && pressed
@@ -1117,6 +1142,27 @@ impl App {
                 if owner.is_none() {
                     owner = x.pointer_owner();
                 }
+                let overlay = x.surfaces.iter().any(|s| s.win == e.event && s.kind == Kind::Overlay);
+                let crossed = if pressed {
+                    if overlay {
+                        x.held = Some(e.event);
+                    }
+                    None
+                } else {
+                    // Let go: if the pointer is now on another overlay, it
+                    // leaves the one held and enters that one.
+                    let held = x.held.take();
+                    match (held, x.pointer_on) {
+                        (Some(h), Some(on)) if h != on => {
+                            let on_at = x.surfaces.iter().find(|s| s.win == on).map(|s| {
+                                let sc = x.scale as f64;
+                                ((e.root_x as i32 - s.origin.0) as f64 / sc, (e.root_y as i32 - s.origin.1) as f64 / sc)
+                            });
+                            Some((x.owner_of(h), x.owner_of(on), on_at.unwrap_or_default()))
+                        }
+                        _ => None,
+                    }
+                };
                 // A window clicked takes the keyboard, as window managers do
                 // (and as there's none to do it, on a bare X server).
                 if pressed && x.keyboard_on != Some(e.event) && x.surfaces.iter().any(|s| s.win == e.event && matches!(s.kind, Kind::Window | Kind::Layer)) {
@@ -1124,11 +1170,14 @@ impl App {
                     x.keyboard_on = Some(e.event);
                 }
                 self.input(owner, Input::Button(code, pressed, at));
+                if let Some((left, entered, at)) = crossed {
+                    self.input(left, Input::Leave);
+                    self.input(entered, Input::Enter(at));
+                }
             }
             Event::MotionNotify(e) => {
                 let x = self.x11();
-                let at = x.logical(e.event_x, e.event_y);
-                let owner = x.owner_of(e.event);
+                let (owner, at) = x.pointer_target(e.event, (e.event_x, e.event_y), (e.root_x, e.root_y));
                 let moved = match x.drag {
                     Some(from) => {
                         x.drag = Some((e.root_x, e.root_y));
@@ -1154,7 +1203,10 @@ impl App {
                         s.cursor = None; // (set again for this entry)
                     }
                 }
-                self.input(owner, Input::Enter(at));
+                // (while a button is held on an overlay, it keeps the pointer)
+                if x.held.is_none_or(|h| h == e.event) {
+                    self.input(owner, Input::Enter(at));
+                }
             }
             Event::LeaveNotify(e) => {
                 let x = self.x11();
@@ -1162,7 +1214,9 @@ impl App {
                 if x.pointer_on == Some(e.event) {
                     x.pointer_on = None;
                 }
-                self.input(owner, Input::Leave);
+                if x.held.is_none() {
+                    self.input(owner, Input::Leave);
+                }
             }
             Event::FocusIn(e) => {
                 let x = self.x11();
