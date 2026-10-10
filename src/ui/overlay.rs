@@ -107,6 +107,13 @@ pub struct Overlay {
     pub active: Option<Shape>,
     /// the select tool's drawing, on this monitor
     pub selection: Selection,
+    /// The other monitors' drawings that reach this one, in this one's
+    /// coordinates (drawings cross monitors: each overlay owns those begun
+    /// on it, and paints the others' too, from its own pixels): the done
+    /// ones, as of `foreign_key`, and those being drawn, moved or typed.
+    pub foreign: Vec<Shape>,
+    pub foreign_key: u64,
+    pub foreign_live: Vec<Shape>,
     pub sel_origin: Option<Point>,
     pub sel_rect: Option<Rect>,
     pub cursor_pos: Option<Point>,
@@ -157,6 +164,9 @@ impl Overlay {
             undone: Vec::new(),
             active: None,
             selection: Selection::default(),
+            foreign: Vec::new(),
+            foreign_key: 0,
+            foreign_live: Vec::new(),
             sel_origin: None,
             sel_rect: None,
             cursor_pos: None,
@@ -290,16 +300,20 @@ impl Overlay {
         }
     }
 
+    /// Nothing drawn here, by this monitor or reaching it from another.
+    pub fn undrawn(&self) -> bool {
+        self.annotations.iter().all(|s| s.hidden) && self.foreign.is_empty()
+    }
+
     fn draw_annotations(&self, out: &mut Image, phys: IRect) {
-        if self.annotations.iter().all(|s| s.hidden) {
+        if self.undrawn() {
             return; // (the capture is opaque as it is)
         }
         {
             let mut p = Painter::for_region(out.pixmap_mut(), self.dpr, (phys.x, phys.y));
-            for shape in &self.annotations {
-                if !shape.hidden {
-                    shape.paint(&mut p, &self.base, self.dpr);
-                }
+            // (the other monitors' drawings that reach this one, over its own)
+            for shape in self.annotations.iter().filter(|s| !s.hidden).chain(self.foreign.iter()) {
+                shape.paint(&mut p, &self.base, self.dpr);
             }
         }
         out.force_opaque();
@@ -310,7 +324,7 @@ impl Overlay {
     pub fn into_render(mut self, rect: Option<Rect>) -> Result<Image, String> {
         let phys = self.render_rect(rect);
         let whole = phys == self.base.rect();
-        if whole && self.annotations.iter().all(|s| s.hidden) {
+        if whole && self.undrawn() {
             self.plain = None;
             self.with_pointer = None;
             self.edge_maps = None;
@@ -440,6 +454,12 @@ impl Overlay {
         }
         if let Some(s) = self.selection.moving() {
             elements.push(Element { id: Id::Moving, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX - 2) });
+        }
+        for (i, s) in self.foreign.iter().enumerate() {
+            elements.push(Element { id: Id::Foreign(i), bounds: self.dev(s.bounds(), 2), key: shape_key(s, i) });
+        }
+        for (i, s) in self.foreign_live.iter().enumerate() {
+            elements.push(Element { id: Id::ForeignLive(i), bounds: self.dev(s.bounds(), 2), key: shape_key(s, i) });
         }
         if st.tool == Tool::Select
             && let Some(r) = self.selection.frame_bounds(&self.annotations, 1.0)
@@ -708,8 +728,10 @@ impl Overlay {
             .annotations
             .iter()
             .filter(|s| !s.hidden)
+            .chain(self.foreign.iter())
             .chain(self.active.iter())
             .chain(self.selection.moving())
+            .chain(self.foreign_live.iter())
             .chain(st.text_edit.iter().filter(|(o, _)| *o == self.index).map(|(_, s)| s))
             .filter(|s| self.dev(s.bounds(), 2).intersects(&region))
             .collect();
@@ -1385,6 +1407,8 @@ enum Id {
     Active,
     Moving,
     SelectionFrame,
+    Foreign(usize),
+    ForeignLive(usize),
     TextEdit,
     Window,
     Codes,

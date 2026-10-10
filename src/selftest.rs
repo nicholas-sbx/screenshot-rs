@@ -785,6 +785,47 @@ fn multi_monitor(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
         }
         other => return Err(format!("the selection across monitors gave {other:?}")),
     }
+    drawings_across_monitors(tmp, out, desktop)
+}
+
+/// Drawings cross monitors: each overlay paints the others' that reach it,
+/// the select tool picks one up from either, and a capture of one monitor
+/// includes the parts that reach it.
+fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
+    let left = Arc::new(desktop.crop(IRect::new(0, 0, 800, 1000))?);
+    let right = Arc::new(desktop.crop(IRect::new(800, 0, 800, 1000))?);
+    let screens = vec![
+        Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 800, 1000), scale: 1.0 }, picture: left, pointer: None },
+        Screen { output: Output { name: "DP-2".into(), rect: IRect::new(800, 0, 800, 1000), scale: 1.0 }, picture: right, pointer: None },
+    ];
+    let mut s = session(test_config(tmp), Request::default(), screens, FakeRecorder { problem: None, span: true });
+    s.pointer_enter(0, Point::new(400.0, 500.0));
+    tap(&mut s, 0, 0x46, "f", 0); // (a filled box: its pixels are plain to check)
+    drag(&mut s, 0, Point::new(700.0, 300.0), Point::new(900.0, 400.0), 0);
+    let color = s.st.color().premul() | 0xFF00_0000;
+    let f = frame(&mut s, 1)?;
+    check!(s.overlays[1].foreign.len() == 1, "the right monitor doesn't have the left one's drawing");
+    check!(f.pixel(50, 350) == color, "the drawing isn't painted where it reaches the right monitor: {:08X}", f.pixel(50, 350));
+    save_png(&f, out, "overlay-across.png")?;
+    // Picked up from the right monitor (it belongs to the left one), and moved.
+    tap(&mut s, 0, 0x53, "s", 0);
+    s.pointer_enter(1, Point::new(50.0, 350.0));
+    drag(&mut s, 1, Point::new(50.0, 330.0), Point::new(80.0, 330.0), 0);
+    let moved = s.overlays[0].annotations.last().map(|a| a.geometry());
+    check!(moved == Some(Rect::new(730.0, 300.0, 200.0, 100.0)), "{moved:?}");
+    check!(s.overlays[1].annotations.is_empty(), "it changed hands");
+    // A capture of the right monitor alone includes the part that reaches it.
+    let _ = frame(&mut s, 1)?;
+    tap(&mut s, 1, 0x52, "r", 0);
+    click(&mut s, 1, Point::new(400.0, 800.0), 0);
+    match s.take_outcome() {
+        Some(Outcome::Image { image, .. }) => {
+            check!(image.size() == (800, 1000), "{:?}", image.size());
+            check!(image.pixel(100, 350) == color, "the capture lacks the drawing's part: {:08X}", image.pixel(100, 350));
+        }
+        other => return Err(format!("capturing the right monitor gave {other:?}")),
+    }
+    println!("self-test: drawings across monitors");
     Ok(())
 }
 
