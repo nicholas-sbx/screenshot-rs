@@ -216,6 +216,8 @@ impl App {
         self.session = None;
         self.wl.remove_overlays();
         self.monitors.clear();
+        let _ = self.wl.conn.flush();
+        crate::render::text::remember_fonts();
         crate::mem::trim();
     }
 

@@ -5,8 +5,14 @@
 //! Only the fonts actually used are opened (memory-mapped, so they cost
 //! page cache rather than heap). Characters a font lacks are looked up in
 //! fallback fonts, then any installed font, once each.
+//!
+//! The font files of the families in use are remembered in the cache, so a
+//! start reads those few files instead of every installed font (seconds,
+//! right after boot, with hundreds of them). Whatever they don't cover, or
+//! a change in the font folders, brings back the full list.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use harfrust::{Buffer, Direction, ShapeOptions, ShaperFont};
@@ -147,8 +153,15 @@ type FontKey = (u32, u16, bool);
 
 struct System {
     db: fontdb::Database,
+    /// every installed font is in `db` (else only the remembered ones)
+    complete: bool,
+    /// the families of the fonts opened, and whether that's news to the cache
+    used: BTreeSet<String>,
+    remember: bool,
     faces: Vec<Face>,
     by_id: HashMap<fontdb::ID, u32>,
+    /// the open faces by (file, index): kept when `db` is made anew
+    by_source: HashMap<(PathBuf, u32), u32>,
     primary: HashMap<(bool, u16), u32>,
     fallback: HashMap<(char, bool), Option<u32>>,
     glyphs: HashMap<GlyphKey, Option<Arc<Glyph>>>,
@@ -191,14 +204,22 @@ static SYSTEM: OnceLock<Mutex<System>> = OnceLock::new();
 fn sys() -> MutexGuard<'static, System> {
     SYSTEM
         .get_or_init(|| {
-            let mut db = fontdb::Database::new();
-            db.load_system_fonts();
-            // A font Flatshot can always find when the system has none of
-            // the families it asks for (or none at all): DejaVu or the like.
+            let (db, complete) = match remembered_fonts() {
+                Some(db) => (db, false),
+                None => {
+                    let mut db = fontdb::Database::new();
+                    db.load_system_fonts();
+                    (db, true)
+                }
+            };
             Mutex::new(System {
                 db,
+                complete,
+                used: BTreeSet::new(),
+                remember: false,
                 faces: Vec::new(),
                 by_id: HashMap::new(),
+                by_source: HashMap::new(),
                 primary: HashMap::new(),
                 fallback: HashMap::new(),
                 glyphs: HashMap::new(),
@@ -218,6 +239,96 @@ pub fn warm_up() {
         let _ = shape("Drag to capture · 0123456789 × #ABCDEF", font(12.0, w));
     }
     let _ = shape("300, 600   #F5F3EF", mono(12.0, MEDIUM));
+    remember_fonts();
+}
+
+/// Write down the font files in use, if that's changed (when a window or
+/// the overlay has closed: off the paths that draw).
+pub fn remember_fonts() {
+    sys().remember();
+}
+
+fn font_cache() -> PathBuf {
+    crate::config::cache_home().join("flatshot").join("fonts.txt")
+}
+
+const CACHE_HEADER: &str = "flatshot fonts 1";
+
+/// The folders fonts are installed in.
+fn font_roots() -> Vec<PathBuf> {
+    let mut roots = vec![
+        PathBuf::from("/usr/share/fonts"),
+        PathBuf::from("/usr/local/share/fonts"),
+        crate::config::data_home().join("fonts"),
+        crate::config::home().join(".fonts"),
+    ];
+    roots.extend(crate::config::data_dirs().into_iter().map(|d| d.join("fonts")));
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// A stamp of the font folders: adding or removing a font anywhere under
+/// them changes a folder's modification time, and so the stamp.
+fn fonts_stamp() -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |bytes: &[u8]| {
+        for b in bytes {
+            hash = (hash ^ *b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    let mut stack = font_roots();
+    let mut seen = 0;
+    while let Some(dir) = stack.pop() {
+        seen += 1;
+        if seen > 10_000 {
+            break;
+        }
+        let Ok(meta) = std::fs::metadata(&dir) else { continue };
+        use std::os::unix::fs::MetadataExt;
+        mix(dir.as_os_str().as_encoded_bytes());
+        mix(&meta.mtime().to_le_bytes());
+        mix(&meta.mtime_nsec().to_le_bytes());
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(e.path());
+            }
+        }
+    }
+    hash
+}
+
+/// A file's size and modification time, to tell it hasn't changed.
+fn file_id(path: &Path) -> Option<(u64, i64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.mtime()))
+}
+
+/// The remembered font files, if they're all as they were and no font has
+/// been installed or removed since.
+fn remembered_fonts() -> Option<fontdb::Database> {
+    let text = crate::util::read_limited(&font_cache(), 256 << 10).ok()?;
+    let text = String::from_utf8(text).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != CACHE_HEADER {
+        return None;
+    }
+    let stamp: u64 = lines.next()?.strip_prefix("stamp ")?.parse().ok()?;
+    if stamp != fonts_stamp() {
+        return None;
+    }
+    let mut db = fontdb::Database::new();
+    for line in lines {
+        let mut parts = line.splitn(3, ' ');
+        let (size, mtime, path) = (parts.next()?.parse::<u64>().ok()?, parts.next()?.parse::<i64>().ok()?, PathBuf::from(parts.next()?));
+        if file_id(&path)? != (size, mtime) {
+            return None;
+        }
+        db.load_font_file(&path).ok()?;
+    }
+    (!db.is_empty()).then_some(db)
 }
 
 /// How many fonts are known and how many are open (for --diagnose).
@@ -235,9 +346,70 @@ pub fn primary_family(mono: bool) -> String {
 }
 
 impl System {
+    /// Every installed font, after all (something wasn't in the remembered ones).
+    fn complete_db(&mut self) {
+        if self.complete {
+            return;
+        }
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        self.db = db;
+        self.complete = true;
+        self.by_id.clear(); // (the open faces are found again by their file)
+        self.fallback.retain(|_, f| f.is_some());
+        self.remember = true;
+    }
+
+    /// Write down every file of the families in use (all their weights).
+    fn remember(&mut self) {
+        if !self.complete || !std::mem::take(&mut self.remember) {
+            return;
+        }
+        let mut files: BTreeSet<PathBuf> = BTreeSet::new();
+        for face in self.db.faces() {
+            if face.families.first().is_some_and(|(name, _)| self.used.contains(name))
+                && let fontdb::Source::File(p) | fontdb::Source::SharedFile(p, _) = &face.source
+            {
+                files.insert(p.clone());
+            }
+        }
+        let mut text = format!("{CACHE_HEADER}\nstamp {}\n", fonts_stamp());
+        for f in &files {
+            let Some((size, mtime)) = file_id(f) else { continue };
+            let Some(path) = f.to_str().filter(|p| !p.contains('\n')) else { continue };
+            text.push_str(&format!("{size} {mtime} {path}\n"));
+        }
+        let path = font_cache();
+        let Some(dir) = path.parent() else { return };
+        if crate::config::private_dir(dir).is_err() {
+            return;
+        }
+        let tmp = dir.join(format!(".fonts-{}.tmp", crate::util::random_hex(6)));
+        let written = crate::deliver::write_unique(&tmp, text.as_bytes()).and_then(|t| std::fs::rename(&t, &path).map_err(|e| e.to_string()));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
     fn open(&mut self, id: fontdb::ID) -> Option<u32> {
         if let Some(&i) = self.by_id.get(&id) {
             return Some(i);
+        }
+        let info = self.db.face(id)?;
+        let source = match &info.source {
+            fontdb::Source::File(p) | fontdb::Source::SharedFile(p, _) => Some((p.clone(), info.index)),
+            fontdb::Source::Binary(_) => None,
+        };
+        let family = info.families.first().map(|f| f.0.clone());
+        if let Some(&i) = source.as_ref().and_then(|s| self.by_source.get(s)) {
+            self.by_id.insert(id, i);
+            return Some(i);
+        }
+        if let Some(family) = family
+            && self.used.insert(family)
+            && self.complete
+        {
+            self.remember = true;
         }
         // SAFETY: the font file is mapped read-only. If something truncated
         // it while mapped, reading it could fault; fonts are installed
@@ -249,6 +421,9 @@ impl System {
         let i = self.faces.len() as u32;
         self.faces.push(Face { data, index, wght, upem, shapers: HashMap::new() });
         self.by_id.insert(id, i);
+        if let Some(s) = source {
+            self.by_source.insert(s, i);
+        }
         Some(i)
     }
 
@@ -271,6 +446,10 @@ impl System {
         }
         let families = if mono { MONO_FAMILIES } else { FONT_FAMILIES };
         let mut found = self.query(families, weight);
+        if found.is_none() && !self.complete {
+            self.complete_db();
+            found = self.query(families, weight);
+        }
         if found.is_none() {
             let generic = [if mono { fontdb::Family::Monospace } else { fontdb::Family::SansSerif }];
             let q = fontdb::Query { families: &generic, weight: fontdb::Weight(weight), ..Default::default() };
@@ -294,17 +473,10 @@ impl System {
         if let Some(found) = self.fallback.get(&(c, mono)) {
             return found.unwrap_or(base);
         }
-        let mut found = None;
-        let lists: [&[&str]; 2] = if is_emoji(c) { [EMOJI_FAMILIES, FALLBACK_FAMILIES] } else { [FALLBACK_FAMILIES, EMOJI_FAMILIES] };
-        'lists: for list in lists {
-            for name in list {
-                if let Some(f) = self.query(&[name], weight)
-                    && self.faces[f as usize].covers(c)
-                {
-                    found = Some(f);
-                    break 'lists;
-                }
-            }
+        let mut found = self.fallback_family(c, weight);
+        if found.is_none() && !self.complete {
+            self.complete_db();
+            found = self.fallback_family(c, weight);
         }
         if found.is_none() {
             // Any installed font, upright ones first; each tried once.
@@ -321,6 +493,21 @@ impl System {
         }
         self.fallback.insert((c, mono), found);
         found.unwrap_or(base)
+    }
+
+    /// A fallback family's face with `c`, in order of preference.
+    fn fallback_family(&mut self, c: char, weight: u16) -> Option<u32> {
+        let lists: [&[&str]; 2] = if is_emoji(c) { [EMOJI_FAMILIES, FALLBACK_FAMILIES] } else { [FALLBACK_FAMILIES, EMOJI_FAMILIES] };
+        for list in lists {
+            for name in list {
+                if let Some(f) = self.query(&[name], weight)
+                    && self.faces[f as usize].covers(c)
+                {
+                    return Some(f);
+                }
+            }
+        }
+        None
     }
 
     fn metrics(&mut self, spec: FontSpec) -> Metrics {
