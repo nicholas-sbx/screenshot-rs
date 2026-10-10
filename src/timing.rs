@@ -16,7 +16,7 @@ pub fn enabled() -> bool {
 
 pub fn log(message: impl AsRef<str>) {
     if enabled() {
-        eprintln!("flatshot: {}", message.as_ref());
+        eprintln!("flatshot-rs: {}", message.as_ref());
     }
 }
 

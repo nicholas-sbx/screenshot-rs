@@ -19,6 +19,7 @@ use crate::render::paint::{Align, Pen};
 use crate::render::text::{self, BOLD, DEMIBOLD, MEDIUM};
 use crate::render::theme::{self, Color};
 use crate::ui::panels::{CodeChip, ColorPicker, RecordPanel};
+use crate::ui::selection::Selection;
 use crate::ui::shapes::{Shape, Tool};
 use crate::ui::snapping::{EdgeMaps, py_round};
 use crate::ui::state::State;
@@ -104,6 +105,15 @@ pub struct Overlay {
     pub annotations: Vec<Shape>,
     pub undone: Vec<Shape>,
     pub active: Option<Shape>,
+    /// the select tool's drawing, on this monitor
+    pub selection: Selection,
+    /// The other monitors' drawings that reach this one, in this one's
+    /// coordinates (drawings cross monitors: each overlay owns those begun
+    /// on it, and paints the others' too, from its own pixels): the done
+    /// ones, as of `foreign_key`, and those being drawn, moved or typed.
+    pub foreign: Vec<Shape>,
+    pub foreign_key: u64,
+    pub foreign_live: Vec<Shape>,
     pub sel_origin: Option<Point>,
     pub sel_rect: Option<Rect>,
     pub cursor_pos: Option<Point>,
@@ -153,6 +163,10 @@ impl Overlay {
             annotations: Vec::new(),
             undone: Vec::new(),
             active: None,
+            selection: Selection::default(),
+            foreign: Vec::new(),
+            foreign_key: 0,
+            foreign_live: Vec::new(),
             sel_origin: None,
             sel_rect: None,
             cursor_pos: None,
@@ -223,12 +237,10 @@ impl Overlay {
         self.picker.is_some() && self.picker_visible
     }
 
-    /// The text drawn at `at` (topmost), if any.
+    /// The text drawn at `at`, if it's the topmost drawing there (not one
+    /// behind something else).
     pub fn text_at(&self, at: Point) -> Option<usize> {
-        self.annotations.iter().enumerate().rev().find_map(|(i, s)| {
-            let t = s.as_text()?;
-            (!s.hidden && t.contains(at, s.size)).then_some(i)
-        })
+        topmost_text(&self.annotations, at)
     }
 
     pub fn commit(&mut self, shape: Shape) {
@@ -238,11 +250,8 @@ impl Overlay {
 
     pub fn undo(&mut self) -> bool {
         let Some(shape) = self.annotations.pop() else { return false };
-        if let Some(t) = shape.as_text()
-            && let Some((i, ..)) = &t.replaces
-            && let Some(orig) = self.annotations.get_mut(*i)
-        {
-            orig.hidden = false; // the text as it was before it was edited
+        if let Some(orig) = shape.replaces.and_then(|i| self.annotations.get_mut(i)) {
+            orig.hidden = false; // the drawing as it was before it was changed
         }
         self.undone.push(shape);
         true
@@ -250,10 +259,7 @@ impl Overlay {
 
     pub fn redo(&mut self) -> bool {
         let Some(shape) = self.undone.pop() else { return false };
-        if let Some(t) = shape.as_text()
-            && let Some((i, ..)) = &t.replaces
-            && let Some(orig) = self.annotations.get_mut(*i)
-        {
+        if let Some(orig) = shape.replaces.and_then(|i| self.annotations.get_mut(i)) {
             orig.hidden = true;
         }
         self.annotations.push(shape);
@@ -294,16 +300,20 @@ impl Overlay {
         }
     }
 
+    /// Nothing drawn here, by this monitor or reaching it from another.
+    pub fn undrawn(&self) -> bool {
+        self.annotations.iter().all(|s| s.hidden) && self.foreign.is_empty()
+    }
+
     fn draw_annotations(&self, out: &mut Image, phys: IRect) {
-        if self.annotations.iter().all(|s| s.hidden) {
+        if self.undrawn() {
             return; // (the capture is opaque as it is)
         }
         {
             let mut p = Painter::for_region(out.pixmap_mut(), self.dpr, (phys.x, phys.y));
-            for shape in &self.annotations {
-                if !shape.hidden {
-                    shape.paint(&mut p, &self.base, self.dpr);
-                }
+            // (the other monitors' drawings that reach this one, over its own)
+            for shape in self.annotations.iter().filter(|s| !s.hidden).chain(self.foreign.iter()) {
+                shape.paint(&mut p, &self.base, self.dpr);
             }
         }
         out.force_opaque();
@@ -314,7 +324,7 @@ impl Overlay {
     pub fn into_render(mut self, rect: Option<Rect>) -> Result<Image, String> {
         let phys = self.render_rect(rect);
         let whole = phys == self.base.rect();
-        if whole && self.annotations.iter().all(|s| s.hidden) {
+        if whole && self.undrawn() {
             self.plain = None;
             self.with_pointer = None;
             self.edge_maps = None;
@@ -442,6 +452,21 @@ impl Overlay {
         if let Some(s) = &self.active {
             elements.push(Element { id: Id::Active, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX) });
         }
+        if let Some(s) = self.selection.moving() {
+            elements.push(Element { id: Id::Moving, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX - 2) });
+        }
+        for (i, s) in self.foreign.iter().enumerate() {
+            elements.push(Element { id: Id::Foreign(i), bounds: self.dev(s.bounds(), 2), key: shape_key(s, i) });
+        }
+        for (i, s) in self.foreign_live.iter().enumerate() {
+            elements.push(Element { id: Id::ForeignLive(i), bounds: self.dev(s.bounds(), 2), key: shape_key(s, i) });
+        }
+        if st.tool == Tool::Select
+            && let Some(r) = self.selection.frame_bounds(&self.annotations, 1.0)
+        {
+            let key = hash(&(rect_key(r), self.selection.current(&self.annotations), st.theme_key));
+            elements.push(Element { id: Id::SelectionFrame, bounds: self.dev(r, 2), key });
+        }
         if let Some((o, s)) = &st.text_edit
             && *o == self.index
         {
@@ -453,8 +478,9 @@ impl Overlay {
                 && let Some((r, w)) = hover
             {
                 let label = self.window_label(st, r, w);
-                let bounds = self.dev(r, 2).united(&self.dev(pill_rect(&label, Point::new(r.x + 8.0, r.y + 8.0), PillStyle::small()), 2));
-                elements.push(Element { id: Id::Window, bounds, key: hash(&(rect_key(r), &label)) });
+                let (bx, opacity) = self.window_label_box(r, &label);
+                let bounds = self.dev(r, 2).united(&self.dev(bx, 2));
+                elements.push(Element { id: Id::Window, bounds, key: hash(&(rect_key(r), &label, rect_key(bx), (opacity * 10.0) as i32)) });
             }
             if self.sel_rect.is_none() && st.codes_visible && st.tool == Tool::Region && !self.codes.is_empty() {
                 let mut b = IRect::default();
@@ -579,6 +605,37 @@ impl Overlay {
         if st.cfg.rainbow { Color::from_hsv((st.rainbow_t / RAINBOW_SECONDS).rem_euclid(1.0), 0.75, 1.0) } else { theme::c().accent }
     }
 
+    /// Where a window's label goes: above its top left; else inside its top
+    /// left, if the window is big enough; else below it, or beside it;
+    /// always on the screen. Faded while the pointer is near, so what's
+    /// under it shows (as the hint does).
+    fn window_label_box(&self, r: Rect, label: &str) -> (Rect, f32) {
+        let size = pill_rect(label, Point::ZERO, PillStyle::small()).size();
+        let (w, h) = size;
+        let screen = self.rect();
+        let fits_inside = r.w >= w + 16.0 && r.h >= h + 16.0;
+        let places = [
+            (Point::new(r.x, r.y - h - 6.0), false),
+            (Point::new(r.x + 8.0, r.y + 8.0), true),
+            (Point::new(r.x, r.bottom() + 6.0), false),
+            (Point::new(r.right() + 6.0, r.y), false),
+            (Point::new(r.x - w - 6.0, r.y), false),
+        ];
+        let bx = places
+            .iter()
+            .map(|(at, inside)| (Rect::new(at.x, at.y, w, h), *inside))
+            .find(|(b, inside)| (fits_inside || !inside) && screen.contains_rect(b))
+            .map(|b| b.0)
+            .unwrap_or_else(|| {
+                // (no room anywhere: as near as can be)
+                let x = (r.x + 8.0).min(screen.right() - w - 4.0).max(screen.x + 4.0);
+                let y = (r.y + 8.0).min(screen.bottom() - h - 4.0).max(screen.y + 4.0);
+                Rect::new(x, y, w, h)
+            });
+        let near = self.cursor_pos.is_some_and(|c| bx.adjusted(-HINT_NEAR / 2.0, -HINT_NEAR / 2.0, HINT_NEAR / 2.0, HINT_NEAR / 2.0).contains(c));
+        (bx, if near { 0.3 } else { 1.0 })
+    }
+
     fn window_label(&self, st: &State, r: Rect, w: usize) -> String {
         let size = format!("{} × {}", py_round(r.w * self.dpr), py_round(r.h * self.dpr));
         let title = st.windows.get(w).map(|w| util::displayable(&w.title)).unwrap_or_default();
@@ -671,7 +728,10 @@ impl Overlay {
             .annotations
             .iter()
             .filter(|s| !s.hidden)
+            .chain(self.foreign.iter())
             .chain(self.active.iter())
+            .chain(self.selection.moving())
+            .chain(self.foreign_live.iter())
             .chain(st.text_edit.iter().filter(|(o, _)| *o == self.index).map(|(_, s)| s))
             .filter(|s| self.dev(s.bounds(), 2).intersects(&region))
             .collect();
@@ -689,16 +749,21 @@ impl Overlay {
             }
         }
         let mut p = Painter::for_region(target.pixmap_mut(), self.dpr, origin);
+        if st.tool == Tool::Select {
+            self.selection.paint_frame(&self.annotations, &mut p, 1.0);
+        }
         let picking = rtool && self.rec_rect.is_none();
         if rtool {
             if selection.is_none()
                 && let Some((r, w)) = hover
-                && r.intersects(&region_logical.adjusted(-200.0, -40.0, 200.0, 40.0))
             {
-                let edge = c.text.with_alpha(110);
-                p.stroke_rect(r.adjusted(0.5, 0.5, -0.5, -0.5), Pen::new(edge, 1.0));
                 let label = self.window_label(st, r, w);
-                pill(&mut p, &label, Point::new(r.x + 8.0, r.y + 8.0), PillStyle::small());
+                let (bx, opacity) = self.window_label_box(r, &label);
+                if r.united(&bx).intersects(&region_logical.adjusted(-2.0, -2.0, 2.0, 2.0)) {
+                    let edge = c.text.with_alpha(110);
+                    p.stroke_rect(r.adjusted(0.5, 0.5, -0.5, -0.5), Pen::new(edge, 1.0));
+                    pill(&mut p, &label, bx.top_left(), PillStyle { opacity, ..PillStyle::small() });
+                }
             }
             if self.sel_rect.is_none() && st.codes_visible && st.tool == Tool::Region {
                 self.paint_codes(&mut p);
@@ -1160,8 +1225,10 @@ pub fn pill(p: &mut Painter<'_>, label: &str, at: Point, s: PillStyle) {
 pub const HINT_REGION: &str = "Drag to capture  ·  Click for whole screen  ·  Esc to cancel";
 pub const HINT_CODES: &str = "Drag to capture  ·  {codes} hides detected codes  ·  Esc to cancel";
 pub const HINT_WINDOWS: &str = "Drag to capture  ·  Click a window to capture it  ·  Esc to cancel";
-pub const HINT_TEXT: &str = "Click to place text, or on text to change it  ·  Drag text to move it  ·  Enter to finish";
+pub const HINT_TEXT: &str = "Click to place text, or on text to change it  ·  Enter for a new line  ·  Esc or Ctrl+Enter to finish";
 pub const HINT_SHAPE: &str = "Shift: square  ·  Ctrl: from the middle  ·  Alt: move it";
+pub const HINT_SELECT: &str = "Click a drawing to select it  ·  Drag to move  ·  Handles resize  ·  Delete removes it";
+pub const HINT_SELECTED: &str = "Drag to move (Shift: straight)  ·  Handles: Shift keeps its shape, Ctrl from the middle  ·  Arrows nudge  ·  Delete";
 pub const PIN_HINT: &str = "Drag to pin a region  ·  Click a window to pin it  ·  {pin} to save instead";
 pub const EYEDROPPER_HINT: &str = "Click a pixel to make it your colour  ·  Esc to stop";
 pub const DRAW_HINT: &str = "Draw on the screen  ·  {tool.region} then drag to capture  ·  Enter for whole screen";
@@ -1223,6 +1290,8 @@ fn hint_text(st: &State, o: &Overlay) -> String {
             Tool::Region if !o.windows.is_empty() => HINT_WINDOWS,
             Tool::Region => HINT_REGION,
             Tool::Text => HINT_TEXT,
+            Tool::Select if o.selection.current(&o.annotations).is_some() => HINT_SELECTED,
+            Tool::Select => HINT_SELECT,
             _ => DRAW_HINT,
         }
     };
@@ -1336,6 +1405,10 @@ fn shade_row(row: &mut [u8], x0: i32, y: i32, dim: Color, hole: Option<IRect>) {
 enum Id {
     Annotation(usize),
     Active,
+    Moving,
+    SelectionFrame,
+    Foreign(usize),
+    ForeignLive(usize),
     TextEdit,
     Window,
     Codes,
@@ -1432,6 +1505,17 @@ fn panel_key(p: &RecordPanel) -> u64 {
     }
     p.choice_hover.hash(&mut h);
     h.finish()
+}
+
+/// The text at `at` among `drawings`, if it's the topmost drawing there.
+pub fn topmost_text(drawings: &dyn crate::ui::selection::Drawings, at: Point) -> Option<usize> {
+    let top = Selection::hits(drawings, at, 1.0).first().copied().or_else(|| {
+        (0..drawings.count()).rev().find(|&i| {
+            let s = drawings.get(i);
+            !s.hidden && s.as_text().is_some_and(|t| t.contains(at, s.size))
+        })
+    })?;
+    drawings.get(top).as_text().is_some().then_some(top)
 }
 
 #[cfg(test)]

@@ -8,8 +8,11 @@ use std::sync::{Arc, Mutex};
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, StructureBuilder, Value};
 
+use crate::geom::Rect;
 use crate::image::Image;
 use crate::keyseq;
+use crate::render::paint::{self, Painter, Pen};
+use crate::render::theme::{self, Color};
 
 const ITEM_PATH: &str = "/StatusNotifierItem";
 const ITEM_IFACE: &str = "org.kde.StatusNotifierItem";
@@ -56,6 +59,8 @@ struct State {
     revision: u32,
     recording: bool,
     tooltip: String,
+    /// the icon's look (STYLES), "auto" made white or black
+    style: &'static str,
     icon: Pixmaps,
     stop_icon: Option<Pixmaps>,
     /// from the panel, to bring our windows forward when it's clicked
@@ -77,11 +82,11 @@ impl Item {
     }
     #[zbus(property)]
     fn id(&self) -> &str {
-        "flatshot"
+        crate::APP_ID
     }
     #[zbus(property)]
     fn title(&self) -> &str {
-        "Flatshot"
+        crate::APP_NAME
     }
     #[zbus(property)]
     fn status(&self) -> &str {
@@ -93,7 +98,8 @@ impl Item {
     }
     #[zbus(property)]
     fn icon_name(&self) -> &str {
-        if self.state.lock().is_ok_and(|s| s.recording) { "" } else { "flatshot" }
+        // (the installed icon only for its own colours: else our pixmaps)
+        if self.state.lock().is_ok_and(|s| !s.recording && s.style == "color") { crate::APP_ID } else { "" }
     }
     #[zbus(property)]
     fn icon_pixmap(&self) -> Pixmaps {
@@ -306,6 +312,7 @@ impl Menu {
 }
 
 /// Our tray icon, once shown.
+#[derive(Clone)]
 pub struct Tray {
     state: Arc<Mutex<State>>,
 }
@@ -313,14 +320,16 @@ pub struct Tray {
 impl Tray {
     /// Show the icon with `items` in its menu. Err when there's no tray
     /// (no StatusNotifierWatcher) or no session bus.
-    pub fn show(items: Vec<MenuItem>, events: impl Fn(TrayEvent) + Send + Sync + 'static) -> Result<Tray, String> {
+    pub fn show(items: Vec<MenuItem>, style: &str, events: impl Fn(TrayEvent) + Send + Sync + 'static) -> Result<Tray, String> {
         let conn = crate::dbus::session()?;
+        let style = resolve_style(style);
         let state = Arc::new(Mutex::new(State {
             items,
             revision: 1,
             recording: false,
-            tooltip: "Flatshot".into(),
-            icon: app_icon(),
+            tooltip: crate::APP_NAME.into(),
+            style,
+            icon: app_icon(style),
             stop_icon: None,
             activation_token: None,
         }));
@@ -359,6 +368,22 @@ impl Tray {
         emit(MENU_PATH, MENU_IFACE, "LayoutUpdated", &(revision, 0i32));
     }
 
+    /// Show the icon in `style` (STYLES; "auto" is looked at again, so
+    /// this follows the desktop's scheme too).
+    pub fn set_style(&self, style: &str) {
+        let style = resolve_style(style);
+        {
+            let Ok(mut s) = self.state.lock() else { return };
+            // (the theme's colours may have changed: always drawn again)
+            if s.style == style && style != "theme" {
+                return;
+            }
+            s.style = style;
+            s.icon = app_icon(style);
+        }
+        emit(ITEM_PATH, ITEM_IFACE, "NewIcon", &());
+    }
+
     /// Recording or not: the icon becomes a stop button while it is.
     pub fn set_recording(&self, recording: bool) {
         let revision = {
@@ -369,7 +394,7 @@ impl Tray {
             s.recording = recording;
             s.revision += 1;
             if !recording {
-                s.tooltip = "Flatshot".into();
+                s.tooltip = crate::APP_NAME.into();
             }
             s.revision
         };
@@ -420,10 +445,143 @@ fn pixmap(img: &Image) -> (i32, i32, Vec<u8>) {
     (img.width() as i32, img.height() as i32, data)
 }
 
-/// Flatshot's icon at the sizes panels use.
-/// The tray icon as a picture of `size` pixels square: Flatshot's, or a
-/// stop button while recording.
-pub fn icon_image(size: u32, recording: bool) -> Option<Image> {
+/// The tray icon's looks: the app's own colours, the theme's, plain white
+/// or black outlines (for panels with symbolic icons), or white or black
+/// to suit the desktop's dark or light scheme.
+pub const STYLES: &[&str] = crate::config::TRAY_ICONS;
+
+/// `style` as drawn: "auto" becomes white or black, anything unknown the colour one.
+pub fn resolve_style(style: &str) -> &'static str {
+    match style {
+        "auto" if desktop_is_dark() => "white",
+        "auto" => "black",
+        s => STYLES.iter().find(|x| **x == s).copied().unwrap_or("color"),
+    }
+}
+
+/// Whether the desktop uses a dark colour scheme: the portal's appearance
+/// setting, else KDE's window colour; unknown counts as dark (the usual
+/// panel).
+pub fn desktop_is_dark() -> bool {
+    if let Some(scheme) = portal_color_scheme() {
+        match scheme {
+            1 => return true,
+            2 => return false,
+            _ => {}
+        }
+    }
+    let text = crate::util::read_limited(&crate::config::config_home().join("kdeglobals"), 1 << 20).unwrap_or_default();
+    kde_window_is_dark(&String::from_utf8_lossy(&text)).unwrap_or(true)
+}
+
+/// org.freedesktop.appearance color-scheme: 0 no preference, 1 dark, 2 light.
+fn portal_color_scheme() -> Option<u32> {
+    let conn = crate::dbus::session().ok()?;
+    let args = ("org.freedesktop.appearance", "color-scheme");
+    let call = |method: &str| conn.call_method(Some(PORTAL), "/org/freedesktop/portal/desktop", Some("org.freedesktop.portal.Settings"), method, &args).ok();
+    let reply = call("ReadOne").or_else(|| call("Read"))?;
+    let mut value: OwnedValue = reply.body().deserialize().ok()?;
+    // (Read wraps it once more)
+    loop {
+        match &*value {
+            Value::U32(v) => return Some(*v),
+            Value::Value(inner) => value = OwnedValue::try_from(&**inner).ok()?,
+            _ => return None,
+        }
+    }
+}
+
+const PORTAL: &str = "org.freedesktop.portal.Desktop";
+
+/// From kdeglobals: is [Colors:Window] BackgroundNormal dark?
+fn kde_window_is_dark(kdeglobals: &str) -> Option<bool> {
+    let mut in_window = false;
+    for line in kdeglobals.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_window = line == "[Colors:Window]";
+        } else if in_window && let Some(v) = line.strip_prefix("BackgroundNormal=") {
+            let c: Vec<f32> = v.split(',').take(3).filter_map(|x| x.trim().parse().ok()).collect();
+            let [r, g, b] = c[..] else { return None };
+            return Some(0.2126 * r + 0.7152 * g + 0.0722 * b < 128.0);
+        }
+    }
+    None
+}
+
+/// Call `changed` (on a thread of its own) whenever the desktop's colour
+/// scheme changes, for the "auto" icon.
+pub fn watch_color_scheme(mut changed: impl FnMut() + Send + 'static) -> Result<(), String> {
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender(PORTAL)
+        .and_then(|b| b.interface("org.freedesktop.portal.Settings"))
+        .and_then(|b| b.member("SettingChanged"))
+        .and_then(|b| b.add_arg("org.freedesktop.appearance"))
+        .map_err(|e| e.to_string())?
+        .build();
+    crate::dbus::listen(PORTAL, rule, "flatshot-scheme", move |msg| {
+        if msg.body().deserialize::<(String, String, OwnedValue)>().is_ok_and(|(_, key, _)| key == "color-scheme") {
+            changed();
+        }
+        true
+    })
+}
+
+/// The Flatshot logo (assets/flatshot-rs.svg, a 256 grid) at `size` pixels:
+/// on `back`, or (without one) marks filling the icon in thin lines with a
+/// margin round them, as the desktop's own symbolic tray icons are drawn.
+fn draw_logo(size: u32, back: Option<Color>, frame: Color, dot: Color) -> Option<Image> {
+    let mut img = Image::new(size, size).ok()?;
+    let mut p = Painter::new(img.pixmap_mut(), 1.0);
+    let f = size as f32;
+    let brackets = [
+        [(60.0, 104.0), (60.0, 60.0), (104.0, 60.0)],
+        [(152.0, 60.0), (196.0, 60.0), (196.0, 104.0)],
+        [(196.0, 152.0), (196.0, 196.0), (152.0, 196.0)],
+        [(104.0, 196.0), (60.0, 196.0), (60.0, 152.0)],
+    ];
+    let segments: Vec<&[(f32, f32)]> = brackets.iter().map(|b| &b[..]).collect();
+    let path = paint::polylines(&segments)?;
+    match back {
+        Some(back) => {
+            p.scale_by(f / 256.0, f / 256.0);
+            p.fill_rounded_rect(Rect::new(8.0, 8.0, 240.0, 240.0), 56.0, back);
+            p.stroke_path(&path, Pen::round(frame, 18.0));
+            p.fill_rounded_rect(Rect::new(104.0, 104.0, 48.0, 48.0), 12.0, dot);
+        }
+        None => {
+            let (lo, hi) = (52.0, 204.0); // the marks, with room for their stroke
+            let fill = 0.7; // of the icon
+            let k = fill * f / (hi - lo);
+            p.translate(f * (1.0 - fill) / 2.0, f * (1.0 - fill) / 2.0);
+            p.scale_by(k, k);
+            p.translate(-lo, -lo);
+            // (about 1.2 px at 22 px: Breeze's line)
+            p.stroke_path(&path, Pen::round(frame, (f / 18.0).max(1.2) / k));
+            // (a smaller dot, in step with the thin lines)
+            p.fill_rounded_rect(Rect::new(112.0, 112.0, 32.0, 32.0), 7.0, dot);
+        }
+    }
+    drop(p);
+    Some(img)
+}
+
+/// The tray icon in `style` (as resolve_style gives it) at `size` pixels.
+fn logo(size: u32, style: &str) -> Option<Image> {
+    match style {
+        "theme" => {
+            let c = theme::c();
+            draw_logo(size, Some(c.base), c.accent, c.code)
+        }
+        "white" => draw_logo(size, None, Color::rgb(0xFFFFFF), Color::rgb(0xFFFFFF)),
+        "black" => draw_logo(size, None, Color::rgb(0x000000), Color::rgb(0x000000)),
+        _ => crate::codec::decode_png(include_bytes!("../../assets/flatshot-rs.png")).ok()?.scaled_area(size, size).ok(),
+    }
+}
+
+/// The tray icon as a picture of `size` pixels square: Flatshot's (in
+/// `style`), or a stop button while recording.
+pub fn icon_image(size: u32, recording: bool, style: &str) -> Option<Image> {
     if recording {
         let mut img = Image::new(size, size).ok()?;
         let f = size as f32;
@@ -438,17 +596,20 @@ pub fn icon_image(size: u32, recording: bool) -> Option<Image> {
         pm.fill_rect(square, &paint, tiny_skia::Transform::identity(), None);
         return Some(img);
     }
-    crate::codec::decode_png(include_bytes!("../../assets/flatshot.png")).ok()?.scaled_area(size, size).ok()
+    logo(size, resolve_style(style))
 }
 
-fn app_icon() -> Pixmaps {
-    let Ok(full) = crate::codec::decode_png(include_bytes!("../../assets/flatshot.png")) else { return Vec::new() };
-    [16u32, 22, 32, 48, 64].iter().filter_map(|&s| full.scaled_area(s, s).ok()).map(|i| pixmap(&i)).collect()
+fn app_icon(style: &str) -> Pixmaps {
+    if style == "color" {
+        let Ok(full) = crate::codec::decode_png(include_bytes!("../../assets/flatshot-rs.png")) else { return Vec::new() };
+        return [16u32, 22, 32, 48, 64].iter().filter_map(|&s| full.scaled_area(s, s).ok()).map(|i| pixmap(&i)).collect();
+    }
+    [16u32, 22, 24, 32, 48, 64, 128].iter().filter_map(|&s| logo(s, style)).map(|i| pixmap(&i)).collect()
 }
 
 /// The icon while recording: the recording bar's red stop button.
 fn stop_icon() -> Pixmaps {
-    [16u32, 22, 32, 48, 64].iter().filter_map(|&size| icon_image(size, true)).map(|i| pixmap(&i)).collect()
+    [16u32, 22, 32, 48, 64].iter().filter_map(|&size| icon_image(size, true, "color")).map(|i| pixmap(&i)).collect()
 }
 
 #[cfg(test)]
@@ -467,8 +628,37 @@ mod tests {
     }
 
     #[test]
+    fn icon_styles() {
+        // White and black: thin outlines on nothing, filling the icon with a margin.
+        for (style, ink) in [("white", 255u8), ("black", 0)] {
+            let img = logo(22, style).unwrap();
+            let px = |x: u32, y: u32| img.row(y)[x as usize * 4..x as usize * 4 + 4].to_vec();
+            assert_eq!(px(0, 0)[3], 0, "{style}: the corner shows");
+            assert_eq!(px(11, 11), vec![ink, ink, ink, 255], "{style}: the dot in the middle");
+            let inked = (0..22).flat_map(|y| (0..22).map(move |x| (x, y))).filter(|&(x, y)| px(x, y)[3] > 0).count();
+            assert!(inked > 30 && inked < 22 * 22 / 2, "{style}: {inked} pixels inked");
+        }
+        // Theme: on the theme's base, as the colour icon.
+        let img = logo(32, "theme").unwrap();
+        let c = theme::c().base;
+        assert_eq!(img.row(16)[6 * 4 + 3], 255);
+        assert_eq!(img.row(16)[6 * 4 + 2], c.r);
+        assert_eq!(app_icon("white").len(), 7);
+        assert_eq!(resolve_style("nonsense"), "color");
+        assert!(["white", "black"].contains(&resolve_style("auto")));
+    }
+
+    #[test]
+    fn kde_scheme() {
+        let dark = "[General]\nColorScheme=BreezeDark\n\n[Colors:Window]\nBackgroundAlternate=0,0,0\nBackgroundNormal=32,35,38\n";
+        assert_eq!(kde_window_is_dark(dark), Some(true));
+        assert_eq!(kde_window_is_dark("[Colors:Window]\nBackgroundNormal=239,240,241\n"), Some(false));
+        assert_eq!(kde_window_is_dark("[Colors:View]\nBackgroundNormal=0,0,0\n"), None);
+    }
+
+    #[test]
     fn icons() {
-        let icon = app_icon();
+        let icon = app_icon("color");
         assert_eq!(icon.len(), 5);
         assert_eq!(icon[0].2.len(), 16 * 16 * 4);
         let stop = stop_icon();

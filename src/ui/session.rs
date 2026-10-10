@@ -21,11 +21,12 @@ use crate::template::Shot;
 use crate::timing::{self, Clock};
 use crate::ui::overlay::{Code, Grab, Handle, LOUPE_ZOOM, Output, Overlay, Window};
 use crate::ui::panels::{CodeChip, ColorPicker, PickerEvent, RecordPanel, RecordView, place_chips};
-use crate::ui::shapes::{Mods, Shape, Tool, copy_for_editing};
+use crate::ui::selection::Selection;
+use crate::ui::shapes::{self, Mods, Shape, Tool, copy_for_editing};
 use crate::ui::snapping::{self, EdgeMaps, py_round};
 use crate::ui::state::{CUSTOM, Desktop, State};
 use crate::ui::textedit::KeyResult;
-use crate::ui::toolbar::{Toolbar, View};
+use crate::ui::toolbar::{CodeScan, Toolbar, View};
 use crate::ui::widgets::Look;
 
 /// The recording formats, as the panel offers them.
@@ -211,6 +212,13 @@ pub struct Session {
     problems: Vec<(String, Option<String>)>,
     desktop: Option<Desktop>,
     codes: Vec<Code>,
+    /// codes are to be looked for, once shown (hidden at the start: not yet)
+    scan_pending: bool,
+    /// pictures still being looked through for codes
+    scans_left: usize,
+    /// the overlay whose select tool holds a drawing being dragged (which
+    /// may have been picked up from another monitor)
+    drag_owner: Option<usize>,
     /// overlays in the order things were drawn on them, for undo
     history: Vec<usize>,
     redo_stack: Vec<usize>,
@@ -297,6 +305,9 @@ impl Session {
             rx,
             waker,
             cancelled: Arc::new(AtomicBool::new(false)),
+            scan_pending: false,
+            scans_left: 0,
+            drag_owner: None,
             pointer: vec![None; n],
             hover: vec![Hover::default(); n],
             paste_target: None,
@@ -307,7 +318,7 @@ impl Session {
         }
         s.update_spans();
         for o in 0..n {
-            let tb = Toolbar::new(&toolbar_view(&s.st, 0, false, false));
+            let tb = Toolbar::new(&toolbar_view(&s.st, CodeScan::Found(0), false, false));
             s.overlays[o].toolbar = Some(tb);
             s.place_floating(o);
         }
@@ -321,9 +332,14 @@ impl Session {
         if let Some(c) = cursor {
             s.point_at(c);
         }
-        if s.st.cfg.scan_codes && s.request.scan {
-            // (once the overlay is on screen, so scanning doesn't hold it up)
-            s.schedule(Timer::Scan, SCAN_AFTER);
+        if s.request.scan {
+            // Codes are looked for while shown: now (once the overlay is on
+            // screen, so scanning doesn't hold it up), else once they are.
+            s.scan_pending = true;
+            if s.st.codes_visible {
+                s.schedule(Timer::Scan, SCAN_AFTER);
+            }
+            s.refresh_toolbars();
         }
         if s.st.snap_edges {
             for o in 0..n {
@@ -355,6 +371,7 @@ impl Session {
 
     /// The parts of overlay `o` to repaint now (device pixels of its buffer).
     pub fn damage(&mut self, o: usize) -> crate::geom::Damage {
+        self.share_drawings(o);
         let Some(ov) = self.overlays.get_mut(o) else { return Default::default() };
         ov.update_damage(&self.st);
         std::mem::take(&mut ov.damage)
@@ -375,15 +392,18 @@ impl Session {
             if let Some((h, ..)) = ov.rec_drag {
                 return handle_cursor(h);
             }
-            // (a text being dragged to a new place)
-            if ov.text_drag.is_some_and(|(_, origin)| self.st.text_edit.as_ref().and_then(|(_, s)| s.as_text()).is_some_and(|t| t.pos != origin)) {
-                return CursorShape::Move;
+            // (text being selected by dragging)
+            if ov.text_drag.is_some() && self.st.text_edit.is_some() {
+                return CursorShape::Text;
             }
             if self.st.tool == Tool::Record
                 && ov.sel_origin.is_none()
                 && let Some(h) = ov.cursor_pos.and_then(|p| ov.handle_at(p))
             {
                 return handle_cursor(h);
+            }
+            if self.st.tool == Tool::Select && !self.st.eyedropper {
+                return ov.cursor_pos.map_or(CursorShape::Arrow, |p| ov.selection.cursor(&ov.annotations, p, 1.0));
             }
             if self.st.tool == Tool::Text && !self.st.eyedropper { CursorShape::Text } else { CursorShape::Crosshair }
         };
@@ -499,6 +519,7 @@ impl Session {
         if self.done || o >= self.overlays.len() {
             return;
         }
+        self.scans_left = self.scans_left.saturating_sub(1);
         let dpr = self.overlays[o].dpr;
         for code in codes {
             let local: Vec<Point> = code.corners.iter().map(|p| *p / dpr).collect();
@@ -716,6 +737,16 @@ impl Session {
         }
         if self.st.countdown.is_some() {
             return;
+        }
+        if self.st.tool == Tool::Select
+            && let Some(so) = self.selected_on()
+        {
+            let len = self.overlays[so].annotations.len();
+            let ov = &mut self.overlays[so];
+            if ov.selection.key(&mut ov.annotations, press) {
+                self.selection_changed(so, len); // (Delete, or an arrow key nudging it)
+                return;
+            }
         }
         let save_keys = ctrl && (press.key == key::S || press.key == key::C);
         if self.st.tool == Tool::Record && enter {
@@ -964,13 +995,18 @@ impl Session {
             } else {
                 out.blit(&piece.scaled_area(dst.w as u32, dst.h as u32)?, dst.x, dst.y);
             }
-            if ov.annotations.iter().any(|s| !s.hidden) {
-                let mut p = Painter::new(out.pixmap_mut(), scale);
-                p.translate((g.x - area.x) as f32, (g.y - area.y) as f32);
-                // (what was drawn on this monitor stays on it, as it was seen)
-                p.clip_rect(Rect::new((part.x - g.x) as f32, (part.y - g.y) as f32, part.w as f32, part.h as f32));
+        }
+        // The drawings, wherever they reach: pixelate and blur take what's
+        // under them from this picture of the whole area, so one reaching
+        // across monitors covers both parts.
+        if self.overlays.iter().any(|o| o.annotations.iter().any(|s| !s.hidden)) {
+            let under = out.clone();
+            let mut p = Painter::new(out.pixmap_mut(), scale);
+            for ov in &self.overlays {
+                let g = ov.output.rect;
+                let d = Point::new((g.x - area.x) as f32, (g.y - area.y) as f32);
                 for shape in ov.annotations.iter().filter(|s| !s.hidden) {
-                    shape.paint(&mut p, &ov.base, d);
+                    shape.moved(d).paint(&mut p, &under, scale);
                 }
             }
         }
@@ -1016,9 +1052,8 @@ impl Session {
     }
 
     fn refresh_toolbars(&mut self) {
-        let code_count = self.code_count();
         let (can_undo, can_redo) = (self.can_undo(), self.can_redo());
-        let view = toolbar_view(&self.st, code_count, can_undo, can_redo);
+        let view = toolbar_view(&self.st, self.code_scan(), can_undo, can_redo);
         for ov in &mut self.overlays {
             if let Some(tb) = &mut ov.toolbar {
                 tb.refresh(&view);
@@ -1034,6 +1069,9 @@ impl Session {
         if self.st.tool == Tool::Record && tool != Tool::Record {
             self.disarm();
         }
+        if tool != Tool::Select {
+            self.select_on(None);
+        }
         self.st.tool = tool;
         if tool.uses_color() {
             self.st.colour_tool = tool;
@@ -1045,6 +1083,15 @@ impl Session {
     /// back to the last drawing tool, so the colour is used.
     pub fn set_color(&mut self, index: usize) {
         if self.st.tool == Tool::Record {
+            return;
+        }
+        if self.st.tool == Tool::Select
+            && let Some(so) = self.selected_on()
+        {
+            // (it changes the selected drawing)
+            self.st.color_index = index.min(CUSTOM);
+            let color = self.st.color();
+            self.restyle_selected(so, Some(color), None);
             return;
         }
         if !self.st.tool.uses_color() {
@@ -1118,6 +1165,23 @@ impl Session {
         if let Some((_, shape)) = &mut self.st.text_edit {
             shape.size = self.st.size;
         }
+        if self.st.tool == Tool::Select
+            && let Some(so) = self.selected_on()
+        {
+            return self.restyle_selected(so, None, Some(self.st.size));
+        }
+        self.refresh();
+    }
+
+    /// Beautify this capture and the next ones (Settings → After capture →
+    /// Beautify), or not.
+    fn toggle_beautify(&mut self) {
+        if self.st.tool == Tool::Record {
+            return;
+        }
+        let on = !self.st.cfg.beautify;
+        self.st.cfg.beautify = on;
+        config::update(move |c| c.beautify = on);
         self.refresh();
     }
 
@@ -1155,9 +1219,23 @@ impl Session {
     fn toggle_codes(&mut self) {
         self.st.codes_visible = !self.st.codes_visible;
         let on = self.st.codes_visible;
+        if on {
+            self.start_scan(); // (hidden at the start, so not looked for yet)
+        }
         self.st.cfg.show_codes = on;
         config::update(move |c| c.show_codes = on);
         self.refresh();
+    }
+
+    /// How the search for codes stands.
+    pub fn code_scan(&self) -> CodeScan {
+        if self.scans_left > 0 {
+            CodeScan::Scanning
+        } else if self.scan_pending {
+            CodeScan::NotYet
+        } else {
+            CodeScan::Found(self.code_count())
+        }
     }
 
     pub fn code_count(&self) -> usize {
@@ -1181,7 +1259,8 @@ impl Session {
     }
 
     fn next_number(&self) -> u32 {
-        1 + self.overlays.iter().flat_map(|o| o.annotations.iter()).filter(|s| s.is_counter()).count() as u32
+        // (one more than the highest shown: a moved counter keeps its number)
+        shapes::next_number(self.overlays.iter().flat_map(|o| o.annotations.iter()))
     }
 
     // -- recording -----------------------------------------------------------------------
@@ -1349,6 +1428,128 @@ impl Session {
         self.record(o);
     }
 
+    // Drawings cross monitors: each overlay owns the drawings begun on it,
+    // and also paints the others' that reach it.
+
+    /// Where a point on overlay `from` is on overlay `to` (each in its own
+    /// logical coordinates).
+    fn to_overlay(&self, from: usize, to: usize, p: Point) -> Point {
+        let (a, b) = (self.overlays[from].output.rect, self.overlays[to].output.rect);
+        p + Point::new((a.x - b.x) as f32, (a.y - b.y) as f32)
+    }
+
+    /// Each overlay, topmost drawings first (the other overlays' are painted
+    /// over this one's own), with `pos` (on `o`) in its coordinates.
+    fn topmost_first(&self, o: usize, pos: Point) -> Vec<(usize, Point)> {
+        let mut order: Vec<usize> = (0..self.overlays.len()).filter(|&k| k != o).rev().collect();
+        order.push(o);
+        order.into_iter().map(|k| (k, self.to_overlay(o, k, pos))).collect()
+    }
+
+    /// The topmost text at `pos` on `o`, wherever it was typed: (its
+    /// overlay, its index there, `pos` in that overlay's coordinates).
+    fn text_at_any(&self, o: usize, pos: Point) -> Option<(usize, usize, Point)> {
+        self.topmost_first(o, pos).into_iter().find_map(|(k, local)| self.overlays[k].text_at(local).map(|i| (k, i, local)))
+    }
+
+    /// The overlay whose select tool takes a press at `pos` on `o`: the one
+    /// with a drawing selected, on its handles or the drawing; else the one
+    /// owning the topmost drawing there.
+    fn select_owner(&self, o: usize, pos: Point) -> usize {
+        if let Some(k) = (0..self.overlays.len()).find(|&k| self.overlays[k].selection.current(&self.overlays[k].annotations).is_some()) {
+            let local = self.to_overlay(o, k, pos);
+            if self.overlays[k].selection.holds(&self.overlays[k].annotations, local, 1.0) {
+                return k;
+            }
+        }
+        self.topmost_first(o, pos).into_iter().find(|(k, local)| !Selection::hits(&self.overlays[*k].annotations, *local, 1.0).is_empty()).map_or(o, |(k, _)| k)
+    }
+
+    /// Bring overlay `o`'s copies of the other monitors' drawings up to date:
+    /// those done (again only when they change), and those under way.
+    fn share_drawings(&mut self, o: usize) {
+        if self.overlays.len() < 2 || o >= self.overlays.len() {
+            return;
+        }
+        let here = self.overlays[o].rect();
+        let others: Vec<usize> = (0..self.overlays.len()).filter(|&k| k != o).collect();
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for &k in &others {
+                let ov = &self.overlays[k];
+                (k, ov.annotations.len()).hash(&mut h);
+                for s in &ov.annotations {
+                    s.hidden.hash(&mut h);
+                }
+            }
+            h.finish()
+        };
+        let offsets: Vec<Point> = (0..self.overlays.len()).map(|k| self.to_overlay(k, o, Point::ZERO)).collect();
+        let moved_here = |k: usize, s: &Shape| {
+            let m = s.moved(offsets[k]);
+            m.bounds().intersects(&here).then_some(m)
+        };
+        if key != self.overlays[o].foreign_key {
+            let foreign: Vec<Shape> = others
+                .iter()
+                .flat_map(|&k| self.overlays[k].annotations.iter().filter(|s| !s.hidden && !s.is_removed()).map(move |s| (k, s)))
+                .filter_map(|(k, s)| moved_here(k, s))
+                .collect();
+            self.overlays[o].foreign = foreign;
+            self.overlays[o].foreign_key = key;
+        }
+        let mut live: Vec<Shape> = Vec::new();
+        for &k in &others {
+            let ov = &self.overlays[k];
+            for s in ov.active.iter().chain(ov.selection.moving()) {
+                live.extend(moved_here(k, s));
+            }
+        }
+        if let Some((k, s)) = &self.st.text_edit
+            && *k != o
+        {
+            live.extend(moved_here(*k, s));
+        }
+        self.overlays[o].foreign_live = live;
+    }
+
+    // The select tool: one drawing selected at a time, on one monitor.
+
+    /// Selecting on overlay `o` (None: nowhere): drop what's selected on the others.
+    fn select_on(&mut self, o: Option<usize>) {
+        for (i, ov) in self.overlays.iter_mut().enumerate() {
+            if Some(i) != o {
+                ov.selection.clear(&mut ov.annotations);
+            }
+        }
+    }
+
+    /// The overlay with a drawing selected, if any.
+    fn selected_on(&mut self) -> Option<usize> {
+        (0..self.overlays.len()).find(|&i| {
+            let ov = &mut self.overlays[i];
+            ov.selection.index(&ov.annotations).is_some()
+        })
+    }
+
+    /// The selection on `o` changed its drawings (they were `before` long):
+    /// a changed copy is an undo step.
+    fn selection_changed(&mut self, o: usize, before: usize) {
+        if self.overlays[o].annotations.len() > before {
+            self.overlays[o].undone.clear();
+            self.record(o);
+        }
+        self.refresh();
+    }
+
+    fn restyle_selected(&mut self, o: usize, color: Option<Color>, size: Option<usize>) {
+        let len = self.overlays[o].annotations.len();
+        let ov = &mut self.overlays[o];
+        ov.selection.restyle(&mut ov.annotations, color, size);
+        self.selection_changed(o, len);
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.history.is_empty() || self.st.text_edit.is_some()
     }
@@ -1359,6 +1560,7 @@ impl Session {
 
     pub fn undo(&mut self) {
         self.commit_text();
+        self.select_on(None);
         if let Some(o) = self.history.pop()
             && self.overlays[o].undo()
         {
@@ -1369,6 +1571,7 @@ impl Session {
 
     pub fn redo(&mut self) {
         self.commit_text();
+        self.select_on(None);
         if let Some(o) = self.redo_stack.pop()
             && self.overlays[o].redo()
         {
@@ -1381,10 +1584,7 @@ impl Session {
 
     fn begin_text(&mut self, o: usize, shape: Shape) {
         self.commit_text();
-        if let Some(t) = shape.as_text()
-            && let Some((i, ..)) = &t.replaces
-            && let Some(orig) = self.overlays[o].annotations.get_mut(*i)
-        {
+        if let Some(orig) = shape.replaces.and_then(|i| self.overlays[o].annotations.get_mut(i)) {
             orig.hidden = true; // (the copy is shown while it's edited)
         }
         self.st.text_edit = Some((o, shape));
@@ -1394,10 +1594,9 @@ impl Session {
     /// Finish the text being typed; true if there was one.
     pub fn commit_text(&mut self) -> bool {
         let Some((o, mut shape)) = self.st.text_edit.take() else { return false };
-        let mut replaces = None;
+        let replaces = shape.replaces;
         if let Some(t) = shape.as_text_mut() {
             t.editing = false;
-            replaces = t.replaces.as_ref().map(|r| r.0);
         }
         if o < self.overlays.len() {
             if shape.is_valid() && shape.text_changed() {
@@ -1421,6 +1620,7 @@ impl Session {
             "redo" => self.redo(),
             "codes" => self.toggle_codes(),
             "pin" => self.toggle_pin(),
+            "beautify" => self.toggle_beautify(),
             "snap" => self.toggle_snap(),
             "pointer" => self.toggle_pointer(),
             "copy_color" => self.copy_color(target),
@@ -1467,6 +1667,8 @@ impl Session {
             return;
         }
         self.commit_text();
+        // (the other monitors' drawings that reach this one, as they are now)
+        self.share_drawings(o);
         self.clock.step("chosen", "");
         let ov = &self.overlays[o];
         let drawn = ov.annotations.len();
@@ -1539,8 +1741,14 @@ impl Session {
     }
 
     /// Look for codes on each monitor's picture, one after another, in the
-    /// background.
+    /// background; once a capture (later calls do nothing).
     fn start_scan(&mut self) {
+        if !std::mem::take(&mut self.scan_pending) || self.done {
+            return;
+        }
+        self.timers.retain(|x| x.1 != Timer::Scan);
+        self.scans_left = self.overlays.len();
+        self.refresh_toolbars();
         let pictures: Vec<(usize, Arc<Image>)> = self.overlays.iter().map(|o| (o.index, o.plain.clone().unwrap_or_else(|| o.base.clone()))).collect();
         let (tx, waker, cancelled) = (self.tx.clone(), self.waker.clone(), self.cancelled.clone());
         let started = std::thread::Builder::new().name("flatshot-scan".into()).spawn(move || {
@@ -1559,7 +1767,8 @@ impl Session {
             }
         });
         if let Err(e) = started {
-            eprintln!("flatshot: could not start looking for codes: {e}");
+            self.scans_left = 0;
+            eprintln!("flatshot-rs: could not start looking for codes: {e}");
         }
     }
 
@@ -1748,6 +1957,10 @@ impl Session {
 
     fn cancel_gesture(&mut self, o: usize) -> bool {
         let ov = &mut self.overlays[o];
+        if ov.selection.clear(&mut ov.annotations) {
+            self.refresh();
+            return true;
+        }
         if ov.sel_rect.is_some() || ov.active.is_some() || ov.rec_drag.is_some() {
             let spanned = ov.sel_rect.is_some() && self.st.spans;
             ov.sel_origin = None;
@@ -1785,8 +1998,9 @@ impl Session {
     }
 
     /// Move or resize the recording area; a resized edge goes to `snapped`
-    /// when snapping found an edge there.
-    fn drag_area(&mut self, o: usize, pos: Point, snapped: Option<Point>) {
+    /// when snapping found an edge there. `center` (Ctrl): the opposite edge
+    /// moves the other way, so the area stays centred.
+    fn drag_area(&mut self, o: usize, pos: Point, snapped: Option<Point>, center: bool) {
         let Some((handle, start, r0)) = self.overlays[o].rec_drag else { return };
         let d = pos - start;
         let bounds = self.drag_bounds(o);
@@ -1795,6 +2009,24 @@ impl Session {
                 let mut r = r0.translated(d);
                 r.x = r.x.min(bounds.right() - r.w).max(bounds.left());
                 r.y = r.y.min(bounds.bottom() - r.h).max(bounds.top());
+                r
+            }
+            Handle::Edges { left, right, top, bottom } if center => {
+                // The dragged edge follows the pointer as without Ctrl; the other mirrors it.
+                let c = r0.center();
+                let mut r = r0;
+                if left || right {
+                    let edge = if left { r0.left() } else { r0.right() } + d.x;
+                    let half = (edge - c.x).abs().min(c.x - bounds.left()).min(bounds.right() - c.x);
+                    r.x = c.x - half;
+                    r.w = 2.0 * half;
+                }
+                if top || bottom {
+                    let edge = if top { r0.top() } else { r0.bottom() } + d.y;
+                    let half = (edge - c.y).abs().min(c.y - bounds.top()).min(bounds.bottom() - c.y);
+                    r.y = c.y - half;
+                    r.h = 2.0 * half;
+                }
                 r
             }
             Handle::Edges { left, right, top, bottom } => {
@@ -2098,6 +2330,7 @@ impl Session {
             "pointer" => self.toggle_pointer(),
             "undo" => self.undo(),
             "redo" => self.redo(),
+            "beautify" => self.toggle_beautify(),
             "pin" => self.toggle_pin(),
             "screen" => self.whole_screen(o),
             "close" => self.cancel(),
@@ -2149,20 +2382,23 @@ impl Session {
         self.close_picker(); // a click elsewhere closes it, and does what it would anyway
         // In the text being typed: the caret goes there (Shift: selects to
         // there); a drag moves the text.
-        if let Some((eo, shape)) = &mut self.st.text_edit
-            && *eo == o
-        {
-            let size = shape.size;
-            if let Some(t) = shape.as_text_mut()
-                && t.contains(pos, size)
-            {
-                let i = t.index_at(pos, size);
-                t.edit.place(i, mods & keyseq::SHIFT != 0);
-                self.overlays[o].text_drag = Some((pos, t.pos));
-                return;
+        if let Some(eo) = self.st.text_edit.as_ref().map(|(eo, _)| *eo).filter(|&eo| eo < self.overlays.len()) {
+            let local = self.to_overlay(o, eo, pos);
+            if let Some((_, shape)) = &mut self.st.text_edit {
+                let size = shape.size;
+                if let Some(t) = shape.as_text_mut()
+                    && t.contains(local, size)
+                {
+                    let i = t.index_at(local, size);
+                    t.edit.place(i, mods & keyseq::SHIFT != 0);
+                    if eo == o {
+                        self.overlays[o].text_drag = Some((pos, t.pos));
+                    }
+                    return;
+                }
             }
         }
-        if self.commit_text() && self.st.tool == Tool::Text && self.overlays[o].text_at(pos).is_none() {
+        if self.commit_text() && self.st.tool == Tool::Text && self.text_at_any(o, pos).is_none() {
             return; // the first click just finishes the text being typed
         }
         let tool = self.st.tool;
@@ -2182,24 +2418,36 @@ impl Session {
             self.overlays[o].sel_rect = Some(Rect::new(pos.x, pos.y, 0.0, 0.0));
             self.refresh();
         } else if tool == Tool::Text {
-            let shape = match self.overlays[o].text_at(pos) {
-                Some(i) => {
+            // (a text reaching here from another monitor is edited there)
+            let (k, shape) = match self.text_at_any(o, pos) {
+                Some((k, i, local)) => {
                     // edit it again (a copy, so undo brings back the original)
-                    let Some(mut s) = copy_for_editing(&self.overlays[o].annotations[i], i) else { return };
+                    let Some(mut s) = copy_for_editing(&self.overlays[k].annotations[i], i) else { return };
                     let size = s.size;
                     if let Some(t) = s.as_text_mut() {
-                        let at = t.index_at(pos, size);
+                        let at = t.index_at(local, size);
                         t.edit.place(at, false);
-                        self.overlays[o].text_drag = Some((pos, t.pos));
+                        if k == o {
+                            self.overlays[o].text_drag = Some((pos, t.pos));
+                        }
                     }
-                    s
+                    (k, s)
                 }
-                None => Shape::text(pos, self.st.color(), self.st.size),
+                None => (o, Shape::text(pos, self.st.color(), self.st.size)),
             };
-            self.begin_text(o, shape);
+            self.begin_text(k, shape);
         } else if tool == Tool::Counter {
             let n = self.next_number();
             self.commit_shape(o, Shape::counter(pos, self.st.color(), self.st.size, n));
+        } else if tool == Tool::Select {
+            // (a drawing reaching here from another monitor is picked up there)
+            let k = self.select_owner(o, pos);
+            let local = self.to_overlay(o, k, pos);
+            self.select_on(Some(k));
+            self.drag_owner = Some(k);
+            let ov = &mut self.overlays[k];
+            ov.selection.press(&mut ov.annotations, local, mods, 1.0);
+            self.refresh();
         } else {
             self.overlays[o].active = Shape::create(tool, pos, self.st.color(), self.st.size);
         }
@@ -2208,6 +2456,12 @@ impl Session {
     fn canvas_motion(&mut self, o: usize, pos: Point, mods: i32) {
         self.overlays[o].cursor_pos = Some(pos);
         self.activate(o);
+        if let Some(k) = self.drag_owner.filter(|&k| k < self.overlays.len() && self.overlays[k].selection.dragging()) {
+            let local = self.to_overlay(o, k, pos);
+            let ov = &mut self.overlays[k];
+            ov.selection.motion(&mut ov.annotations, local, mods);
+            return;
+        }
         let selecting = matches!(self.st.tool, Tool::Region | Tool::Record) && self.overlays[o].active.is_none();
         // Where the selection would start or end (the crosshair shows it).
         let snap = if selecting && self.st.snap_edges { Some(self.snapped(o, pos, mods)) } else { None };
@@ -2223,15 +2477,15 @@ impl Session {
                 self.selection_moved(o, Some(pos));
             }
         } else if ov.rec_drag.is_some() {
-            self.drag_area(o, pos, snap);
-        } else if let Some((start, origin)) = ov.text_drag
-            && editing_here
-        {
-            if let Some((_, shape)) = &mut self.st.text_edit
-                && let Some(t) = shape.as_text_mut()
-                && ((pos - start).manhattan() > 3.0 || t.pos != origin)
-            {
-                t.pos = origin + (pos - start);
+            self.drag_area(o, pos, snap, mods & keyseq::CTRL != 0);
+        } else if ov.text_drag.is_some() && editing_here {
+            // Dragging in the text selects (only the select tool moves text).
+            if let Some((_, shape)) = &mut self.st.text_edit {
+                let size = shape.size;
+                if let Some(t) = shape.as_text_mut() {
+                    let i = t.index_at(pos, size);
+                    t.edit.place(i, true);
+                }
             }
         } else if let Some(active) = &mut ov.active {
             active.extend(pos, Mods::from_keys(mods));
@@ -2246,6 +2500,12 @@ impl Session {
         }
         if self.overlays[o].text_drag.take().is_some() {
             return;
+        }
+        if let Some(k) = self.drag_owner.take().filter(|&k| k < self.overlays.len() && self.overlays[k].selection.dragging()) {
+            let len = self.overlays[k].annotations.len();
+            let ov = &mut self.overlays[k];
+            ov.selection.release(&mut ov.annotations);
+            return self.selection_changed(k, len);
         }
         if self.overlays[o].sel_origin.is_some() {
             let mut rect = self.overlays[o].sel_rect.take();
@@ -2310,7 +2570,7 @@ impl Drop for Session {
 }
 
 /// The toolbar's view of the state.
-fn toolbar_view(st: &State, code_count: usize, can_undo: bool, can_redo: bool) -> View<'_> {
+fn toolbar_view(st: &State, codes: CodeScan, can_undo: bool, can_redo: bool) -> View<'_> {
     View {
         tool: st.tool,
         can_record: st.can_record,
@@ -2318,13 +2578,14 @@ fn toolbar_view(st: &State, code_count: usize, can_undo: bool, can_redo: bool) -
         custom_color: st.custom_color,
         size: st.size,
         codes_visible: st.codes_visible,
-        code_count,
+        codes,
         snap: st.snap_edges,
         pointer_available: st.pointer_available,
         show_pointer: st.show_pointer,
         can_undo,
         can_redo,
         pin_mode: st.pin_mode,
+        beautify: st.cfg.beautify,
         keymap: &st.keymap,
     }
 }

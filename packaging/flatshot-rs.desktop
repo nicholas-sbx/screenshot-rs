@@ -1,36 +1,37 @@
 [Desktop Entry]
 Type=Application
-Name=Flatshot
+Name=Flatshot RS
 GenericName=Screenshot Tool
 Comment=Region screenshots with a floating draw toolbar and QR code scanning
-Exec=flatshot --tray
-Icon=flatshot
+Exec=flatshot-rs --tray
+Icon=flatshot-rs
 Terminal=false
 Categories=Graphics;Utility;
-Keywords=screenshot;capture;snip;qr;barcode;annotate;
+Keywords=screenshot;capture;snip;qr;barcode;annotate;flatshot;
 StartupNotify=false
+StartupWMClass=flatshot-rs
 Actions=Region;Monitor;Full;LastRegion;Pin;Settings;
 
 [Desktop Action Region]
 Name=Capture Region
-Exec=flatshot
+Exec=flatshot-rs
 
 [Desktop Action Monitor]
 Name=Capture Current Monitor
-Exec=flatshot --monitor
+Exec=flatshot-rs --monitor
 
 [Desktop Action Full]
 Name=Capture All Screens
-Exec=flatshot --full
+Exec=flatshot-rs --full
 
 [Desktop Action LastRegion]
 Name=Capture Last Region
-Exec=flatshot --last-region
+Exec=flatshot-rs --last-region
 
 [Desktop Action Pin]
 Name=Pin Region to Screen
-Exec=flatshot --pin
+Exec=flatshot-rs --pin
 
 [Desktop Action Settings]
 Name=Settings
-Exec=flatshot --settings
+Exec=flatshot-rs --settings

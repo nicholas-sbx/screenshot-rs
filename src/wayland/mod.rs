@@ -264,8 +264,8 @@ impl Wayland {
             layer = Some(l);
         } else if let Some(xdg) = &self.xdg_shell {
             let w = xdg.create_window(surface.clone(), WindowDecorations::None, qh);
-            w.set_title("Flatshot");
-            w.set_app_id("flatshot");
+            w.set_title(crate::APP_NAME);
+            w.set_app_id(crate::APP_ID);
             w.set_fullscreen(monitor.wl_output());
             window = Some(w);
         } else {
@@ -359,7 +359,7 @@ impl Wayland {
         let decorations = if decorated { WindowDecorations::RequestServer } else { WindowDecorations::None };
         let w = xdg.create_window(surface.clone(), decorations, qh);
         w.set_title(title);
-        w.set_app_id("flatshot");
+        w.set_app_id(crate::APP_ID);
         let (viewport, fractional) = self.scaling(&surface);
         w.commit();
         let mut surf = Surf::new(owner, surface, size);

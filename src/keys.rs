@@ -19,6 +19,7 @@ pub enum Where {
 pub const BINDINGS: &[(&str, &str, &str, Where)] = &[
     ("tool.region", "Capture region", "R", Where::Capture),
     ("tool.record", "Record screen", "V", Where::Capture),
+    ("tool.select", "Select, move and resize drawings", "S", Where::Both),
     ("tool.pen", "Pen", "P", Where::Both),
     ("tool.line", "Line", "L", Where::Both),
     ("tool.arrow", "Arrow", "A", Where::Both),
@@ -30,6 +31,7 @@ pub const BINDINGS: &[(&str, &str, &str, Where)] = &[
     ("tool.pixelate", "Pixelate", "X", Where::Both),
     ("tool.blur", "Blur", "U", Where::Both),
     ("tool.counter", "Counter", "N", Where::Both),
+    ("tool.crop", "Crop, cut out, rotate and resize", "C", Where::Editor),
     ("color.1", "Colour 1: ember", "1", Where::Both),
     ("color.2", "Colour 2: amber", "2", Where::Both),
     ("color.3", "Colour 3: mint", "3", Where::Both),
@@ -55,6 +57,7 @@ pub const BINDINGS: &[(&str, &str, &str, Where)] = &[
     ("zoom_in", "Zoom in", "Ctrl+=", Where::Editor),
     ("zoom_out", "Zoom out", "Ctrl+-", Where::Editor),
     ("close", "Close the editor", "Ctrl+W", Where::Editor),
+    ("beautify", "Beautify: background, padding and shadow", "Ctrl+B", Where::Both),
 ];
 
 /// The groups Settings shows the keys in.
@@ -64,7 +67,7 @@ pub fn groups() -> Vec<(&'static str, Vec<&'static str>)> {
         ("Tools", actions(&|a| a.starts_with("tool."))),
         ("Colours, sizes and undo", actions(&|a| a.starts_with("color.") || a.starts_with("size.") || a == "undo" || a == "redo")),
         ("While capturing", vec!["codes", "pin", "snap", "pointer", "copy_color"]),
-        ("Annotation editor", vec!["save", "save_as", "copy", "fit", "actual_size", "zoom_in", "zoom_out", "close"]),
+        ("Annotation editor", vec!["save", "save_as", "copy", "fit", "actual_size", "zoom_in", "zoom_out", "close", "beautify"]),
     ]
 }
 

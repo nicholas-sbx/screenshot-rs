@@ -32,7 +32,7 @@ pub fn default_sound() -> Option<&'static str> {
 pub fn play(path: &str) -> bool {
     if path.is_empty() && default_sound().is_none() && util::have("canberra-gtk-play") {
         // No theme file we know of: let libcanberra find the theme's sound.
-        return util::spawn(&["canberra-gtk-play", "-i", "screen-capture", "-d", "Flatshot"]);
+        return util::spawn(&["canberra-gtk-play", "-i", "screen-capture", "-d", crate::APP_NAME]);
     }
     let target = if path.is_empty() { PathBuf::from(default_sound().unwrap_or_default()) } else { PathBuf::from(crate::config::expand_user(path)) };
     // Absolute, so it can't be taken for one of the player's options.

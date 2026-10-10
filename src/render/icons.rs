@@ -50,6 +50,22 @@ pub const NAMES: &[&str] = &[
     "fit",
     "save",
     "save-as",
+    "select",
+    "zoom-in",
+    "zoom-out",
+    "crop",
+    "rotate-left",
+    "rotate-right",
+    "flip-h",
+    "flip-v",
+    "cut-rows",
+    "cut-cols",
+    "resize",
+    "ratio",
+    "margin",
+    "beautify",
+    "link",
+    "unlink",
 ];
 
 struct Ctx<'a, 'b> {
@@ -127,6 +143,13 @@ pub fn arc_to(pb: &mut PathBuilder, r: Rect, start: f32, sweep: f32, move_first:
     }
 }
 
+/// A quarter turn about the icon's middle.
+fn turn_quarter(c: &mut Ctx<'_, '_>) {
+    c.p.translate(12.0, 12.0);
+    c.p.rotate(90.0);
+    c.p.translate(-12.0, -12.0);
+}
+
 fn draw_icon(c: &mut Ctx<'_, '_>, name: &str) {
     let color = c.color;
     match name {
@@ -138,6 +161,10 @@ fn draw_icon(c: &mut Ctx<'_, '_>, name: &str) {
             &[(12.0, 9.5), (12.0, 14.5)],
             &[(9.5, 12.0), (14.5, 12.0)],
         ]),
+        "select" => {
+            let arrow = c.closed(&[(6.0, 3.5), (6.0, 18.0), (10.0, 14.5), (12.7, 20.0), (15.2, 18.9), (12.5, 13.4), (17.5, 13.2)]);
+            c.stroke(arrow);
+        }
         "pen" => {
             let body = c.closed(&[(4.0, 20.0), (5.0, 15.5), (15.5, 5.0), (19.0, 8.5), (8.5, 19.0)]);
             c.stroke(body);
@@ -200,9 +227,88 @@ fn draw_icon(c: &mut Ctx<'_, '_>, name: &str) {
             c.stroke(body);
         }
         "fit" => {
+            // A picture with arrows out to the window's corners: fit it in the window.
+            c.rrect(8.0, 9.0, 8.0, 6.0, 1.2);
+            c.lines(&[
+                &[(3.5, 8.0), (3.5, 3.5), (8.0, 3.5)],
+                &[(16.0, 3.5), (20.5, 3.5), (20.5, 8.0)],
+                &[(20.5, 16.0), (20.5, 20.5), (16.0, 20.5)],
+                &[(8.0, 20.5), (3.5, 20.5), (3.5, 16.0)],
+            ]);
+        }
+        "zoom-in" | "zoom-out" => {
             c.ellipse(3.5, 3.5, 13.0, 13.0);
             c.line((14.6, 14.6), (20.5, 20.5));
-            c.rrect(6.8, 7.6, 6.4, 4.8, 1.0);
+            c.line((7.0, 10.0), (13.0, 10.0));
+            if name == "zoom-in" {
+                c.line((10.0, 7.0), (10.0, 13.0));
+            }
+        }
+        "crop" => c.lines(&[&[(7.0, 3.0), (7.0, 17.0), (21.0, 17.0)], &[(3.0, 7.0), (17.0, 7.0), (17.0, 21.0)]]),
+        "rotate-left" | "rotate-right" => {
+            // A quarter-turn arrow, round a square.
+            c.p.save();
+            if name == "rotate-left" {
+                c.p.translate(24.0, 0.0);
+                c.p.scale_by(-1.0, 1.0);
+            }
+            c.rrect(4.0, 10.0, 10.0, 10.0, 2.0);
+            let mut pb = PathBuilder::new();
+            pb.move_to(9.0, 6.5);
+            pb.cubic_to(13.0, 3.5, 18.5, 5.0, 19.5, 11.0);
+            c.stroke(pb.finish());
+            c.lines(&[&[(17.0, 9.5), (19.5, 12.0), (22.0, 9.5)]]);
+            c.p.restore();
+        }
+        "flip-h" | "flip-v" => {
+            c.p.save();
+            if name == "flip-v" {
+                turn_quarter(c);
+            }
+            c.lines(&[&[(10.0, 5.0), (3.0, 19.0), (10.0, 19.0)], &[(14.0, 5.0), (21.0, 19.0), (14.0, 19.0)]]);
+            c.lines(&[&[(10.0, 5.0), (10.0, 19.0)], &[(14.0, 5.0), (14.0, 19.0)]]);
+            c.p.restore();
+        }
+        "cut-rows" | "cut-cols" => {
+            c.p.save();
+            if name == "cut-cols" {
+                turn_quarter(c);
+            }
+            c.rrect(4.0, 3.0, 16.0, 5.0, 1.5);
+            c.rrect(4.0, 16.0, 16.0, 5.0, 1.5);
+            c.lines(&[&[(12.0, 9.5), (12.0, 14.5)], &[(9.5, 12.0), (14.5, 12.0)]]);
+            c.p.restore();
+        }
+        "resize" => {
+            c.rrect(4.0, 11.0, 9.0, 9.0, 1.5);
+            c.lines(&[&[(10.0, 14.0), (19.0, 5.0)], &[(14.0, 5.0), (19.0, 5.0), (19.0, 10.0)]]);
+        }
+        "ratio" => {
+            c.rrect(3.0, 6.0, 18.0, 12.0, 2.0);
+            c.rrect(7.0, 9.0, 10.0, 6.0, 1.0);
+        }
+        "margin" => {
+            c.rrect(3.0, 3.0, 18.0, 18.0, 2.0);
+            c.p.fill_rounded_rect(Rect::new(8.0, 8.0, 8.0, 8.0), 1.0, color);
+            c.rrect(8.0, 8.0, 8.0, 8.0, 1.0);
+        }
+        "beautify" => {
+            // A picture on a backdrop, with a sparkle.
+            c.rrect(3.0, 5.0, 18.0, 15.0, 3.0);
+            c.p.fill_rounded_rect(Rect::new(7.0, 9.0, 10.0, 7.0), 1.5, color);
+            c.rrect(7.0, 9.0, 10.0, 7.0, 1.5);
+            c.lines(&[&[(19.0, 1.5), (19.0, 5.5)], &[(17.0, 3.5), (21.0, 3.5)]]);
+        }
+        "link" | "unlink" => {
+            // Two chain links along a diagonal: joined (width and height kept together), or apart.
+            let gap = if name == "link" { 0.0 } else { 7.0 };
+            c.p.save();
+            c.p.translate(12.0, 12.0);
+            c.p.rotate(-45.0);
+            let w = 9.5;
+            c.rrect(-w - gap / 2.0 + 2.0, -3.2, w, 6.4, 3.2);
+            c.rrect(gap / 2.0 - 2.0, -3.2, w, 6.4, 3.2);
+            c.p.restore();
         }
         "counter" => {
             c.ellipse(4.0, 4.0, 16.0, 16.0);

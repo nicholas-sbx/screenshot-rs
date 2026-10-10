@@ -35,6 +35,7 @@ impl Mods {
 pub enum Tool {
     Region,
     Record,
+    Select,
     Pen,
     Line,
     Arrow,
@@ -46,12 +47,15 @@ pub enum Tool {
     Pixelate,
     Blur,
     Counter,
+    /// the editor's: crop, cut out, rotate and resize the picture
+    Crop,
 }
 
 /// (tool, id, label), in toolbar order.
 pub const TOOLS: &[(Tool, &str, &str)] = &[
     (Tool::Region, "region", "Capture region"),
     (Tool::Record, "record", "Record screen"),
+    (Tool::Select, "select", "Select, move and resize drawings"),
     (Tool::Pen, "pen", "Pen"),
     (Tool::Line, "line", "Line"),
     (Tool::Arrow, "arrow", "Arrow"),
@@ -63,6 +67,7 @@ pub const TOOLS: &[(Tool, &str, &str)] = &[
     (Tool::Pixelate, "pixelate", "Pixelate"),
     (Tool::Blur, "blur", "Blur"),
     (Tool::Counter, "counter", "Counter"),
+    (Tool::Crop, "crop", "Crop, cut out, rotate and resize"),
 ];
 
 impl Tool {
@@ -136,7 +141,7 @@ fn square(d: Point) -> Point {
 }
 
 /// The same length, turned to the nearest multiple of 45° (QLineF::setAngle).
-fn snap45(d: Point) -> Point {
+pub fn snap45(d: Point) -> Point {
     let len = d.length();
     // QLineF angles run counter-clockwise with y down.
     let angle = (-d.y).atan2(d.x).to_degrees();
@@ -171,9 +176,9 @@ pub struct TextShape {
     pub pos: Point,
     pub edit: TextEdit,
     pub editing: bool,
-    /// The text this is an edited copy of (its index in the list), and
-    /// how that one was: (text, pos, color, size).
-    pub replaces: Option<(usize, String, Point, Color, usize)>,
+    /// For an edited copy (see Shape::replaces): how the text it replaces
+    /// was, (text, pos, color, size).
+    pub original: Option<(String, Point, Color, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -187,16 +192,29 @@ pub enum Kind {
     Pixelate(Drag, CoverCache),
     Blur(Drag, CoverCache),
     Text(TextShape),
-    Counter { pos: Point, number: u32 },
+    Counter {
+        pos: Point,
+        number: u32,
+    },
+    /// A deleted drawing: nothing, in place of the one it replaces, so undo
+    /// brings that back.
+    Removed,
+    /// The editor's picture changed (cropped, turned, ...): an undo step.
+    Step(std::rc::Rc<crate::ui::picture::Step>),
 }
 
+/// A drawing. One that's moved, resized, restyled, removed or its text
+/// edited is replaced by a copy (`replaces`: the index of the one it
+/// changes, in the same list, which is hidden meanwhile), so undo brings
+/// the old one back by dropping the copy.
 #[derive(Clone, Debug)]
 pub struct Shape {
     pub kind: Kind,
     pub color: Color,
     pub size: usize,
-    /// replaced by an edited copy (see TextShape::replaces)
+    /// replaced by a changed copy, see `replaces`
     pub hidden: bool,
+    pub replaces: Option<usize>,
 }
 
 pub const TEXT_SIZES_PX: [f32; 3] = [18.0, 26.0, 38.0];
@@ -220,15 +238,183 @@ impl Shape {
             Tool::Blur => Kind::Blur(Drag::new(pos, false), CoverCache::default()),
             _ => return None,
         };
-        Some(Shape { kind, color, size, hidden: false })
+        Some(Shape { kind, color, size, hidden: false, replaces: None })
     }
 
     pub fn text(pos: Point, color: Color, size: usize) -> Shape {
-        Shape { kind: Kind::Text(TextShape { pos, edit: TextEdit::default(), editing: true, replaces: None }), color, size, hidden: false }
+        Shape { kind: Kind::Text(TextShape { pos, edit: TextEdit::default(), editing: true, original: None }), color, size, hidden: false, replaces: None }
     }
 
     pub fn counter(pos: Point, color: Color, size: usize, number: u32) -> Shape {
-        Shape { kind: Kind::Counter { pos, number }, color, size, hidden: false }
+        Shape { kind: Kind::Counter { pos, number }, color, size, hidden: false, replaces: None }
+    }
+
+    /// A change to the editor's picture, as an undo step.
+    pub fn step(step: std::rc::Rc<crate::ui::picture::Step>) -> Shape {
+        Shape { kind: Kind::Step(step), color: Color::BLACK, size: 0, hidden: false, replaces: None }
+    }
+
+    /// Nothing, in place of drawing `index` (deleted).
+    pub fn removed(of: &Shape, index: usize) -> Shape {
+        Shape { kind: Kind::Removed, color: of.color, size: of.size, hidden: false, replaces: Some(index) }
+    }
+
+    /// Nothing to see or pick up: a deleted drawing, or a step changing the picture.
+    pub fn is_removed(&self) -> bool {
+        matches!(self.kind, Kind::Removed | Kind::Step(_))
+    }
+
+    // -- picking it up again (the select tool) -----------------------------------
+
+    /// Text and counters can only be moved.
+    pub fn resizable(&self) -> bool {
+        !matches!(self.kind, Kind::Text(_) | Kind::Counter { .. } | Kind::Removed | Kind::Step(_))
+    }
+
+    /// Resized by its two ends (lines, arrows), not a box.
+    pub fn has_ends(&self) -> bool {
+        matches!(self.kind, Kind::Line(_) | Kind::Arrow(_))
+    }
+
+    /// The box the shape's geometry fills (without its stroke).
+    pub fn geometry(&self) -> Rect {
+        match &self.kind {
+            Kind::Stroke(s) => points_bounds(&s.points),
+            Kind::Text(t) => text_bounds(t, self.size),
+            Kind::Counter { pos, .. } => {
+                let r = COUNTER_RADII[self.size.min(2)];
+                Rect::new(pos.x - r, pos.y - r, 2.0 * r, 2.0 * r)
+            }
+            Kind::Removed | Kind::Step(_) => Rect::default(),
+            _ => self.drag().map(Drag::rect).unwrap_or_default(),
+        }
+    }
+
+    /// How far its paint reaches past its geometry.
+    pub fn reach(&self) -> f32 {
+        let w = self.width();
+        match &self.kind {
+            Kind::Stroke(s) => stroke_reach(s, w),
+            // (filled: no stroke past its box)
+            Kind::Text(_) | Kind::Counter { .. } | Kind::Solid(_) | Kind::Pixelate(..) | Kind::Blur(..) | Kind::Removed | Kind::Step(_) => 0.0,
+            _ => w / 2.0,
+        }
+    }
+
+    /// Is `pos` on the shape: within its stroke (and `slack`) for lines
+    /// and outlines, anywhere inside for filled ones.
+    pub fn contains(&self, pos: Point, slack: f32) -> bool {
+        let w = self.width();
+        match &self.kind {
+            Kind::Removed | Kind::Step(_) => false,
+            Kind::Stroke(s) => {
+                let reach = stroke_reach(s, w) + slack;
+                match s.points[..] {
+                    [only] => pos.distance(only) <= reach,
+                    _ => s.points.windows(2).any(|ab| to_segment(pos, ab[0], ab[1]) <= reach),
+                }
+            }
+            Kind::Line(d) => to_segment(pos, d.start, d.end) <= w / 2.0 + slack,
+            Kind::Arrow(d) => {
+                let head = (10.0 + w * 3.2).min(d.start.distance(d.end) * 0.6);
+                to_segment(pos, d.start, d.end) <= w / 2.0 + slack || pos.distance(d.end) <= head + slack
+            }
+            Kind::Rect(d) => on_outline(pos, d.rect(), w / 2.0 + slack),
+            Kind::Ellipse(d) => {
+                let r = d.rect();
+                let (rx, ry) = (r.w / 2.0, r.h / 2.0);
+                if rx < 1.0 || ry < 1.0 {
+                    return on_outline(pos, r, w / 2.0 + slack);
+                }
+                let v = pos - r.center();
+                // How far out along its own radius, times the radius there:
+                // near the line, about the distance to it.
+                let k = (v.x / rx).hypot(v.y / ry);
+                let radius = if k > 0.0 { v.length() / k } else { rx.min(ry) };
+                (k - 1.0).abs() * radius <= w / 2.0 + slack
+            }
+            Kind::Counter { pos: c, .. } => pos.distance(*c) <= COUNTER_RADII[self.size.min(2)] + slack,
+            _ => self.geometry().adjusted(-slack, -slack, slack, slack).contains(pos),
+        }
+    }
+
+    /// A copy to change, in place of this one (its `replaces` is the
+    /// caller's to set).
+    fn copy(&self) -> Shape {
+        let mut c = self.clone();
+        c.hidden = false;
+        if let Kind::Text(t) = &mut c.kind {
+            t.editing = false;
+            t.original = None;
+        }
+        c
+    }
+
+    fn map_points(&mut self, f: impl Fn(Point) -> Point) {
+        match &mut self.kind {
+            Kind::Stroke(s) => s.points.iter_mut().for_each(|p| *p = f(*p)),
+            Kind::Text(t) => t.pos = f(t.pos),
+            Kind::Counter { pos, .. } => *pos = f(*pos),
+            Kind::Removed | Kind::Step(_) => {}
+            _ => {
+                if let Some(d) = self.drag_mut() {
+                    d.start = f(d.start);
+                    d.end = f(d.end);
+                    d.anchor = d.start;
+                    d.pointer = d.end;
+                }
+            }
+        }
+    }
+
+    /// A copy with each point moved through `f`.
+    pub fn mapped(&self, f: impl Fn(Point) -> Point) -> Shape {
+        let mut c = self.copy();
+        c.map_points(f);
+        c
+    }
+
+    /// A copy moved by `d`.
+    pub fn moved(&self, d: Point) -> Shape {
+        let mut c = self.copy();
+        c.map_points(|p| p + d);
+        c
+    }
+
+    /// A copy stretched from the box `old` to `new`.
+    pub fn fitted(&self, old: Rect, new: Rect) -> Shape {
+        let sx = if old.w != 0.0 { new.w / old.w } else { 1.0 };
+        let sy = if old.h != 0.0 { new.h / old.h } else { 1.0 };
+        let mut c = self.copy();
+        c.map_points(|p| Point::new(new.x + (p.x - old.x) * sx, new.y + (p.y - old.y) * sy));
+        c
+    }
+
+    /// A copy with its start (0) or end (1) at `pos` (lines and arrows).
+    pub fn with_end(&self, which: usize, pos: Point) -> Shape {
+        let mut c = self.copy();
+        if let Some(d) = c.drag_mut() {
+            if which == 0 {
+                d.start = pos;
+            } else {
+                d.end = pos;
+            }
+            d.anchor = d.start;
+            d.pointer = d.end;
+        }
+        c
+    }
+
+    /// A copy in another colour or size.
+    pub fn restyled(&self, color: Option<Color>, size: Option<usize>) -> Shape {
+        let mut c = self.copy();
+        if let Some(color) = color {
+            c.color = color;
+        }
+        if let Some(size) = size {
+            c.size = size;
+        }
+        c
     }
 
     pub fn width(&self) -> f32 {
@@ -287,8 +473,8 @@ impl Shape {
 
     pub fn is_valid(&self) -> bool {
         match &self.kind {
-            Kind::Stroke(_) | Kind::Counter { .. } => true,
-            Kind::Text(t) => !t.edit.text.trim().is_empty() || (t.replaces.is_some() && self.text_changed()),
+            Kind::Stroke(_) | Kind::Counter { .. } | Kind::Removed | Kind::Step(_) => true,
+            Kind::Text(t) => !t.edit.text.trim().is_empty() || (t.original.is_some() && self.text_changed()),
             _ => self.drag().is_some_and(Drag::is_valid),
         }
     }
@@ -296,9 +482,9 @@ impl Shape {
     /// For an edited copy of a text: is it any different from the original?
     pub fn text_changed(&self) -> bool {
         let Kind::Text(t) = &self.kind else { return true };
-        match &t.replaces {
+        match &t.original {
             None => true,
-            Some((_, text, pos, color, size)) => (&t.edit.text, t.pos, self.color, self.size) != (text, *pos, *color, *size),
+            Some((text, pos, color, size)) => (&t.edit.text, t.pos, self.color, self.size) != (text, *pos, *color, *size),
         }
     }
 
@@ -322,6 +508,7 @@ impl Shape {
                 let r = COUNTER_RADII[self.size.min(2)] + 2.0;
                 Rect::new(pos.x - r, pos.y - r, 2.0 * r, 2.0 * r)
             }
+            Kind::Removed | Kind::Step(_) => Rect::default(),
         }
     }
 
@@ -379,6 +566,7 @@ impl Shape {
                 let fg = if self.color.is_light() { OUTLINE_DARK } else { OUTLINE_LIGHT };
                 p.draw_text(bx, Align::Center, &number.to_string(), text::font((r * 1.05).round(), BOLD), fg);
             }
+            Kind::Removed | Kind::Step(_) => {}
         }
     }
 }
@@ -536,11 +724,43 @@ pub fn copy_for_editing(s: &Shape, index: usize) -> Option<Shape> {
     let mut edit = TextEdit::new(&t.edit.text);
     edit.place(edit.text.len(), false);
     Some(Shape {
-        kind: Kind::Text(TextShape { pos: t.pos, edit, editing: true, replaces: Some((index, t.edit.text.clone(), t.pos, s.color, s.size)) }),
+        kind: Kind::Text(TextShape { pos: t.pos, edit, editing: true, original: Some((t.edit.text.clone(), t.pos, s.color, s.size)) }),
         color: s.color,
         size: s.size,
         hidden: false,
+        replaces: Some(index),
     })
+}
+
+/// The number for a new counter: one more than the highest shown.
+pub fn next_number<'a>(drawings: impl IntoIterator<Item = &'a Shape>) -> u32 {
+    1 + drawings
+        .into_iter()
+        .filter(|s| !s.hidden)
+        .filter_map(|s| match s.kind {
+            Kind::Counter { number, .. } => Some(number),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn stroke_reach(s: &Stroke, width: f32) -> f32 {
+    if s.marker { (width * 3.0 + 10.0) / 2.0 } else { width / 2.0 }
+}
+
+/// How far `pos` is from the segment a–b.
+fn to_segment(pos: Point, a: Point, b: Point) -> f32 {
+    let d = b - a;
+    let len2 = d.x * d.x + d.y * d.y;
+    let t = if len2 == 0.0 { 0.0 } else { (((pos.x - a.x) * d.x + (pos.y - a.y) * d.y) / len2).clamp(0.0, 1.0) };
+    pos.distance(a + d * t)
+}
+
+fn on_outline(pos: Point, r: Rect, reach: f32) -> bool {
+    let outer = r.adjusted(-reach, -reach, reach, reach);
+    let inner = r.adjusted(reach, reach, -reach, -reach);
+    outer.contains(pos) && !(inner.w > 0.0 && inner.h > 0.0 && inner.contains(pos))
 }
 
 fn paint_text(p: &mut Painter<'_>, t: &TextShape, color: Color, size: usize) {

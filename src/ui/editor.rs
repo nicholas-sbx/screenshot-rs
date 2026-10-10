@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::beautify::{self, Style};
 use crate::config::Config;
+use crate::geom::IPoint;
 use crate::geom::{Damage, IRect, Point, Rect};
 use crate::image::{Canvas, Image};
 use crate::keys::{KeyPress, Keymap, Where};
@@ -21,23 +23,43 @@ use crate::render::paint::{Align, Pen};
 use crate::render::text::{self, DEMIBOLD, MEDIUM};
 use crate::render::theme::{self, Color, SIZES, SWATCHES};
 use crate::render::{Painter, icons};
-use crate::ui::panels::{ColorPicker, PICKER_SIZE, PickerEvent};
+use crate::ui::beautypanel::{self, Event as PanelEvent};
+use crate::ui::cropper::{Cropper, Done};
+use crate::ui::panels::{ColorPicker, LineEdit, PICKER_SIZE, PickerEvent};
+use crate::ui::picture::{self, Moved};
+use crate::ui::selection::{Drawings, DrawingsMut, Selection};
 use crate::ui::session::{Button, CursorShape};
-use crate::ui::shapes::{Mods, Shape, TOOLS, Tool, copy_for_editing};
+use crate::ui::shapes::{self, Mods, Shape, TOOLS, Tool, copy_for_editing};
+use crate::ui::snapping::EdgeMaps;
 use crate::ui::textedit::KeyResult;
 use crate::ui::widgets::{Item, Look, Pointer, layout_row, paint_item};
 
 pub const BAR_H: f32 = 48.0;
-pub const STATUS_H: f32 = 28.0;
+/// The bar under it while cropping: the picture's own changes.
+pub const PICTURE_BAR_H: f32 = 44.0;
+pub const STATUS_H: f32 = 34.0;
+/// The zoom menu's, in %.
+const ZOOM_STEPS: [u32; 10] = [10, 25, 50, 75, 100, 150, 200, 300, 400, 800];
+/// The smallest the canvas gets.
+const MIN_CANVAS: (f32, f32) = (200.0, 150.0);
 const ZOOM: (f32, f32) = (0.05, 32.0);
 /// How much of the picture always stays in view.
 const KEEP: f32 = 48.0;
 const CUSTOM: usize = SWATCHES.len();
 const SAY_FOR: Duration = Duration::from_secs(4);
 const COPIED_FOR: Duration = Duration::from_secs(2);
+/// How long after the last change the style becomes the last used.
+const REMEMBER_AFTER: Duration = Duration::from_millis(400);
 
 const SHAPE_HINT: &str = "Shift: square  ·  Ctrl: from the middle  ·  Alt: move it";
-const TEXT_HINT: &str = "Click to place text, or on text to change it  ·  Drag text to move it  ·  Shift+Enter for a new line";
+const CROP_HINT: &str =
+    "Drag the edges to crop, past the picture for a margin  ·  Shift keeps the shape  ·  Ctrl: from the middle, without snapping  ·  Enter crops";
+const CUT_HINT: &str = "Drag across the {what} to cut out; the rest is joined  ·  Esc to stop";
+const SELECT_HINT: &str = "Click a drawing to select it (Alt: the one under it)  ·  Drag to move  ·  Handles resize  ·  Delete removes it";
+const SELECTED_HINT: &str =
+    "Drag to move (Shift: straight)  ·  Handles: Shift keeps its shape, Ctrl from the middle  ·  Arrows nudge  ·  Colours and sizes change it";
+const TEXT_HINT: &str =
+    "Click to place text, or on text to change it  ·  Drag to select  ·  Enter for a new line  ·  Esc or Ctrl+Enter to finish  ·  The select tool moves it";
 const HINT: &str = "Scroll to move around  ·  Ctrl+scroll to zoom  ·  Space+drag or middle-drag to pan";
 
 /// What the editor needs done outside itself.
@@ -51,6 +73,8 @@ pub enum Request {
     Paste,
     /// ask where to save, then `save_to` there
     SaveAs,
+    /// ask for a picture for the background, then `background_image` it
+    ChooseImage(PathBuf),
     /// the window can close now
     Close,
 }
@@ -73,6 +97,7 @@ struct ActionButton {
     rect: Rect,
     /// as wide as its widest word, so changing words never moves anything
     width: f32,
+    enabled: bool,
 }
 
 fn action_font() -> text::FontSpec {
@@ -82,11 +107,16 @@ fn action_font() -> text::FontSpec {
 impl ActionButton {
     fn new(id: &'static str, words: &[&'static str], icon: &'static str) -> ActionButton {
         let width = words.iter().map(|w| text::width(w, action_font())).fold(0.0f32, f32::max).round() + 46.0;
-        ActionButton { id, text: words[0], icon, strong: false, hint: String::new(), rect: Rect::default(), width }
+        ActionButton { id, text: words[0], icon, strong: false, hint: String::new(), rect: Rect::default(), width, enabled: true }
     }
 
     fn paint(&self, p: &mut Painter<'_>, hovered: bool) {
         let c = theme::c();
+        let hovered = hovered && self.enabled;
+        let was = p.opacity();
+        if !self.enabled {
+            p.set_opacity(was * 0.4);
+        }
         let (fill, fg) = if self.strong {
             (if hovered { c.accent.lighter(108) } else { c.accent }, c.on_accent)
         } else {
@@ -97,11 +127,51 @@ impl ActionButton {
         let x = self.rect.x + (self.rect.w - (18.0 + 7.0 + text_w)) / 2.0;
         icons::paint(p, self.icon, Rect::new(x, self.rect.y + (self.rect.h - 18.0) / 2.0, 18.0, 18.0), fg);
         p.draw_text(Rect::new(x + 25.0, self.rect.y, text_w + 2.0, self.rect.h), Align::Left, self.text, action_font(), fg);
+        p.set_opacity(was);
+    }
+}
+
+/// The editor's drawings, as the select tool works on them.
+struct Shapes<'a> {
+    list: &'a mut Vec<(u64, Shape)>,
+    next_id: &'a mut u64,
+}
+
+impl Drawings for Shapes<'_> {
+    fn count(&self) -> usize {
+        self.list.len()
+    }
+    fn get(&self, i: usize) -> &Shape {
+        &self.list[i].1
+    }
+}
+
+/// ... and only looked at.
+struct ShapesRef<'a>(&'a [(u64, Shape)]);
+
+impl Drawings for ShapesRef<'_> {
+    fn count(&self) -> usize {
+        self.0.len()
+    }
+    fn get(&self, i: usize) -> &Shape {
+        &self.0[i].1
+    }
+}
+
+impl DrawingsMut for Shapes<'_> {
+    fn get_mut(&mut self, i: usize) -> &mut Shape {
+        &mut self.list[i].1
+    }
+    fn commit(&mut self, shape: Shape) {
+        self.list.push((*self.next_id, shape));
+        *self.next_id += 1;
     }
 }
 
 /// The picture and its drawings as last drawn, at the view's zoom.
-type Layer = ((u32, u32, i64, i64, i64, u64), Image);
+type Layer = ((u32, u32, i64, i64, i64, u64, u64), Image);
+/// Beautify's background and shadow, and where the picture goes on it.
+type Backdrop = ((usize, u64), Arc<Image>, IPoint);
 
 pub struct Editor {
     pub image: Arc<Image>,
@@ -118,9 +188,42 @@ pub struct Editor {
     undone: Vec<(u64, Shape)>,
     /// the drawings as last saved (or opened)
     saved: Vec<u64>,
+    /// the picture then (crop, rotate, ... change it)
+    saved_image: Arc<Image>,
+    /// the crop tool's frame
+    cropper: Cropper,
+    /// edge maps of the picture, for the crop's snapping
+    edges: RefCell<Option<(usize, Arc<EdgeMaps>)>>,
+    /// while cropping: the picture's own changes, and the size to resize to
+    picture_bar: Vec<Item>,
+    picture_actions: Vec<ActionButton>,
+    width_field: LineEdit,
+    height_field: LineEdit,
+    /// width and height kept together when typing one
+    linked: bool,
+    /// the zoom's controls at the bottom right
+    zoom_bar: Vec<Item>,
+    zoom_slider: Rect,
+    zoom_label: Rect,
+    /// the zoom's menu, open (its rows' rectangles)
+    zoom_menu: Option<Vec<(Rect, Option<u32>)>>,
+    /// Beautify (the Background panel): shown round the picture, and in
+    /// what's saved and copied
+    beauty_on: bool,
+    beauty: Style,
+    /// what was saved (None: off)
+    saved_beauty: Option<Style>,
+    panel: beautypanel::Panel,
+    /// the style becomes the last used once changes stop, then
+    remember_at: Option<Instant>,
+    /// (changes with the style)
+    beauty_version: u64,
+    backdrop: RefCell<Option<Backdrop>>,
     next_id: u64,
     active: Option<Shape>,
     text_edit: Option<Shape>,
+    /// the select tool's drawing
+    selection: Selection,
     pub tool: Tool,
     colour_tool: Tool,
     color_index: usize,
@@ -159,6 +262,28 @@ pub struct Editor {
     requests: Vec<Request>,
 }
 
+fn size_field(placeholder: &str) -> LineEdit {
+    let mut f = LineEdit::new(Rect::default(), "", text::font(13.0, text::NORMAL), 6);
+    f.placeholder = placeholder.into();
+    f
+}
+
+/// A size typed: whole pixels or a percentage (50%), as `\d{1,5}%?`.
+fn size_text(s: &str) -> String {
+    let digits: String = s.chars().filter(char::is_ascii_digit).take(5).collect();
+    if s.contains('%') && !digits.is_empty() { digits + "%" } else { digits }
+}
+
+/// A size typed, in pixels, from `now` pixels.
+fn size_value(s: &str, now: u32) -> Option<u32> {
+    let s = s.trim();
+    let n: u64 = s.trim_end_matches('%').parse().ok()?;
+    if s.ends_with('%') {
+        return Some(((now as u64 * n + 50) / 100).clamp(1, crate::image::MAX_SIDE as u64) as u32);
+    }
+    (n > 0).then_some(n.min(crate::image::MAX_SIDE as u64) as u32)
+}
+
 fn picture_size(img: &Image, dpr: f32) -> (f32, f32) {
     (img.width() as f32 / dpr, img.height() as f32 / dpr)
 }
@@ -178,6 +303,7 @@ impl Editor {
         let tool = Tool::from_id(&cfg.default_tool).filter(|t| t.uses_color()).unwrap_or(Tool::Pen);
         let keymap = Keymap::new(&cfg.keys);
         let custom_color = Color::parse(&cfg.custom_color).unwrap_or(SWATCHES[0]);
+        let cfg_style = cfg.beautify_style.clone();
         let mut ed = Editor {
             image: Arc::new(image),
             dpr: dpr.max(0.25),
@@ -191,9 +317,34 @@ impl Editor {
             shapes: Vec::new(),
             undone: Vec::new(),
             saved: Vec::new(),
+            saved_image: Arc::new(Image::new(1, 1).expect("tiny")),
+            cropper: Cropper::default(),
+            edges: RefCell::new(None),
+            picture_bar: Vec::new(),
+            picture_actions: vec![
+                ActionButton::new("crop.ratio", &["Free", "1:1", "4:3", "16:9", "Original"], "ratio"),
+                ActionButton::new("crop.margin", &["Clear", "Colour"], "margin"),
+                ActionButton::new("crop.resize", &["Resize"], "resize"),
+                ActionButton::new("crop.apply", &["Crop"], "crop"),
+            ],
+            width_field: size_field("Width"),
+            height_field: size_field("Height"),
+            linked: true,
+            zoom_bar: Vec::new(),
+            zoom_slider: Rect::default(),
+            zoom_label: Rect::default(),
+            zoom_menu: None,
+            beauty_on: false,
+            beauty: Style::from_map(&cfg_style),
+            saved_beauty: None,
+            panel: beautypanel::Panel::default(),
+            remember_at: None,
+            beauty_version: 0,
+            backdrop: RefCell::new(None),
             next_id: 1,
             active: None,
             text_edit: None,
+            selection: Selection::default(),
             tool,
             colour_tool: tool,
             custom_color,
@@ -213,7 +364,7 @@ impl Editor {
             actions: vec![
                 ActionButton::new("copy", &["Copy", "Copied"], "copy"),
                 ActionButton::new("save_as", &["Save as"], "save-as"),
-                ActionButton::new("save", &["Save", "Saved"], "save"),
+                ActionButton::new("save", &["Save"], "save"),
             ],
             hovered: None,
             pressed: None,
@@ -227,6 +378,7 @@ impl Editor {
             shapes_version: 0,
             requests: Vec::new(),
         };
+        ed.saved_image = ed.image.clone();
         ed.refresh_bar();
         ed
     }
@@ -275,13 +427,17 @@ impl Editor {
 
     /// When it next needs a look (a message to clear).
     pub fn next_deadline(&self) -> Option<Instant> {
-        [self.status.as_ref().map(|s| s.1 + SAY_FOR), self.copied_until].into_iter().flatten().min()
+        [self.status.as_ref().map(|s| s.1 + SAY_FOR), self.copied_until, self.remember_at].into_iter().flatten().min()
     }
 
     pub fn on_timer(&mut self, now: Instant) {
         if self.status.as_ref().is_some_and(|s| s.1 + SAY_FOR <= now) {
             self.status = None;
             self.damaged = true;
+        }
+        if self.remember_at.is_some_and(|t| t <= now) {
+            self.remember_at = None;
+            self.remember_beauty();
         }
         if self.copied_until.is_some_and(|t| t <= now) {
             self.copied_until = None;
@@ -294,7 +450,26 @@ impl Editor {
     }
 
     fn canvas_rect(&self) -> Rect {
-        Rect::new(0.0, BAR_H, self.view.0, (self.view.1 - BAR_H - STATUS_H).max(1.0))
+        let top = self.top_h();
+        let panel = if self.beauty_on { beautypanel::WIDTH } else { 0.0 };
+        Rect::new(0.0, top, (self.view.0 - panel).max(1.0), (self.view.1 - top - STATUS_H).max(1.0))
+    }
+
+    /// The bars above the canvas: the toolbar, and the picture bar while cropping.
+    fn top_h(&self) -> f32 {
+        BAR_H + if self.tool == Tool::Crop { PICTURE_BAR_H } else { 0.0 }
+    }
+
+    /// The smallest the window can be with nothing overlapping: the bars'
+    /// widths (the picture bar's too while cropping) and the canvas's least.
+    pub fn min_size(&self) -> (u32, u32) {
+        let panel = if self.beauty_on { beautypanel::WIDTH } else { 0.0 };
+        let mut w = self.bar_width().max(self.zoom_bar_width() + 160.0).max(MIN_CANVAS.0 + panel);
+        if self.tool == Tool::Crop {
+            w = w.max(self.picture_bar_width());
+        }
+        let h = self.top_h() + MIN_CANVAS.1 + STATUS_H;
+        (w.ceil() as u32, h.ceil() as u32)
     }
 
     // -- the bar ---------------------------------------------------------------------------
@@ -325,7 +500,9 @@ impl Editor {
         redo.enabled = self.can_redo();
         items.push(undo);
         items.push(redo);
-        items.push(Item::new("fit", Look::Icon { icon: "fit", size: 36.0 }, km.hint("Zoom to fit the picture in the window", "fit")));
+        let mut beauty = Item::new("beautify", Look::Icon { icon: "beautify", size: 36.0 }, km.hint("Background, padding and shadow", "beautify"));
+        beauty.active = self.beauty_on;
+        items.push(beauty);
         self.bar = items;
         let copied = self.copied_until.is_some();
         let (dirty, path) = (self.dirty, self.path.display().to_string());
@@ -337,12 +514,15 @@ impl Editor {
                 }
                 "save_as" => b.hint = km.hint("Save to another file", "save_as"),
                 _ => {
-                    // Save stands out only while there's something to save.
-                    (b.text, b.icon, b.strong) = if dirty { ("Save", "save", true) } else { ("Saved", "check", false) };
+                    // Save stands out while there's something to save, and is greyed
+                    // out when there isn't; its word and icon stay the same.
+                    (b.text, b.icon, b.strong, b.enabled) = ("Save", "save", dirty, dirty);
                     b.hint = if dirty { km.hint(&format!("Save to {path}"), "save") } else { format!("Saved in {path}") };
                 }
             }
         }
+        self.refresh_picture_bar();
+        self.refresh_zoom_bar();
         self.layout_bar();
         self.damaged = true;
     }
@@ -362,16 +542,193 @@ impl Editor {
             b.rect = Rect::new(x, 7.0, b.width, 34.0);
             x -= 4.0;
         }
+        self.layout_picture_bar();
+        self.layout_zoom_bar();
+        self.place_panel();
+    }
+
+    fn place_panel(&mut self) {
+        if self.beauty_on {
+            let (rect, name) = (self.panel_rect(), self.image_name());
+            self.panel.place(rect, &self.beauty, &name);
+        }
+    }
+
+    /// The picture bar, while cropping: the crop's shape and margin, cutting
+    /// out rows or columns, rotating, flipping, resizing, and Crop.
+    fn refresh_picture_bar(&mut self) {
+        let crop = &self.cropper;
+        let icon = |id: &'static str, hint: &str| Item::new(id, Look::Icon { icon: id, size: 36.0 }, hint);
+        let mut rows = icon("cut-rows", "Cut out rows: drag across them, and the rest is joined");
+        rows.active = crop.cut == Some(true);
+        let mut cols = icon("cut-cols", "Cut out columns: drag across them, and the rest is joined");
+        cols.active = crop.cut == Some(false);
+        let link = if self.linked { "link" } else { "unlink" };
+        let mut lock = Item::new(
+            "crop.link",
+            Look::Icon { icon: link, size: 34.0 },
+            if self.linked { "Width and height linked: the shape is kept" } else { "Width and height unlinked: each on its own" },
+        );
+        lock.toggled = Some(self.linked);
+        self.picture_bar = vec![
+            Item::new("divider.crop", Look::Divider, ""),
+            rows,
+            cols,
+            Item::new("divider.cut", Look::Divider, ""),
+            icon("rotate-left", "Rotate left"),
+            icon("rotate-right", "Rotate right"),
+            icon("flip-h", "Flip left to right"),
+            icon("flip-v", "Flip upside down"),
+            Item::new("divider.turn", Look::Divider, ""),
+            lock,
+        ];
+        let changed = crop.changed();
+        let (ratio, margin) = (crop.ratio_label(), if crop.margin_colour { "Colour" } else { "Clear" });
+        for b in &mut self.picture_actions {
+            match b.id {
+                "crop.ratio" => {
+                    b.text = ratio;
+                    b.hint = "The crop's shape: click for the next. Shift keeps the shape while you drag.".into();
+                }
+                "crop.margin" => {
+                    b.text = margin;
+                    b.hint = "Past the picture's edges: a clear margin, or one in your colour".into();
+                }
+                "crop.resize" => b.hint = "Resize the picture to this size".into(),
+                _ => {
+                    b.strong = changed;
+                    b.hint = "Crop to the frame  ·  Enter".into();
+                }
+            }
+        }
+        let (w, h) = self.image.size();
+        for (field, now) in [(&mut self.width_field, w), (&mut self.height_field, h)] {
+            if !field.focused {
+                field.edit = crate::ui::textedit::TextEdit::single_line(&now.to_string(), 6);
+            }
+        }
+    }
+
+    /// Where the picture bar's things go (one row under the toolbar).
+    fn layout_picture_bar(&mut self) {
+        let (top, h) = (BAR_H + 5.0, 34.0);
+        let mut x = 8.0;
+        let place = |b: &mut ActionButton, x: &mut f32| {
+            b.rect = Rect::new(*x, top, b.width, h);
+            *x += b.width + 4.0;
+        };
+        let [ratio, margin, resize, apply] = &mut self.picture_actions[..] else { return };
+        place(ratio, &mut x);
+        place(margin, &mut x);
+        // (dividers, cut, turn and flip; the link sits between the fields and Resize)
+        let n = self.picture_bar.len().saturating_sub(1);
+        let (items, link) = self.picture_bar.split_at_mut(n);
+        x = layout_row(items, x, BAR_H + 4.0, 36.0, 4.0) + 4.0;
+        self.width_field.rect = Rect::new(x, top, 64.0, h);
+        x += 64.0 + 4.0 + 14.0 + 4.0;
+        self.height_field.rect = Rect::new(x, top, 64.0, h);
+        x += 64.0 + 4.0;
+        x = layout_row(link, x, BAR_H + 5.0, 34.0, 4.0) + 4.0;
+        place(resize, &mut x);
+        apply.rect = Rect::new((self.view.0 - 8.0 - apply.width).max(x), top, apply.width, h);
+    }
+
+    /// The narrowest the picture bar fits in.
+    fn picture_bar_width(&self) -> f32 {
+        let actions: f32 = self.picture_actions.iter().map(|b| b.width + 4.0).sum();
+        let items: f32 = self.picture_bar.iter().map(|it| it.size().0 + 4.0).sum();
+        8.0 + actions + items + 2.0 * (64.0 + 4.0) + 14.0 + 4.0 + 16.0 + 8.0
+    }
+
+    /// The zoom's controls at the bottom right: out, a slider, in, the zoom
+    /// (a menu of zooms) and fit.
+    fn refresh_zoom_bar(&mut self) {
+        let km = &self.keymap;
+        let icon = |id: &'static str, hint: String| Item::new(id, Look::Icon { icon: id, size: 28.0 }, hint);
+        let mut fit = icon("fit", km.hint("Fit the picture in the window", "fit"));
+        fit.active = self.fitted;
+        self.zoom_bar = vec![icon("zoom-out", km.hint("Zoom out", "zoom_out")), icon("zoom-in", km.hint("Zoom in", "zoom_in")), fit];
+    }
+
+    fn zoom_label_width() -> f32 {
+        (text::width("8888%", text::font(12.0, DEMIBOLD)) + 18.0).round()
+    }
+
+    fn layout_zoom_bar(&mut self) {
+        let top = self.view.1 - STATUS_H;
+        let mid = top + STATUS_H / 2.0;
+        let mut x = self.view.0 - 8.0;
+        let [out, zoom_in, fit] = &mut self.zoom_bar[..] else { return };
+        x -= 28.0;
+        fit.rect = Rect::new(x, mid - 14.0, 28.0, 28.0);
+        x -= 2.0 + Self::zoom_label_width();
+        self.zoom_label = Rect::new(x, mid - 13.0, Self::zoom_label_width(), 26.0);
+        x -= 2.0 + 28.0;
+        zoom_in.rect = Rect::new(x, mid - 14.0, 28.0, 28.0);
+        x -= 2.0 + 132.0;
+        self.zoom_slider = Rect::new(x, mid - 12.0, 132.0, 24.0);
+        x -= 2.0 + 28.0;
+        out.rect = Rect::new(x, mid - 14.0, 28.0, 28.0);
+    }
+
+    fn zoom_bar_width(&self) -> f32 {
+        28.0 * 3.0 + 132.0 + Self::zoom_label_width() + 4.0 * 2.0 + 8.0 + 14.0
+    }
+
+    /// Where the slider is for `zoom` (0 to 1, evenly spaced as ratios).
+    fn slider_position(zoom: f32) -> f32 {
+        let (lo, hi) = ZOOM;
+        (zoom.clamp(lo, hi) / lo).ln() / (hi / lo).ln()
+    }
+
+    fn slider_zoom(t: f32) -> f32 {
+        let (lo, hi) = ZOOM;
+        lo * (hi / lo).powf(t.clamp(0.0, 1.0))
     }
 
     fn bar_item_at(&self, at: Point) -> Option<&'static str> {
+        if let Some(menu) = &self.zoom_menu {
+            return menu.iter().any(|(r, _)| r.contains(at)).then_some("zoom.menu-row");
+        }
+        if at.y >= self.view.1 - STATUS_H {
+            if self.zoom_slider.contains(at) {
+                return Some("zoom.slider");
+            }
+            if self.zoom_label.contains(at) {
+                return Some("zoom.label");
+            }
+            return self.zoom_bar.iter().find(|it| it.rect.contains(at)).map(|it| it.id);
+        }
+        if self.tool == Tool::Crop && (BAR_H..BAR_H + PICTURE_BAR_H).contains(&at.y) {
+            if let Some(b) = self.picture_actions.iter().find(|b| b.rect.contains(at) && b.enabled) {
+                return Some(b.id);
+            }
+            if self.width_field.rect.contains(at) {
+                return Some("crop.width");
+            }
+            if self.height_field.rect.contains(at) {
+                return Some("crop.height");
+            }
+            return self.picture_bar.iter().find(|it| it.rect.contains(at) && it.clickable() && it.enabled).map(|it| it.id);
+        }
         if at.y >= BAR_H {
             return None;
         }
-        if let Some(b) = self.actions.iter().find(|b| b.rect.contains(at)) {
+        if let Some(b) = self.actions.iter().find(|b| b.rect.contains(at) && b.enabled) {
             return Some(b.id);
         }
         self.bar.iter().find(|it| it.rect.contains(at) && it.clickable() && it.enabled).map(|it| it.id)
+    }
+
+    /// Open the zoom's menu over its label: fit, then the zooms.
+    fn open_zoom_menu(&mut self) {
+        let rows: Vec<Option<u32>> = std::iter::once(None).chain(ZOOM_STEPS.iter().map(|z| Some(*z))).collect();
+        let (w, h) = (170.0, 26.0);
+        let x = (self.zoom_label.right() - w).max(4.0);
+        let mut y = self.zoom_label.y - 6.0 - h * rows.len() as f32 - 8.0;
+        y = y.max(4.0);
+        self.zoom_menu = Some(rows.into_iter().enumerate().map(|(i, z)| (Rect::new(x + 4.0, y + 4.0 + i as f32 * h, w - 8.0, h), z)).collect());
+        self.damaged = true;
     }
 
     fn bar_click(&mut self, id: &str) {
@@ -379,6 +736,36 @@ impl Editor {
             "undo" => self.undo(),
             "redo" => self.redo(),
             "fit" => self.fit(),
+            "zoom-in" => self.zoom_to(self.zoom * 1.25, None),
+            "zoom-out" => self.zoom_to(self.zoom / 1.25, None),
+            "zoom.label" => self.open_zoom_menu(),
+            "beautify" => self.toggle_beauty(),
+            "crop.ratio" => {
+                self.cropper.next_ratio();
+                self.refresh_bar();
+            }
+            "crop.margin" => {
+                self.cropper.margin_colour = !self.cropper.margin_colour;
+                self.refresh_bar();
+            }
+            "crop.link" => {
+                self.linked = !self.linked;
+                self.refresh_bar();
+            }
+            "crop.resize" => self.resize_picture(),
+            "crop.apply" => self.crop(),
+            "cut-rows" | "cut-cols" => {
+                self.cropper.set_cut(id == "cut-rows");
+                self.refresh_bar();
+            }
+            "rotate-left" | "rotate-right" => {
+                let r = picture::rotate(&self.image, self.dpr, id == "rotate-right");
+                self.change_picture("Rotated", r);
+            }
+            "flip-h" | "flip-v" => {
+                let r = picture::flip(&self.image, self.dpr, id == "flip-h");
+                self.change_picture("Flipped", r);
+            }
             "copy" => self.copy(),
             "save_as" => self.save_as(),
             "save" => {
@@ -407,16 +794,170 @@ impl Editor {
             return;
         }
         self.commit_text();
+        if tool != Tool::Select {
+            self.with_selection(|sel, d| sel.clear(d));
+        }
+        let was = self.tool;
+        if tool == Tool::Crop && was != Tool::Crop {
+            self.cropper.start(picture_size(&self.image, self.dpr));
+        } else if tool != Tool::Crop {
+            self.cropper.stop();
+            self.width_field.focused = false;
+            self.height_field.focused = false;
+        }
         self.tool = tool;
         if tool.uses_color() {
             self.colour_tool = tool;
         }
         self.refresh_bar();
+        if (was == Tool::Crop) != (tool == Tool::Crop) {
+            // (the picture bar came or went: the canvas moved)
+            self.relayout();
+        }
+    }
+
+    /// The bars or the canvas changed size.
+    fn relayout(&mut self) {
+        self.layout_bar();
+        if self.fitted {
+            self.fit();
+        } else {
+            self.keep_in_view();
+        }
+        self.damaged = true;
+    }
+
+    // -- the picture itself (crop, cut out, rotate, flip, resize) --------------
+
+    /// Put in the picture a picture:: function gave: (new picture, how a
+    /// point moves onto it). The drawings move with it. One undo step.
+    fn change_picture(&mut self, what: &str, changed: Result<(Image, Moved), String>) {
+        self.commit_text();
+        let (image, moved) = match changed {
+            Ok(c) => c,
+            Err(e) => return self.say(format!("Couldn't change the picture: {e}")),
+        };
+        let drawings: Vec<Shape> = picture::move_drawings(&self.shapes.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>(), moved);
+        let mut after: Vec<(u64, Shape)> = Vec::with_capacity(drawings.len() + 1);
+        for s in drawings {
+            after.push((self.next_id, s));
+            self.next_id += 1;
+        }
+        let image = Arc::new(image);
+        let (w, h) = image.size();
+        let step = picture::Step { what: what.to_string(), before: (self.image.clone(), self.shapes.clone()), after: (image.clone(), after.clone()) };
+        after.push((self.next_id, Shape::step(std::rc::Rc::new(step))));
+        self.next_id += 1;
+        self.image = image;
+        self.shapes = after;
+        self.undone.clear();
+        self.picture_changed();
+        self.changed();
+        self.say(format!("{what}: {w} × {h}"));
+    }
+
+    fn picture_changed(&mut self) {
+        self.with_selection(|sel, d| sel.clear(d));
+        if self.tool == Tool::Crop {
+            self.cropper.start(picture_size(&self.image, self.dpr));
+        }
+        self.width_field.focused = false;
+        self.height_field.focused = false;
+        self.refresh_bar();
+        self.fit();
+    }
+
+    fn crop(&mut self) {
+        let Some(rect) = self.cropper.rect.filter(|_| self.cropper.changed()) else { return };
+        let margin = self.cropper.margin_colour.then(|| self.color());
+        let what = if self.cropper.whole().contains_rect(&rect) { "Cropped" } else { "Margin added" };
+        let r = picture::crop(&self.image, self.dpr, rect, margin);
+        self.change_picture(what, r);
+    }
+
+    fn resize_picture(&mut self) {
+        let (w, h) = self.image.size();
+        let (Some(tw), Some(th)) = (size_value(self.width_field.text(), w), size_value(self.height_field.text(), h)) else { return };
+        if (tw, th) == (w, h) {
+            return;
+        }
+        let r = picture::resize(&self.image, tw, th);
+        self.change_picture("Resized", r);
+    }
+
+    /// With the shape kept, the other side follows the one typed.
+    fn follow_size(&mut self, from_width: bool) {
+        let (field, other) = if from_width { (&self.width_field, &mut self.height_field) } else { (&self.height_field, &mut self.width_field) };
+        let text = field.text().to_string();
+        if !self.linked || text.is_empty() {
+            return;
+        }
+        let (w, h) = self.image.size();
+        let follow = if text.ends_with('%') {
+            text
+        } else if let Ok(n) = text.parse::<u64>() {
+            let (a, b) = if from_width { (h as u64, w as u64) } else { (w as u64, h as u64) };
+            ((n * a + b / 2) / b.max(1)).max(1).to_string()
+        } else {
+            return;
+        };
+        other.edit = crate::ui::textedit::TextEdit::single_line(&follow, 6);
+    }
+
+    /// The edge maps of the picture (made once per picture), for snapping the crop.
+    fn crop_snap(&self, at: Point, mods: i32) -> Point {
+        if !self.cfg.snap_edges || mods & keyseq::CTRL != 0 {
+            return at;
+        }
+        let key = Arc::as_ptr(&self.image) as usize;
+        let maps = {
+            let mut edges = self.edges.borrow_mut();
+            if edges.as_ref().is_none_or(|(k, _)| *k != key) {
+                *edges = Some((key, Arc::new(EdgeMaps::build(&self.image))));
+            }
+            edges.as_ref().map(|(_, m)| m.clone())
+        };
+        let Some(maps) = maps else { return at };
+        let (x, y) = crate::ui::snapping::snap(&maps, at.x, at.y, self.dpr, self.cfg.snap_distance, self.cfg.snap_sensitivity);
+        Point::new(x, y)
+    }
+
+    /// Work on the drawings with the select tool: a changed copy it adds is
+    /// an undo step.
+    fn with_selection<R>(&mut self, f: impl FnOnce(&mut Selection, &mut dyn DrawingsMut) -> R) -> R {
+        let before = self.shapes.len();
+        let mut sel = std::mem::take(&mut self.selection);
+        let r = f(&mut sel, &mut Shapes { list: &mut self.shapes, next_id: &mut self.next_id });
+        self.selection = sel;
+        if self.shapes.len() > before {
+            self.undone.clear();
+            self.changed();
+        }
+        // (a drawing hidden or shown while it's dragged)
+        self.shapes_version += 1;
+        self.damaged = true;
+        r
+    }
+
+    fn has_selection(&mut self) -> bool {
+        self.tool == Tool::Select && self.with_selection(|sel, d| sel.index(d).is_some())
     }
 
     /// A colour; from a tool that has none (pixelate, blur), back to the
     /// last drawing tool, so the colour gets used.
     pub fn set_color(&mut self, index: usize) {
+        if self.tool == Tool::Crop {
+            // (the crop tool stays: the colour is the margin's)
+            self.color_index = index.min(CUSTOM);
+            return self.refresh_bar();
+        }
+        if self.has_selection() {
+            // (it changes the selected drawing)
+            self.color_index = index.min(CUSTOM);
+            let color = self.color();
+            self.with_selection(|sel, d| sel.restyle(d, Some(color), None));
+            return self.refresh_bar();
+        }
         if !self.tool.uses_color() {
             self.tool = self.colour_tool;
         }
@@ -432,6 +973,10 @@ impl Editor {
         self.size = size.min(SIZES.len() - 1);
         if let Some(s) = &mut self.text_edit {
             s.size = self.size;
+        }
+        if self.has_selection() {
+            let size = self.size;
+            self.with_selection(|sel, d| sel.restyle(d, None, Some(size)));
         }
         self.refresh_bar();
     }
@@ -490,7 +1035,8 @@ impl Editor {
     // -- drawing ---------------------------------------------------------------------------
 
     fn next_number(&self) -> u32 {
-        1 + self.shapes.iter().filter(|(_, s)| s.is_counter() && !s.hidden).count() as u32
+        // (one more than the highest shown: a moved counter keeps its number)
+        shapes::next_number(self.shapes.iter().map(|(_, s)| s))
     }
 
     fn commit(&mut self, shape: Shape) {
@@ -503,17 +1049,16 @@ impl Editor {
     /// The drawings changed: unsaved while they differ from what was saved
     /// (undoing back to that is saved again).
     fn changed(&mut self) {
-        self.dirty = self.shapes.iter().map(|(id, _)| *id).ne(self.saved.iter().copied());
+        self.dirty = self.shapes.iter().map(|(id, _)| *id).ne(self.saved.iter().copied())
+            || !Arc::ptr_eq(&self.image, &self.saved_image)
+            || self.beauty_state() != self.saved_beauty;
         self.shapes_version += 1;
         self.refresh_bar();
     }
 
     fn begin_text(&mut self, shape: Shape) {
         self.commit_text();
-        if let Some(t) = shape.as_text()
-            && let Some((i, ..)) = &t.replaces
-            && let Some((_, orig)) = self.shapes.get_mut(*i)
-        {
+        if let Some((_, orig)) = shape.replaces.and_then(|i| self.shapes.get_mut(i)) {
             orig.hidden = true; // (the copy shows while it's edited)
             self.shapes_version += 1;
         }
@@ -524,10 +1069,9 @@ impl Editor {
     /// Finish the text being typed; true if there was one.
     fn commit_text(&mut self) -> bool {
         let Some(mut shape) = self.text_edit.take() else { return false };
-        let mut replaces = None;
+        let replaces = shape.replaces;
         if let Some(t) = shape.as_text_mut() {
             t.editing = false;
-            replaces = t.replaces.as_ref().map(|r| r.0);
         }
         if shape.is_valid() && shape.text_changed() {
             self.commit(shape);
@@ -541,8 +1085,10 @@ impl Editor {
         true
     }
 
+    /// The text drawn at `at`, if it's the topmost drawing there (not one
+    /// behind something else).
     fn text_at(&self, at: Point) -> Option<usize> {
-        self.shapes.iter().enumerate().rev().find_map(|(i, (_, s))| (!s.hidden && s.as_text()?.contains(at, s.size)).then_some(i))
+        crate::ui::overlay::topmost_text(&ShapesRef(&self.shapes), at)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -555,11 +1101,15 @@ impl Editor {
 
     pub fn undo(&mut self) {
         self.commit_text();
+        self.with_selection(|sel, d| sel.clear(d));
         if let Some((id, shape)) = self.shapes.pop() {
-            if let Some(i) = shape.as_text().and_then(|t| t.replaces.as_ref().map(|r| r.0))
-                && let Some((_, orig)) = self.shapes.get_mut(i)
-            {
-                orig.hidden = false; // the text as it was before it was edited
+            if let shapes::Kind::Step(step) = &shape.kind {
+                // the picture and its drawings as they were
+                self.image = step.before.0.clone();
+                self.shapes = step.before.1.clone();
+                self.picture_changed();
+            } else if let Some((_, orig)) = shape.replaces.and_then(|i| self.shapes.get_mut(i)) {
+                orig.hidden = false; // the drawing as it was before it was changed
             }
             self.undone.push((id, shape));
             self.changed();
@@ -568,10 +1118,13 @@ impl Editor {
 
     pub fn redo(&mut self) {
         self.commit_text();
+        self.with_selection(|sel, d| sel.clear(d));
         if let Some((id, shape)) = self.undone.pop() {
-            if let Some(i) = shape.as_text().and_then(|t| t.replaces.as_ref().map(|r| r.0))
-                && let Some((_, orig)) = self.shapes.get_mut(i)
-            {
+            if let shapes::Kind::Step(step) = &shape.kind {
+                self.image = step.after.0.clone();
+                self.shapes = step.after.1.clone();
+                self.picture_changed();
+            } else if let Some((_, orig)) = shape.replaces.and_then(|i| self.shapes.get_mut(i)) {
                 orig.hidden = true;
             }
             self.shapes.push((id, shape));
@@ -592,12 +1145,14 @@ impl Editor {
 
     /// The whole picture in view, no bigger than it really is.
     pub fn fit(&mut self) {
-        let (pw, ph) = picture_size(&self.image, self.dpr);
+        let b = self.view_box();
         let c = self.canvas_rect();
-        self.zoom = 1.0f32.min((c.w - 32.0) / pw.max(1.0)).min((c.h - 32.0) / ph.max(1.0)).max(ZOOM.0);
-        self.offset = Point::new(((c.w - pw * self.zoom) / 2.0).round(), ((c.h - ph * self.zoom) / 2.0).round());
+        self.zoom = 1.0f32.min((c.w - 32.0) / b.w.max(1.0)).min((c.h - 32.0) / b.h.max(1.0)).max(ZOOM.0);
+        self.offset = Point::new(((c.w - b.w * self.zoom) / 2.0 - b.x * self.zoom).round(), ((c.h - b.h * self.zoom) / 2.0 - b.y * self.zoom).round());
         self.fitted = true;
         self.damaged = true;
+        self.refresh_zoom_bar();
+        self.layout_zoom_bar();
     }
 
     /// Zoom, keeping the point under `around` (window coordinates; the
@@ -608,16 +1163,25 @@ impl Editor {
         let at = self.to_picture(around);
         self.zoom = zoom.clamp(ZOOM.0, ZOOM.1);
         self.offset = Point::new(around.x - c.x - at.x * self.zoom, around.y - c.y - at.y * self.zoom);
-        self.fitted = false;
+        self.unfit();
         self.keep_in_view();
         self.damaged = true;
     }
 
     fn pan_by(&mut self, d: Point) {
         self.offset += d;
-        self.fitted = false;
+        self.unfit();
         self.keep_in_view();
         self.damaged = true;
+    }
+
+    /// Moved or zoomed by hand: no longer following the window's size.
+    fn unfit(&mut self) {
+        if self.fitted {
+            self.fitted = false;
+            self.refresh_zoom_bar();
+            self.layout_zoom_bar();
+        }
     }
 
     /// At least a bit of the picture stays in the window.
@@ -632,15 +1196,31 @@ impl Editor {
 
     pub fn cursor(&self) -> CursorShape {
         let at = self.pointer.unwrap_or(Point::ZERO);
-        if self.asking.is_some() || at.y < BAR_H || at.y > self.view.1 - STATUS_H || self.picker.as_ref().is_some_and(|p| p.rect().contains(at)) {
+        if self.zoom_menu.is_some() {
             return CursorShape::Arrow;
         }
-        if self.pan.is_some() || self.text_drag.is_some_and(|_| self.text_edit.is_some()) {
+        if self.width_field.rect.contains(at) || self.height_field.rect.contains(at) {
+            return CursorShape::Text;
+        }
+        if self.beauty_on && (self.panel.is_open() || self.panel.rect.contains(at)) {
+            return if self.panel.name.rect.contains(at) { CursorShape::Text } else { CursorShape::Arrow };
+        }
+        if self.asking.is_some() || at.y < self.top_h() || at.y > self.view.1 - STATUS_H || self.picker.as_ref().is_some_and(|p| p.rect().contains(at)) {
+            return CursorShape::Arrow;
+        }
+        if self.text_drag.is_some() && self.text_edit.is_some() {
+            CursorShape::Text
+        } else if self.pan.is_some() {
             CursorShape::Move
         } else if self.space {
             CursorShape::Hand
         } else if self.tool == Tool::Text && !self.eyedropper {
             CursorShape::Text
+        } else if self.tool == Tool::Select && !self.eyedropper {
+            let pic = self.to_picture(at);
+            self.selection.cursor(&ShapesRef(&self.shapes), pic, self.zoom)
+        } else if self.tool == Tool::Crop && !self.eyedropper {
+            self.cropper.cursor(self.to_picture(at), self.zoom)
         } else {
             CursorShape::Crosshair
         }
@@ -658,9 +1238,35 @@ impl Editor {
             return;
         }
         let hovered = self.bar_item_at(at);
-        if hovered != self.hovered {
+        if hovered != self.hovered || self.zoom_menu.is_some() {
             self.hovered = hovered;
             self.damaged = true;
+        }
+        if self.beauty_on && (self.panel.dragging() || self.panel.is_open() || self.panel.rect.contains(at)) {
+            let (name, presets) = (self.image_name(), self.preset_names());
+            let was = self.panel.hovered;
+            let ev = self.panel.motion(at, &mut self.beauty, &name, &presets);
+            if ev != PanelEvent::None || was != self.panel.hovered {
+                self.panel_event(ev);
+            }
+            return;
+        }
+        if self.panel.hovered.take().is_some() {
+            self.damaged = true;
+        }
+        match self.pressed {
+            Some("zoom.slider") => return self.slide_zoom(at.x),
+            Some("crop.width") => {
+                self.width_field.drag_to(at);
+                self.damaged = true;
+                return;
+            }
+            Some("crop.height") => {
+                self.height_field.drag_to(at);
+                self.damaged = true;
+                return;
+            }
+            _ => {}
         }
         if let Some(p) = &mut self.picker
             && (self.pressed == Some("picker") || p.rect().contains(at))
@@ -671,19 +1277,33 @@ impl Editor {
         }
         if let Some((start, offset)) = self.pan {
             self.offset = offset + (at - start);
-            self.fitted = false;
+            self.unfit();
             self.keep_in_view();
             self.damaged = true;
             return;
         }
         let pic = self.to_picture(at);
-        if let Some((start, origin)) = self.text_drag
-            && let Some(t) = self.text_edit.as_mut().and_then(|s| s.as_text_mut())
+        if self.text_drag.is_some()
+            && let Some(s) = self.text_edit.as_mut()
         {
-            if (pic - start).manhattan() * self.zoom > 3.0 || t.pos != origin {
-                t.pos = origin + (pic - start);
+            // Dragging in the text selects (only the select tool moves text).
+            let size = s.size;
+            if let Some(t) = s.as_text_mut() {
+                let i = t.index_at(pic, size);
+                t.edit.place(i, true);
                 self.damaged = true;
             }
+            return;
+        }
+        if self.selection.dragging() {
+            self.with_selection(|sel, d| sel.motion(d, pic, mods));
+            return;
+        }
+        if self.cropper.busy() {
+            let mut c = std::mem::take(&mut self.cropper);
+            c.motion(pic, mods, &|p, m| self.crop_snap(p, m));
+            self.cropper = c;
+            self.damaged = true;
             return;
         }
         if let Some(s) = &mut self.active {
@@ -714,6 +1334,42 @@ impl Editor {
             }
             return;
         }
+        if let Some(menu) = self.zoom_menu.take() {
+            // A zoom picked, or a click elsewhere closes it.
+            self.damaged = true;
+            match menu.iter().find(|(r, _)| r.contains(at)) {
+                Some((_, Some(z))) => self.zoom_to(*z as f32 / 100.0, None),
+                Some((_, None)) => self.fit(),
+                None => {}
+            }
+            return;
+        }
+        if self.beauty_on && button == Button::Left && (self.panel.is_open() || self.panel.rect.contains(at)) {
+            let (name, presets) = (self.image_name(), self.preset_names());
+            let ev = self.panel.press(at, &mut self.beauty, &name, &presets);
+            self.panel_event(ev);
+            return;
+        }
+        if self.panel.name.focused {
+            self.panel.name.focused = false;
+            self.damaged = true;
+        }
+        let in_field = |f: &LineEdit| f.rect.contains(at);
+        if button == Button::Left && self.tool == Tool::Crop && (in_field(&self.width_field) || in_field(&self.height_field)) {
+            let width = in_field(&self.width_field);
+            let shift = mods & keyseq::SHIFT != 0;
+            let (field, other) = if width { (&mut self.width_field, &mut self.height_field) } else { (&mut self.height_field, &mut self.width_field) };
+            other.focused = false;
+            field.press(at, shift);
+            self.pressed = Some(if width { "crop.width" } else { "crop.height" });
+            self.damaged = true;
+            return;
+        }
+        if self.width_field.focused || self.height_field.focused {
+            self.width_field.focused = false;
+            self.height_field.focused = false;
+            self.refresh_bar();
+        }
         if let Some(p) = &mut self.picker {
             if p.rect().contains(at) {
                 self.pressed = Some("picker");
@@ -725,13 +1381,19 @@ impl Editor {
                 self.close_picker();
             }
         }
-        if at.y < BAR_H {
+        if at.y < self.top_h() {
             if button == Button::Left {
                 self.pressed = self.bar_item_at(at);
             }
             return;
         }
         if at.y > self.view.1 - STATUS_H {
+            if button == Button::Left {
+                self.pressed = self.bar_item_at(at);
+                if self.pressed == Some("zoom.slider") {
+                    self.slide_zoom(at.x);
+                }
+            }
             return;
         }
         if button == Button::Middle || (button == Button::Left && self.space) {
@@ -786,12 +1448,25 @@ impl Editor {
                 let n = self.next_number();
                 self.commit(Shape::counter(pic, self.color(), self.size, n));
             }
+            Tool::Select => {
+                let zoom = self.zoom;
+                self.with_selection(|sel, d| sel.press(d, pic, mods, zoom));
+            }
+            Tool::Crop => {
+                let mut c = std::mem::take(&mut self.cropper);
+                c.press(pic, mods, self.zoom, &|p, m| self.crop_snap(p, m));
+                self.cropper = c;
+            }
             tool => self.active = Shape::create(tool, pic, self.color(), self.size),
         }
         self.damaged = true;
     }
 
     fn release(&mut self, button: Button, at: Point) {
+        if self.panel.dragging() {
+            self.panel.release();
+            return;
+        }
         if self.pressed == Some("picker") {
             self.pressed = None;
             if let Some(p) = &mut self.picker {
@@ -801,6 +1476,9 @@ impl Editor {
             return;
         }
         if let Some(id) = self.pressed.take() {
+            if matches!(id, "zoom.slider" | "crop.width" | "crop.height") {
+                return;
+            }
             if self.bar_item_at(at) == Some(id) {
                 self.bar_click(id);
             }
@@ -816,6 +1494,17 @@ impl Editor {
         if self.text_drag.take().is_some() {
             return;
         }
+        if self.selection.dragging() {
+            self.with_selection(|sel, d| sel.release(d));
+            return self.refresh_bar();
+        }
+        if self.cropper.busy() {
+            if let Done::Cut { a, b, rows } = self.cropper.release(self.dpr) {
+                let r = picture::cut(&self.image, self.dpr, a, b, rows);
+                self.change_picture("Cut out", r);
+            }
+            return self.refresh_bar();
+        }
         if let Some(shape) = self.active.take() {
             if shape.is_valid() {
                 self.commit(shape);
@@ -828,6 +1517,12 @@ impl Editor {
     /// the pointer, Shift scrolls sideways.
     pub fn scroll(&mut self, steps: f32) {
         if self.asking.is_some() {
+            return;
+        }
+        if self.beauty_on && self.pointer.is_some_and(|p| self.panel.rect.contains(p)) {
+            let name = self.image_name();
+            self.panel.scroll_by(steps * 48.0, &self.beauty, &name);
+            self.damaged = true;
             return;
         }
         if self.mods & keyseq::CTRL != 0 {
@@ -912,6 +1607,23 @@ impl Editor {
                 return;
             }
         }
+        if self.width_field.focused || self.height_field.focused {
+            return self.size_key(k);
+        }
+        if self.panel.wants_keys() {
+            let ev = self.panel.key(k);
+            return self.panel_event(ev);
+        }
+        if k.key == key::ESCAPE && self.panel.close() {
+            self.damaged = true;
+            return;
+        }
+        if self.has_selection() && self.with_selection(|sel, d| sel.key(d, k)) {
+            return self.refresh_bar(); // (Delete, or an arrow key nudging it)
+        }
+        if self.tool == Tool::Crop && matches!(k.key, key::RETURN | key::ENTER) {
+            return self.crop();
+        }
         match k.key {
             key::SPACE if !k.repeat => self.space = true,
             key::ESCAPE => {
@@ -919,9 +1631,18 @@ impl Editor {
                     self.close_picker();
                 } else {
                     self.close_picker();
-                    if self.active.take().is_some() {
+                    if self.zoom_menu.take().is_some() {
                         self.damaged = true;
-                    } else if !self.commit_text() {
+                    } else if self.tool == Tool::Crop && self.cropper.cancel() {
+                        self.refresh_bar();
+                    } else if self.active.take().is_some() {
+                        self.damaged = true;
+                    } else if self.with_selection(|sel, d| sel.clear(d)) {
+                        // (deselected first)
+                    } else if self.commit_text() {
+                    } else if self.tool == Tool::Crop {
+                        self.set_tool(self.colour_tool); // (leaves the crop tool, not the editor)
+                    } else {
                         self.close();
                     }
                 }
@@ -936,6 +1657,59 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// A key in the width or height field: digits (and %), Enter resizes,
+    /// Esc leaves the field.
+    fn size_key(&mut self, k: &KeyPress) {
+        let width = self.width_field.focused;
+        match k.key {
+            key::RETURN | key::ENTER => {
+                self.width_field.focused = false;
+                self.height_field.focused = false;
+                self.resize_picture();
+                return self.refresh_bar();
+            }
+            key::ESCAPE => {
+                self.width_field.focused = false;
+                self.height_field.focused = false;
+                return self.refresh_bar();
+            }
+            key::TAB => {
+                self.width_field.focused = !width;
+                self.height_field.focused = width;
+                self.damaged = true;
+                return;
+            }
+            _ => {}
+        }
+        let field = if width { &mut self.width_field } else { &mut self.height_field };
+        let before = field.text().to_string();
+        if let KeyResult::Paste = field.key(k) {
+            self.requests.push(Request::Paste);
+        }
+        self.after_size_edit(width, &before);
+    }
+
+    /// Keep only what a size can be, and let the other side follow.
+    fn after_size_edit(&mut self, width: bool, before: &str) {
+        let field = if width { &mut self.width_field } else { &mut self.height_field };
+        let clean = size_text(field.text());
+        if clean != field.text() {
+            let cursor = field.edit.cursor.min(clean.len());
+            field.edit = crate::ui::textedit::TextEdit::single_line(&clean, 6);
+            field.edit.place(cursor, false);
+        }
+        if field.text() != before {
+            self.follow_size(width);
+        }
+        self.damaged = true;
+    }
+
+    /// The slider dragged to `x`.
+    fn slide_zoom(&mut self, x: f32) {
+        let t = (x - self.zoom_slider.x - 8.0) / (self.zoom_slider.w - 16.0).max(1.0);
+        self.zoom_to(Self::slider_zoom(t), None);
     }
 
     pub fn key_release(&mut self, k: &KeyPress) {
@@ -958,6 +1732,7 @@ impl Editor {
             "zoom_in" => self.zoom_to(self.zoom * 1.25, None),
             "zoom_out" => self.zoom_to(self.zoom / 1.25, None),
             "close" => self.close(),
+            "beautify" => self.toggle_beauty(),
             "size.down" => self.set_size(self.size.saturating_sub(1)),
             "size.up" => self.set_size(self.size + 1),
             _ => {
@@ -972,6 +1747,18 @@ impl Editor {
 
     /// Text from an input method (compose, dead keys, CJK, emoji).
     pub fn commit_string(&mut self, s: &str) {
+        if self.panel.wants_keys() {
+            self.panel.insert(s);
+            self.damaged = true;
+            return;
+        }
+        if self.width_field.focused || self.height_field.focused {
+            let width = self.width_field.focused;
+            let field = if width { &mut self.width_field } else { &mut self.height_field };
+            let before = field.text().to_string();
+            field.edit.insert(s);
+            return self.after_size_edit(width, &before);
+        }
         if let Some(t) = self.text_edit.as_mut().and_then(|s| s.as_text_mut()) {
             t.edit.insert(s);
             self.damaged = true;
@@ -985,6 +1772,12 @@ impl Editor {
 
     /// The clipboard's text, asked for with Request::Paste.
     pub fn paste(&mut self, s: &str) {
+        if self.panel.wants_keys() {
+            return self.commit_string(s.lines().next().unwrap_or(""));
+        }
+        if self.width_field.focused || self.height_field.focused {
+            return self.commit_string(s.lines().next().unwrap_or(""));
+        }
         if let Some(t) = self.text_edit.as_mut().and_then(|s| s.as_text_mut()) {
             t.edit.paste(s);
             self.damaged = true;
@@ -1004,7 +1797,11 @@ impl Editor {
     }
 
     pub fn wants_text(&self) -> bool {
-        self.text_edit.is_some() || self.picker.as_ref().is_some_and(|p| p.hex.focused)
+        self.text_edit.is_some()
+            || self.picker.as_ref().is_some_and(|p| p.hex.focused)
+            || self.width_field.focused
+            || self.height_field.focused
+            || self.panel.wants_keys()
     }
 
     // -- output ----------------------------------------------------------------------------
@@ -1019,10 +1816,18 @@ impl Editor {
                 s.paint(&mut p, &self.image, self.dpr);
             }
         }
-        if !self.alpha {
+        if !self.has_alpha() {
             out.force_opaque();
         }
+        if self.beauty_on {
+            out = beautify::render(&out, &self.beauty, self.dpr)?;
+        }
         Ok(out)
+    }
+
+    /// Transparency to keep: the picture opened had it, or a clear margin was added.
+    fn has_alpha(&self) -> bool {
+        self.alpha || self.image.has_alpha()
     }
 
     fn say(&mut self, message: String) {
@@ -1032,7 +1837,7 @@ impl Editor {
 
     pub fn copy(&mut self) {
         let clock = crate::timing::Clock::new("editor copy");
-        let png = self.render().and_then(|img| crate::codec::encode_png(&img, self.alpha));
+        let png = self.render().and_then(|img| crate::codec::encode_png(&img, img.has_alpha()));
         match png {
             Ok(png) => {
                 let mut clock = clock;
@@ -1070,7 +1875,7 @@ impl Editor {
         let written = target.and_then(|target| {
             let img = self.render()?;
             clock.step("drawn", format!("{} × {}, {} drawings", img.width(), img.height(), self.shapes.len()));
-            let result = write_picture(&img, &target, &self.cfg, self.alpha);
+            let result = write_picture(&img, &target, &self.cfg, img.has_alpha());
             self.target = Some(target);
             result
         });
@@ -1081,6 +1886,8 @@ impl Editor {
                 self.say(format!("Saved to {}", path.display()));
                 self.path = path;
                 self.saved = self.shapes.iter().map(|(id, _)| *id).collect();
+                self.saved_image = self.image.clone();
+                self.saved_beauty = self.beauty_state();
                 self.dirty = false;
                 self.refresh_bar();
                 true
@@ -1144,35 +1951,63 @@ impl Editor {
         for b in &self.actions {
             b.paint(&mut p, self.hovered == Some(b.id));
         }
-        // The status line: a hint (or what just happened), the size and zoom.
+        if self.tool == Tool::Crop {
+            self.paint_picture_bar(&mut p, &ptr);
+        }
+        if self.beauty_on {
+            self.panel.paint(&mut p, &self.beauty, &self.image_name(), &self.preset_names());
+        }
+        // The status line: a hint (or what just happened), the size, and the zoom's controls.
         let top = self.view.1 - STATUS_H;
         p.fill_rect(Rect::new(0.0, top, self.view.0, STATUS_H), c.base);
         p.fill_rect(Rect::new(0.0, top, self.view.0, 1.0), c.line);
         let f = text::font(12.0, text::NORMAL);
         let tip = self.hovered.and_then(|id| {
-            self.bar.iter().find(|it| it.id == id).map(|it| it.hint.clone()).or_else(|| self.actions.iter().find(|b| b.id == id).map(|b| b.hint.clone()))
+            self.bar
+                .iter()
+                .chain(self.picture_bar.iter())
+                .chain(self.zoom_bar.iter())
+                .find(|it| it.id == id)
+                .map(|it| it.hint.clone())
+                .or_else(|| self.actions.iter().chain(self.picture_actions.iter()).find(|b| b.id == id).map(|b| b.hint.clone()))
+                .or_else(|| match id {
+                    "zoom.label" => Some("Choose a zoom".to_string()),
+                    "zoom.slider" => Some("Zoom".to_string()),
+                    "crop.width" | "crop.height" => Some(format!("{} in pixels, or a percentage (50%)", if id == "crop.width" { "Width" } else { "Height" })),
+                    _ => None,
+                })
         });
         let (message, color) = match (&self.status, tip) {
             (Some((s, _)), _) => (s.clone(), c.soft),
             (None, Some(t)) => (t, c.muted),
-            (None, None) => {
-                let text = if self.eyedropper {
-                    "Click a pixel to make it your colour  ·  Esc to stop"
-                } else if self.active.as_ref().is_some_and(|s| s.drag().is_some()) {
-                    SHAPE_HINT
-                } else if self.tool == Tool::Text {
-                    TEXT_HINT
-                } else {
-                    HINT
-                };
-                (text.to_string(), c.muted)
-            }
+            (None, None) => (self.hint_text(), c.muted),
         };
-        let right = format!("{} × {}   {}%", self.image.width(), self.image.height(), (self.zoom * 100.0).round());
+        let right = format!("{} × {}", self.image.width(), self.image.height());
         let rw = text::width(&right, f);
-        let left_w = (self.view.0 - rw - 36.0).max(10.0);
-        p.draw_text(Rect::new(12.0, top, left_w, STATUS_H), Align::Left, &text::elide_end(&message, f, left_w), f, color);
-        p.draw_text(Rect::new(self.view.0 - rw - 12.0, top, rw, STATUS_H), Align::Left, &right, f, c.muted);
+        let end = self.zoom_bar.first().map_or(self.view.0, |it| it.rect.x) - 14.0;
+        let left_w = (end - rw - 36.0 - 12.0).max(0.0);
+        if left_w > 10.0 {
+            p.draw_text(Rect::new(12.0, top, left_w, STATUS_H), Align::Left, &text::elide_end(&message, f, left_w), f, color);
+        }
+        p.draw_text(Rect::new(end - rw, top, rw, STATUS_H), Align::Left, &right, f, c.muted);
+        for it in &self.zoom_bar {
+            paint_item(&mut p, it, Point::ZERO, &ptr);
+        }
+        self.paint_zoom_slider(&mut p);
+        let label_hover = self.hovered == Some("zoom.label");
+        if label_hover {
+            p.fill_rounded_rect(self.zoom_label.adjusted(0.5, 0.5, -0.5, -0.5), 6.0, c.hover);
+        }
+        p.draw_text(
+            self.zoom_label,
+            Align::Center,
+            &format!("{}%", (self.zoom * 100.0).round()),
+            text::font(12.0, DEMIBOLD),
+            if label_hover { c.text } else { c.soft },
+        );
+        if let Some(menu) = &self.zoom_menu {
+            self.paint_zoom_menu(&mut p, menu);
+        }
         if let Some(picker) = &self.picker {
             picker.paint(&mut p);
         }
@@ -1195,6 +2030,7 @@ impl Editor {
             (self.offset.y * 64.0) as i64,
             (self.zoom * 4096.0) as i64,
             self.shapes_version,
+            if self.beauty_on { self.beauty_version + 1 } else { 0 },
         );
         {
             let mut layer = self.layer.borrow_mut();
@@ -1211,18 +2047,31 @@ impl Editor {
         }
         let _ = region;
         // What's being drawn now.
-        if self.active.is_some() || self.text_edit.is_some() {
+        if self.active.is_some() || self.text_edit.is_some() || self.selection.moving().is_some() {
             let mut p = Painter::for_region(target.pixmap_mut(), s, origin);
             p.clip_rect(area);
             p.translate(area.x + self.offset.x, area.y + self.offset.y);
             p.scale_by(self.zoom, self.zoom);
             let (pw, ph) = picture_size(&self.image, self.dpr);
             p.clip_rect(Rect::new(0.0, 0.0, pw, ph));
-            for shape in self.active.iter().chain(self.text_edit.iter()) {
+            for shape in self.active.iter().chain(self.selection.moving()).chain(self.text_edit.iter()) {
                 shape.paint(&mut p, &self.image, self.dpr);
             }
         }
-        if self.shapes.is_empty() && self.active.is_none() && self.text_edit.is_none() {
+        if self.tool == Tool::Select {
+            // The selected drawing's frame and handles (past the picture's edges too).
+            let mut p = Painter::for_region(target.pixmap_mut(), s, origin);
+            p.clip_rect(area);
+            p.translate(area.x + self.offset.x, area.y + self.offset.y);
+            p.scale_by(self.zoom, self.zoom);
+            self.selection.paint_frame(&ShapesRef(&self.shapes), &mut p, self.zoom);
+        }
+        if self.tool == Tool::Crop {
+            let mut p = Painter::for_region(target.pixmap_mut(), s, origin);
+            p.clip_rect(area);
+            self.cropper.paint(&mut p, area, self.offset, self.zoom, self.dpr, self.color());
+        }
+        if self.shapes.is_empty() && self.active.is_none() && self.text_edit.is_none() && self.tool != Tool::Crop {
             // Until something is drawn: what to do, quietly, at the bottom.
             let mut p = Painter::for_region(target.pixmap_mut(), s, origin);
             let f = text::font(12.0, MEDIUM);
@@ -1240,9 +2089,26 @@ impl Editor {
         let (pw, ph) = picture_size(&self.image, self.dpr);
         let mut p = Painter::new(img.pixmap_mut(), self.scale);
         let frame = Rect::new(self.offset.x, self.offset.y, pw * self.zoom, ph * self.zoom);
-        p.stroke_rect(frame.adjusted(-0.5, -0.5, 0.5, 0.5), Pen::new(c.line, 1.0));
-        // Close up, whole pixels (as a paint program shows them); further out, smooth.
-        p.draw_image(&self.image, frame, self.image.rect().to_f(), self.zoom * self.scale < self.dpr);
+        let smooth = self.zoom * self.scale < self.dpr;
+        if self.beauty_on {
+            // The background and shadow round it, and its corners rounded, as it will be saved.
+            if let Some((bg, at)) = self.backdrop() {
+                let k = self.zoom / self.dpr;
+                let r = Rect::new(frame.x - at.x as f32 * k, frame.y - at.y as f32 * k, bg.width() as f32 * k, bg.height() as f32 * k);
+                p.draw_image(&bg, r, bg.rect().to_f(), true);
+            }
+            p.save();
+            let radius = beautify::corners(&self.beauty, &self.image, self.dpr) / self.dpr * self.zoom;
+            if radius > 0.0 {
+                p.clip_rounded(frame, radius);
+            }
+            p.draw_image(&self.image, frame, self.image.rect().to_f(), smooth);
+            p.restore();
+        } else {
+            p.stroke_rect(frame.adjusted(-0.5, -0.5, 0.5, 0.5), Pen::new(c.line, 1.0));
+            // Close up, whole pixels (as a paint program shows them); further out, smooth.
+            p.draw_image(&self.image, frame, self.image.rect().to_f(), smooth);
+        }
         if self.shapes.iter().any(|(_, s)| !s.hidden) {
             p.translate(self.offset.x, self.offset.y);
             p.scale_by(self.zoom, self.zoom);
@@ -1250,6 +2116,199 @@ impl Editor {
             p.clip_rect(Rect::new(0.0, 0.0, pw, ph));
             for (_, s) in self.shapes.iter().filter(|(_, s)| !s.hidden) {
                 s.paint(&mut p, &self.image, self.dpr);
+            }
+        }
+    }
+
+    /// Beautify's background and shadow for the picture (kept until the
+    /// picture or the style changes), and where the picture is on it (px).
+    fn backdrop(&self) -> Option<(Arc<Image>, IPoint)> {
+        let key = (Arc::as_ptr(&self.image) as usize, self.beauty_version);
+        let mut cache = self.backdrop.borrow_mut();
+        if cache.as_ref().is_none_or(|(k, ..)| *k != key) {
+            let (img, at) = beautify::backdrop(&self.image, &self.beauty, self.dpr).ok()?;
+            *cache = Some((key, Arc::new(img), at));
+        }
+        cache.as_ref().map(|(_, img, at)| (img.clone(), *at))
+    }
+
+    /// What's shown, in the picture's coordinates: the picture, and its
+    /// background round it while beautifying.
+    fn view_box(&self) -> Rect {
+        let (pw, ph) = picture_size(&self.image, self.dpr);
+        if !self.beauty_on {
+            return Rect::new(0.0, 0.0, pw, ph);
+        }
+        match self.backdrop() {
+            Some((bg, at)) => Rect::new(-at.x as f32 / self.dpr, -at.y as f32 / self.dpr, bg.width() as f32 / self.dpr, bg.height() as f32 / self.dpr),
+            None => Rect::new(0.0, 0.0, pw, ph),
+        }
+    }
+
+    fn beauty_state(&self) -> Option<Style> {
+        self.beauty_on.then(|| self.beauty.clone())
+    }
+
+    /// Show or hide the Background panel; the background goes with it.
+    pub fn toggle_beauty(&mut self) {
+        self.beauty_on = !self.beauty_on;
+        self.panel.close();
+        self.refresh_bar();
+        self.layout_bar();
+        self.fit();
+        self.changed();
+    }
+
+    /// The style changed (the panel's controls).
+    fn beauty_changed(&mut self) {
+        self.beauty.clean();
+        self.place_panel();
+        self.beauty_version += 1;
+        self.remember_at = Some(Instant::now() + REMEMBER_AFTER);
+        if self.fitted {
+            self.fit();
+        }
+        self.changed();
+    }
+
+    /// The style becomes the last used: what Beautify after capture uses.
+    fn remember_beauty(&mut self) {
+        let style = self.beauty.to_map();
+        self.cfg.beautify_style = style.clone();
+        crate::config::update(move |c| c.beautify_style = style);
+    }
+
+    fn save_preset(&mut self, name: String) {
+        let style = self.beauty.to_map();
+        self.cfg.beautify_presets.insert(name.clone(), serde_json::Value::Object(style.clone()));
+        let (n, st) = (name.clone(), style);
+        crate::config::update(move |c| {
+            c.beautify_presets.insert(n, serde_json::Value::Object(st));
+        });
+        self.say(format!("Saved the preset {name}"));
+    }
+
+    fn use_preset(&mut self, name: &str) {
+        if let Some(serde_json::Value::Object(m)) = self.cfg.beautify_presets.get(name) {
+            self.beauty = Style::from_map(m);
+            self.beauty_changed();
+        }
+    }
+
+    /// A picture chosen for the background.
+    pub fn background_image(&mut self, path: &Path) {
+        self.beauty.image = path.to_string_lossy().into_owned();
+        self.beauty.background = "image".into();
+        self.beauty_changed();
+    }
+
+    fn preset_names(&self) -> Vec<String> {
+        self.cfg.beautify_presets.keys().cloned().collect()
+    }
+
+    fn image_name(&self) -> String {
+        if self.beauty.image.is_empty() {
+            "No image selected".into()
+        } else {
+            Path::new(&self.beauty.image).file_name().map(|n| crate::util::displayable(&n.to_string_lossy())).unwrap_or_default()
+        }
+    }
+
+    fn panel_rect(&self) -> Rect {
+        let top = self.top_h();
+        Rect::new(self.view.0 - beautypanel::WIDTH, top, beautypanel::WIDTH, (self.view.1 - top - STATUS_H).max(1.0))
+    }
+
+    fn panel_event(&mut self, ev: PanelEvent) {
+        match ev {
+            PanelEvent::None => {}
+            PanelEvent::Changed => self.beauty_changed(),
+            PanelEvent::UseColour => {
+                self.beauty.color = self.color().hex();
+                self.beauty_changed();
+            }
+            PanelEvent::ChooseImage => {
+                let start =
+                    Path::new(&self.beauty.image).parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(crate::config::home);
+                self.requests.push(Request::ChooseImage(start));
+            }
+            PanelEvent::UsePreset(name) => self.use_preset(&name),
+            PanelEvent::SavePreset(name) => self.save_preset(name),
+            PanelEvent::Paste => self.requests.push(Request::Paste),
+        }
+        self.damaged = true;
+    }
+
+    /// The status line's text when nothing else is said.
+    fn hint_text(&self) -> String {
+        let text = if self.eyedropper {
+            "Click a pixel to make it your colour  ·  Esc to stop"
+        } else if self.active.as_ref().is_some_and(|s| s.drag().is_some()) {
+            SHAPE_HINT
+        } else if self.tool == Tool::Text {
+            TEXT_HINT
+        } else if self.tool == Tool::Crop {
+            return match self.cropper.cut {
+                Some(rows) => CUT_HINT.replace("{what}", if rows { "rows" } else { "columns" }),
+                None => CROP_HINT.into(),
+            };
+        } else if self.tool == Tool::Select && self.selection.current(&ShapesRef(&self.shapes)).is_some() {
+            SELECTED_HINT
+        } else if self.tool == Tool::Select {
+            SELECT_HINT
+        } else {
+            HINT
+        };
+        text.to_string()
+    }
+
+    fn paint_picture_bar(&self, p: &mut Painter<'_>, ptr: &Pointer) {
+        let c = theme::c();
+        p.fill_rect(Rect::new(0.0, BAR_H, self.view.0, PICTURE_BAR_H), c.base);
+        p.fill_rect(Rect::new(0.0, BAR_H + PICTURE_BAR_H - 1.0, self.view.0, 1.0), c.line);
+        for b in &self.picture_actions {
+            b.paint(p, self.hovered == Some(b.id));
+        }
+        for it in &self.picture_bar {
+            paint_item(p, it, Point::ZERO, ptr);
+        }
+        self.width_field.paint(p, true);
+        self.height_field.paint(p, true);
+        let times = Rect::new(self.width_field.rect.right() + 4.0, self.width_field.rect.y, 14.0, self.width_field.rect.h);
+        p.draw_text(times, Align::Center, "×", text::font(13.0, text::NORMAL), c.muted);
+    }
+
+    fn paint_zoom_slider(&self, p: &mut Painter<'_>) {
+        let c = theme::c();
+        let r = self.zoom_slider;
+        let track = Rect::new(r.x + 8.0, r.center().y - 2.0, r.w - 16.0, 4.0);
+        p.fill_rounded_rect(track, 2.0, c.line);
+        let x = track.x + track.w * Self::slider_position(self.zoom);
+        p.fill_rounded_rect(Rect::new(track.x, track.y, x - track.x, track.h), 2.0, c.accent);
+        let hot = matches!(self.hovered, Some("zoom.slider")) || self.pressed == Some("zoom.slider");
+        let k = if hot { 7.0 } else { 6.0 };
+        p.draw_rounded_rect(Rect::new(x - k, r.center().y - k, 2.0 * k, 2.0 * k), k, Some(c.knob), Some(Pen::new(c.line, 1.0)));
+    }
+
+    fn paint_zoom_menu(&self, p: &mut Painter<'_>, rows: &[(Rect, Option<u32>)]) {
+        let c = theme::c();
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else { return };
+        let panel = Rect::from_ltrb(first.0.x - 4.0, first.0.y - 4.0, first.0.right() + 4.0, last.0.bottom() + 4.0);
+        p.draw_rounded_rect(panel.adjusted(0.5, 0.5, -0.5, -0.5), 10.0, Some(c.base), Some(Pen::new(c.line, 1.0)));
+        let f = text::font(13.0, text::NORMAL);
+        let at = self.pointer.unwrap_or(Point::new(-1.0, -1.0));
+        for (i, (r, z)) in rows.iter().enumerate() {
+            if r.contains(at) {
+                p.fill_rounded_rect(*r, 6.0, c.hover);
+            }
+            let label = match z {
+                Some(z) => format!("{z}%"),
+                None => "Fit in the window".to_string(),
+            };
+            let current = z.is_some_and(|z| (self.zoom * 100.0).round() as u32 == z) || (z.is_none() && self.fitted);
+            p.draw_text(r.adjusted(12.0, 0.0, -8.0, 0.0), Align::Left, &label, f, if current { c.accent } else { c.text });
+            if i == 0 {
+                p.fill_rect(Rect::new(r.x + 6.0, r.bottom() - 0.5, r.w - 12.0, 1.0), c.line);
             }
         }
     }
@@ -1267,7 +2326,7 @@ impl Editor {
         let body = text::font(13.0, text::NORMAL);
         p.draw_text(Rect::new(inner.x, inner.y + 32.0, inner.w, 24.0), Align::Left, "Your drawings will be lost if you don't save them.", body, c.soft);
         for (a, r, label, icon) in ask_buttons(self.view) {
-            let b = ActionButton { id: "", text: label, icon, strong: a == Answer::Save, hint: String::new(), rect: r, width: r.w };
+            let b = ActionButton { id: "", text: label, icon, strong: a == Answer::Save, hint: String::new(), rect: r, width: r.w, enabled: true };
             b.paint(p, hovered == Some(a));
         }
     }
@@ -1453,6 +2512,155 @@ mod tests {
         let img = ed.render().unwrap();
         assert_eq!(img.size(), (400, 300));
         assert_ne!(img.pixel(10, 40), 0xFF20_4060, "the rectangle's edge is drawn");
+    }
+
+    #[test]
+    fn select_tool() {
+        let mut ed = editor();
+        ed.set_tool(Tool::Rect);
+        let (a, b) = (at(&ed, 50.0, 50.0), at(&ed, 150.0, 100.0));
+        ed.button(Button::Left, true, a, 0);
+        ed.pointer_motion(b, 0);
+        ed.button(Button::Left, false, b, 0);
+        ed.set_tool(Tool::Select);
+        // On its line: selected, then dragged (a copy in its place).
+        let (grab, to) = (at(&ed, 50.0, 60.0), at(&ed, 70.0, 80.0));
+        ed.button(Button::Left, true, grab, 0);
+        ed.pointer_motion(to, 0);
+        ed.button(Button::Left, false, to, 0);
+        assert_eq!(ed.shapes.len(), 2);
+        assert!(ed.shapes[0].1.hidden);
+        assert_eq!(ed.shapes[1].1.geometry(), Rect::new(70.0, 70.0, 100.0, 50.0));
+        // The size buttons restyle it; Delete removes it; undo brings it back.
+        ed.set_size(0);
+        assert_eq!(ed.shapes.len(), 3);
+        assert_eq!(ed.shapes[2].1.size, 0);
+        ed.key(&KeyPress { key: key::DELETE, ..Default::default() });
+        assert!(ed.shapes[3].1.is_removed() && ed.shapes[2].1.hidden);
+        ed.undo();
+        assert!(!ed.shapes[2].1.hidden);
+        // Esc deselects before it would close.
+        ed.button(Button::Left, true, at(&ed, 70.0, 90.0), 0);
+        ed.button(Button::Left, false, at(&ed, 70.0, 90.0), 0);
+        ed.key(&KeyPress { key: key::ESCAPE, ..Default::default() });
+        assert!(!ed.closing && ed.selection.current(&ShapesRef(&ed.shapes)).is_none());
+    }
+
+    #[test]
+    fn changing_the_picture() {
+        let mut ed = editor();
+        ed.set_tool(Tool::Rect);
+        let (a, b) = (at(&ed, 300.0, 200.0), at(&ed, 350.0, 250.0));
+        ed.button(Button::Left, true, a, 0);
+        ed.pointer_motion(b, 0);
+        ed.button(Button::Left, false, b, 0);
+        let narrow = ed.min_size();
+        ed.set_tool(Tool::Crop);
+        assert!(ed.min_size().1 > narrow.1, "the picture bar adds to the least height");
+        assert!(ed.min_size().0 as f32 >= ed.picture_bar_width());
+        // The left edge dragged in by its handle, then Enter crops.
+        let (from, to) = (at(&ed, 0.0, 150.0), at(&ed, 100.0, 150.0));
+        ed.button(Button::Left, true, from, 0);
+        ed.pointer_motion(to, keyseq::CTRL); // (Ctrl: no snapping, from the middle)
+        ed.pointer_motion(to, 0);
+        ed.button(Button::Left, false, to, 0);
+        assert!(ed.cropper.changed());
+        ed.key(&KeyPress { key: key::RETURN, ..Default::default() });
+        assert_eq!(ed.image.size(), (300, 300));
+        assert!(ed.dirty);
+        // The drawing moved with the picture.
+        let drawn = ed.shapes.iter().find(|(_, s)| s.drag().is_some()).map(|(_, s)| s.geometry()).unwrap();
+        assert_eq!(drawn, Rect::new(200.0, 200.0, 50.0, 50.0));
+        // Rotated: one more step; undo twice is the picture as it was.
+        ed.bar_click("rotate-right");
+        assert_eq!(ed.image.size(), (300, 300));
+        let drawn = ed.shapes.iter().find(|(_, s)| s.drag().is_some()).map(|(_, s)| s.geometry()).unwrap();
+        assert_eq!(drawn, Rect::new(50.0, 200.0, 50.0, 50.0));
+        ed.undo();
+        ed.undo();
+        assert_eq!(ed.image.size(), (400, 300));
+        let drawn = ed.shapes.iter().find(|(_, s)| s.drag().is_some()).map(|(_, s)| s.geometry()).unwrap();
+        assert_eq!(drawn, Rect::new(300.0, 200.0, 50.0, 50.0), "the drawings as they were");
+        ed.redo();
+        assert_eq!(ed.image.size(), (300, 300));
+        // Resize: a percentage typed in the width, the height follows.
+        ed.press(Button::Left, ed.width_field.rect.center(), 0);
+        ed.release(Button::Left, ed.width_field.rect.center());
+        assert!(ed.wants_text());
+        for _ in 0..4 {
+            ed.key(&KeyPress { key: key::BACKSPACE, ..Default::default() });
+        }
+        ed.commit_string("5x0%");
+        assert_eq!((ed.width_field.text(), ed.height_field.text()), ("50%", "50%"));
+        ed.key(&KeyPress { key: key::RETURN, ..Default::default() });
+        assert_eq!(ed.image.size(), (150, 150));
+        // Cut out rows: drag across them.
+        ed.bar_click("cut-rows");
+        let (from, to) = (at(&ed, 10.0, 50.0), at(&ed, 10.0, 100.0));
+        ed.button(Button::Left, true, from, 0);
+        ed.pointer_motion(to, 0);
+        ed.button(Button::Left, false, to, 0);
+        assert_eq!(ed.image.size(), (150, 100));
+        // Esc leaves the crop tool, not the editor.
+        ed.key(&KeyPress { key: key::ESCAPE, ..Default::default() });
+        assert!(ed.tool != Tool::Crop && !ed.closing);
+        let img = ed.render().unwrap();
+        assert_eq!(img.size(), (150, 100));
+    }
+
+    #[test]
+    fn zoom_controls() {
+        let mut ed = editor();
+        ed.bar_click("zoom-in");
+        assert!((ed.zoom - 1.25).abs() < 1e-4 && !ed.fitted);
+        // The slider: its left end is the least zoom.
+        let left = Point::new(ed.zoom_slider.x + 8.0, ed.zoom_slider.center().y);
+        ed.button(Button::Left, true, left, 0);
+        ed.button(Button::Left, false, left, 0);
+        assert!((ed.zoom - ZOOM.0).abs() < 1e-3, "{}", ed.zoom);
+        // The menu: a zoom picked.
+        ed.bar_click("zoom.label");
+        let row = ed.zoom_menu.as_ref().unwrap().iter().find(|(_, z)| *z == Some(200)).unwrap().0;
+        ed.button(Button::Left, true, row.center(), 0);
+        ed.button(Button::Left, false, row.center(), 0);
+        assert!((ed.zoom - 2.0).abs() < 1e-4 && ed.zoom_menu.is_none());
+        ed.bar_click("fit");
+        assert!(ed.fitted);
+        // Nothing in the status line overlaps at the least width.
+        let (w, h) = ed.min_size();
+        ed.set_view(w as f32, h as f32);
+        assert!(ed.zoom_bar[0].rect.x >= 160.0, "room for the size and some hint");
+        assert!(ed.actions[0].rect.x >= ed.bar.last().unwrap().rect.right(), "the toolbar's buttons apart");
+    }
+
+    #[test]
+    fn beautify() {
+        let mut ed = editor();
+        let narrow = ed.min_size().0;
+        ed.bar_click("beautify");
+        assert!(ed.beauty_on && ed.dirty);
+        assert!(ed.min_size().0 >= narrow, "room for the panel too");
+        assert!(ed.canvas_rect().w <= ed.view.0 - beautypanel::WIDTH);
+        let style = ed.beauty.clone();
+        let (size, _) = beautify::layout((400, 300), &style, 1.0);
+        let img = ed.render().unwrap();
+        assert_eq!(img.size(), size);
+        // A change from the panel: the style, remembered once changes stop.
+        ed.beauty.padding = 8;
+        ed.panel_event(PanelEvent::Changed);
+        assert!(ed.next_deadline().is_some());
+        ed.on_timer(Instant::now() + Duration::from_secs(1));
+        assert_eq!(Style::from_map(&crate::config::load().beautify_style).padding, 8);
+        assert_eq!(ed.render().unwrap().size(), (416, 316));
+        // A preset saved and used again.
+        ed.panel_event(PanelEvent::SavePreset("tight".into()));
+        ed.beauty.padding = 100;
+        ed.panel_event(PanelEvent::UsePreset("tight".into()));
+        assert_eq!(ed.beauty.padding, 8);
+        // Off again: as saved.
+        ed.toggle_beauty();
+        assert!(!ed.dirty);
+        assert_eq!(ed.render().unwrap().size(), (400, 300));
     }
 
     #[test]

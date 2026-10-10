@@ -95,7 +95,7 @@ jobs:
       - name: Self-test
         run: |
           cargo build --locked --bins --examples
-          FLATSHOT_SELFTEST_OUT=shots ./target/debug/flatshot --self-test
+          FLATSHOT_SELFTEST_OUT=shots ./target/debug/flatshot-rs --self-test
       - name: End to end on a headless sway (overlay, pins, editor, settings, recording, instant captures, clipboard, tray app)
         run: timeout 300 ./tests/e2e.sh
       - name: End to end on a headless X server (the same, on X11)
@@ -132,7 +132,7 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
       - name: The release binary passes its self-test
-        run: ./target/release/flatshot --self-test
+        run: ./target/release/flatshot-rs --self-test
       - uses: actions/upload-artifact@v4
         with:
           name: packages
@@ -173,13 +173,13 @@ jobs:
         run: ${{ matrix.install }}
       - name: Check the installed package
         run: |
-          command -v flatshot
-          flatshot --version
-          grep -qx 'Exec=/usr/bin/flatshot' /usr/share/applications/flatshot-kwin.desktop
-          grep -qx 'X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2' /usr/share/applications/flatshot-kwin.desktop
-          test -f /usr/share/knotifications6/flatshot.notifyrc
-          test -f /usr/share/icons/hicolor/scalable/apps/flatshot.svg
-          flatshot --self-test
+          command -v flatshot-rs
+          flatshot-rs --version
+          grep -qx 'Exec=/usr/bin/flatshot-rs' /usr/share/applications/flatshot-rs-kwin.desktop
+          grep -qx 'X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2' /usr/share/applications/flatshot-rs-kwin.desktop
+          test -f /usr/share/knotifications6/flatshot-rs.notifyrc
+          test -f /usr/share/icons/hicolor/scalable/apps/flatshot-rs.svg
+          flatshot-rs --self-test
 
   release:
     needs: [version, audit, test, packages, install]
@@ -198,7 +198,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.version.outputs.version }}
-          name: Flatshot ${{ needs.version.outputs.version }}
+          name: Flatshot RS ${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: dist/*
@@ -206,7 +206,7 @@ jobs:
   pacman-repo:
     # A pacman repository on the fixed "pacman" release, updated by each
     # release:
-    #   [flatshot]
+    #   [flatshot-rs]
     #   SigLevel = Optional TrustAll
     #   Server = https://github.com/<owner>/<repo>/releases/download/pacman
     # With a PACMAN_GPG_KEY secret (an armored private key), the packages
@@ -238,9 +238,9 @@ jobs:
             for p in ./*.pkg.tar.zst; do gpg --batch --yes --detach-sign --local-user "$key" "$p"; done
             sign=(--sign --key "$key")
           fi
-          repo-add "${sign[@]}" flatshot.db.tar.gz ./*.pkg.tar.zst
+          repo-add "${sign[@]}" flatshot-rs.db.tar.gz ./*.pkg.tar.zst
           # Release assets can't be links: real copies under the names pacman asks for.
-          for f in flatshot.db flatshot.files; do
+          for f in flatshot-rs.db flatshot-rs.files; do
             rm -f "$f" "$f.sig"
             cp "$f.tar.gz" "$f"
             [ -f "$f.tar.gz.sig" ] && cp "$f.tar.gz.sig" "$f.sig"
@@ -248,10 +248,10 @@ jobs:
           ls -l
       - name: Install from the repository with pacman
         run: |
-          printf '\n[flatshot]\nSigLevel = Optional TrustAll\nServer = file://%s/repo\n' "$PWD" >> /etc/pacman.conf
-          pacman -Sy --noconfirm flatshot
-          flatshot --version
-          flatshot --self-test
+          printf '\n[flatshot-rs]\nSigLevel = Optional TrustAll\nServer = file://%s/repo\n' "$PWD" >> /etc/pacman.conf
+          pacman -Sy --noconfirm flatshot-rs
+          flatshot-rs --version
+          flatshot-rs --self-test
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: pacman
@@ -259,13 +259,13 @@ jobs:
           prerelease: true
           make_latest: false
           body: |
-            Flatshot's pacman repository. Add this to `/etc/pacman.conf`:
+            Flatshot RS's pacman repository. Add this to `/etc/pacman.conf`:
 
             ```ini
-            [flatshot]
+            [flatshot-rs]
             SigLevel = Optional TrustAll
             Server = https://github.com/${{ github.repository }}/releases/download/pacman
             ```
 
-            Then `sudo pacman -Sy flatshot`. New versions arrive with `sudo pacman -Syu`.
+            Then `sudo pacman -Sy flatshot-rs`. New versions arrive with `sudo pacman -Syu`.
           files: repo/*

@@ -1,8 +1,9 @@
-//! User settings, read from `$XDG_CONFIG_HOME/flatshot/config.json`, and the
-//! small bits remembered between runs in `$XDG_STATE_HOME/flatshot/state.json`.
+//! User settings, read from `$XDG_CONFIG_HOME/flatshot-rs/config.json`, and the
+//! small bits remembered between runs in `$XDG_STATE_HOME/flatshot-rs/state.json`.
 //!
 //! Every key is optional and missing keys take the defaults below. The file
-//! is the same as the Python Flatshot's, so settings carry over. A value of
+//! is laid out as the Python Flatshot's, whose settings are taken over the
+//! first time (they're then kept apart, as both can be installed). A value of
 //! the wrong type is ignored on its own (the default is used for that key),
 //! never the whole file.
 
@@ -23,6 +24,8 @@ pub const BACKENDS: &[&str] = &["auto", "kwin", "screencopy", "portal", "spectac
 pub const RECORD_FORMATS: &[&str] = &["mp4", "webm", "gif"];
 pub const RECORD_FPS: &[i64] = &[24, 30, 60];
 pub const REGION_POINTER: &[&str] = &["toggle", "hidden", "shown"];
+/// The tray icon's looks (desktop::tray::STYLES).
+pub const TRAY_ICONS: &[&str] = &["color", "theme", "white", "black", "auto"];
 pub const SCREENSHOT_METHODS: &[&str] = &["desktop", "screens"];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,7 +48,15 @@ pub struct Config {
     pub run_command: String,
     pub sound: bool,
     pub sound_file: String,
+    /// put every capture on a background (the style last used)
+    pub beautify: bool,
+    /// beautify::Style, in its config form ({}: the defaults)
+    pub beautify_style: Map<String, Value>,
+    /// name -> a style, for a house style
+    pub beautify_presets: Map<String, Value>,
     pub theme: String,
+    /// color | theme | white | black | auto (white or black, like the desktop)
+    pub tray_icon: String,
     // Capture
     /// screen shading in %, 0 turns it off
     pub dim_opacity: i64,
@@ -59,7 +70,13 @@ pub struct Config {
     pub snap_sensitivity: i64,
     pub span_monitors: bool,
     pub detect_windows: bool,
-    pub scan_codes: bool,
+    /// ... panels, notifications, popups and the like too, not just app windows
+    pub detect_all_windows: bool,
+    /// The active window (instant capture) on KDE is KWin's picture of it:
+    /// with its title bar and borders, and its shadow (transparent round it).
+    pub window_frame: bool,
+    pub window_shadow: bool,
+    /// QR codes and barcodes are looked for while shown (Q)
     pub show_codes: bool,
     pub toolbar_follows_mouse: bool,
     pub backend: String,
@@ -169,7 +186,16 @@ impl Config {
             _ => BTreeMap::new(),
         };
         let record_fps = i("record_fps", 30);
+        let object = |k: &str| match data.get(k) {
+            Some(Value::Object(m)) => m.clone(),
+            _ => Map::new(),
+        };
+        let mut beautify_presets = object("beautify_presets");
+        beautify_presets.retain(|_, v| v.is_object());
         Config {
+            beautify: b("beautify", false),
+            beautify_style: object("beautify_style"),
+            beautify_presets,
             save_to_disk: b("save_to_disk", true),
             save_dir: if save_dir.is_empty() { default_dir() } else { expand_user(&save_dir) },
             filename,
@@ -182,6 +208,7 @@ impl Config {
             sound: b("sound", false),
             sound_file: s("sound_file", ""),
             theme: s("theme", "ember"),
+            tray_icon: one_of(get_str(data, "tray_icon"), TRAY_ICONS, "color"),
             dim_opacity: i("dim_opacity", 60).clamp(0, 90),
             show_loupe: b("show_loupe", true),
             loupe_size: i("loupe_size", 120).clamp(LOUPE_SIZES.0, LOUPE_SIZES.1),
@@ -193,7 +220,9 @@ impl Config {
             snap_sensitivity: i("snap_sensitivity", 5).clamp(1, 10),
             span_monitors: b("span_monitors", true),
             detect_windows: b("detect_windows", true),
-            scan_codes: b("scan_codes", true),
+            detect_all_windows: b("detect_all_windows", true),
+            window_frame: b("window_frame", true),
+            window_shadow: b("window_shadow", true),
             show_codes: b("show_codes", true),
             toolbar_follows_mouse: b("toolbar_follows_mouse", true),
             backend: one_of(get_str(data, "backend"), BACKENDS, "auto"),
@@ -233,7 +262,11 @@ impl Config {
         put("run_command", self.run_command.clone().into());
         put("sound", self.sound.into());
         put("sound_file", self.sound_file.clone().into());
+        put("beautify", self.beautify.into());
+        put("beautify_style", Value::Object(self.beautify_style.clone()));
+        put("beautify_presets", Value::Object(self.beautify_presets.clone()));
         put("theme", self.theme.clone().into());
+        put("tray_icon", self.tray_icon.clone().into());
         put("dim_opacity", self.dim_opacity.into());
         put("show_loupe", self.show_loupe.into());
         put("loupe_size", self.loupe_size.into());
@@ -245,7 +278,9 @@ impl Config {
         put("snap_sensitivity", self.snap_sensitivity.into());
         put("span_monitors", self.span_monitors.into());
         put("detect_windows", self.detect_windows.into());
-        put("scan_codes", self.scan_codes.into());
+        put("detect_all_windows", self.detect_all_windows.into());
+        put("window_frame", self.window_frame.into());
+        put("window_shadow", self.window_shadow.into());
         put("show_codes", self.show_codes.into());
         put("toolbar_follows_mouse", self.toolbar_follows_mouse.into());
         put("backend", self.backend.clone().into());
@@ -289,6 +324,7 @@ pub fn is_hex_color(s: &str) -> bool {
 
 /// Load the settings. A missing or unreadable file gives the defaults.
 pub fn load() -> Config {
+    adopt_python_settings();
     Config::from_map(&read_json(&config_path()))
 }
 
@@ -374,11 +410,31 @@ pub fn data_dirs() -> Vec<PathBuf> {
 }
 
 pub fn config_path() -> PathBuf {
-    config_home().join("flatshot").join("config.json")
+    config_home().join(crate::APP_ID).join("config.json")
 }
 
 pub fn state_path() -> PathBuf {
-    state_home().join("flatshot").join("state.json")
+    state_home().join(crate::APP_ID).join("state.json")
+}
+
+/// With no settings of our own yet, a copy of the Python Flatshot's (and
+/// what it remembered), once.
+fn adopt_python_settings() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for (ours, theirs) in
+            [(config_path(), config_home().join("flatshot").join("config.json")), (state_path(), state_home().join("flatshot").join("state.json"))]
+        {
+            if fs::symlink_metadata(&ours).is_ok() {
+                continue;
+            }
+            let Ok(text) = crate::util::read_limited(&theirs, 4 << 20) else { continue };
+            let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&text) else { continue };
+            if write_json(&ours, &map).is_ok() {
+                crate::warn!("took the Python Flatshot's {} as a start", theirs.display());
+            }
+        }
+    });
 }
 
 /// "~" and "~/..." to the home folder, as `os.path.expanduser`.
@@ -505,7 +561,7 @@ mod tests {
     #[test]
     fn defaults_match_the_python_version() {
         let c = Config::from_map(&Map::new());
-        assert!(c.save_to_disk && c.notify && c.show_loupe && c.scan_codes);
+        assert!(c.save_to_disk && c.notify && c.show_loupe && c.show_codes);
         assert_eq!(c.filename, "Screenshot_%Y-%m-%d_%H-%M-%S");
         assert_eq!((c.quality, c.dim_opacity, c.loupe_size), (90, 60, 120));
         assert_eq!((c.clipboard.as_str(), c.open_after.as_str(), c.backend.as_str()), ("image", "none", "auto"));

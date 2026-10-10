@@ -107,7 +107,7 @@ pub fn report() -> String {
         } else {
             match exe.as_deref().and_then(kwin_desktop_file) {
                 Some(f) => format!("allowed, by {}", f.display()),
-                None => "not allowed: no installed desktop file names this executable with X-KDE-DBUS-Restricted-Interfaces (use /usr/bin/flatshot from the package)".into(),
+                None => "not allowed: no installed desktop file names this executable with X-KDE-DBUS-Restricted-Interfaces (use /usr/bin/flatshot-rs from the package)".into(),
             }
         };
         data.push(("KWin screenshot API", kwin));
@@ -119,21 +119,24 @@ pub fn report() -> String {
     };
     data.push(("screen recorder", recorder));
     data.push(("settings", config::config_path().display().to_string()));
-    let mut out = vec!["This flatshot:".to_string()];
+    let mut out = vec![format!("This {}:", crate::APP_ID)];
     rows(&mut out, &data);
     match ipc::query("status", Duration::from_millis(800)) {
         None => out.push("Tray app: not running.".into()),
         Some(reply) => match serde_json::from_str::<serde_json::Value>(&reply) {
             Ok(serde_json::Value::Object(m)) => {
-                out.push("Tray app (handles shortcuts and `flatshot` captures):".into());
+                out.push("Tray app (handles shortcuts and `flatshot-rs` captures):".into());
                 let tray: Vec<(&str, String)> = m.iter().map(|(k, v)| (k.as_str(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect();
                 rows(&mut out, &tray);
             }
-            _ => out.push("Tray app: running, but an older version: restart it (flatshot --quit, then start Flatshot again).".into()),
+            _ => out.push("Tray app: running, but an older version: restart it (flatshot-rs --quit, then start Flatshot RS again).".into()),
         },
     }
     if std::os::unix::net::UnixStream::connect(ipc::legacy_socket()).is_ok() {
-        out.push("A Python Flatshot tray app is running: starting this one's tray app replaces it.".into());
+        out.push(
+            "A Python Flatshot tray app is running too. Each has its own shortcuts in System Settings; a key both use goes to the one that took it first."
+                .into(),
+        );
     }
     out.join("\n") + "\n"
 }

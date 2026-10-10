@@ -17,14 +17,25 @@ pub struct View<'a> {
     pub custom_color: Color,
     pub size: usize,
     pub codes_visible: bool,
-    pub code_count: usize,
+    pub codes: CodeScan,
     pub snap: bool,
     pub pointer_available: bool,
     pub show_pointer: bool,
     pub can_undo: bool,
     pub can_redo: bool,
     pub pin_mode: bool,
+    /// Beautify after capture (the setting)
+    pub beautify: bool,
     pub keymap: &'a Keymap,
+}
+
+/// How the search for codes stands, for the codes button's tooltip.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CodeScan {
+    /// hidden at the start, so the capture hasn't been looked through
+    NotYet,
+    Scanning,
+    Found(usize),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -95,7 +106,7 @@ fn build(v: &View<'_>) -> Vec<Item> {
     let km = v.keymap;
     let recording = v.tool == Tool::Record;
     let mut items = vec![Item::new("grip", Look::Grip, "")];
-    for (tool, id, label) in TOOLS {
+    for (tool, id, label) in TOOLS.iter().filter(|t| t.0 != Tool::Crop) {
         if *tool == Tool::Record && !v.can_record {
             items.push(Item::new("divider.record", Look::Divider, ""));
             continue;
@@ -130,7 +141,12 @@ fn build(v: &View<'_>) -> Vec<Item> {
     items.push(size);
     items.push(Item::new("divider.colors", Look::Divider, ""));
 
-    let found = if v.code_count > 0 { format!("{} code{} found", v.code_count, if v.code_count != 1 { "s" } else { "" }) } else { "No codes found".into() };
+    let found = match v.codes {
+        CodeScan::NotYet => "Not looked for yet".to_string(),
+        CodeScan::Scanning => "Looking for codes…".to_string(),
+        CodeScan::Found(0) => "No codes found".to_string(),
+        CodeScan::Found(n) => format!("{n} code{} found", if n != 1 { "s" } else { "" }),
+    };
     let mut codes = if v.codes_visible {
         Item::new("codes", Look::Icon { icon: "codes", size: 36.0 }, km.hint("Hide QR / barcodes", "codes") + &format!("  ·  {found}"))
     } else {
@@ -164,6 +180,14 @@ fn build(v: &View<'_>) -> Vec<Item> {
     redo.enabled = !recording && v.can_redo;
     items.push(redo);
     items.push(Item::new("divider.end", Look::Divider, ""));
+    let mut beautify = Item::new(
+        "beautify",
+        Look::Icon { icon: "beautify", size: 36.0 },
+        km.hint(if v.beautify { "Beautify is on" } else { "Beautify: on a background" }, "beautify"),
+    );
+    beautify.toggled = Some(v.beautify);
+    beautify.enabled = !recording;
+    items.push(beautify);
     let mut pin = Item::new(
         "pin",
         Look::Icon { icon: "pin", size: 36.0 },
@@ -194,13 +218,14 @@ mod tests {
             custom_color: Color::rgb(0xFF4FA3),
             size: 1,
             codes_visible: true,
-            code_count: 2,
+            codes: CodeScan::Found(2),
             snap: false,
             pointer_available: false,
             show_pointer: false,
             can_undo: false,
             can_redo: false,
             pin_mode: false,
+            beautify: false,
             keymap: km,
         }
     }
@@ -209,10 +234,10 @@ mod tests {
     fn layout_like_qt() {
         let km = Keymap::new(&BTreeMap::new());
         let t = Toolbar::new(&view(&km));
-        // grip 18, 13 tools of 36, 4 dividers of 13, 8 swatches of 26,
-        // size 40, codes + snap + undo + redo + pin + screen + close (7 x 36)
-        let widths = 18.0 + 13.0 * 36.0 + 4.0 * 13.0 + 8.0 * 26.0 + 40.0 + 7.0 * 36.0;
-        let n = 1 + 13 + 4 + 8 + 1 + 7;
+        // grip 18, 14 tools of 36, 4 dividers of 13, 8 swatches of 26,
+        // size 40, codes + snap + undo + redo + beautify + pin + screen + close (8 x 36)
+        let widths = 18.0 + 14.0 * 36.0 + 4.0 * 13.0 + 8.0 * 26.0 + 40.0 + 8.0 * 36.0;
+        let n = 1 + 14 + 4 + 8 + 1 + 8;
         assert_eq!(t.size, (6.0 + widths + 2.0 * (n as f32 - 1.0) + 8.0, 48.0));
         let undo = t.items.iter().find(|i| i.id == "undo").unwrap();
         assert!(!undo.enabled);

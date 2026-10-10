@@ -22,6 +22,7 @@ use crate::ui::overlay::{Output, Window};
 use crate::ui::session::{Button, CursorShape, Effect, Outcome, RecordSupport, Request, Screen, Session, Setup, Waker};
 use crate::ui::shapes::Tool;
 use crate::ui::state::{CUSTOM, Desktop};
+use crate::ui::toolbar::CodeScan;
 
 pub const TEST_URL: &str = "https://github.com/nicholas-sbx/screenshot";
 pub const TEST_EAN: &str = "4006381333931";
@@ -214,6 +215,8 @@ pub fn run() -> i32 {
 fn all(tmp: &Path, out: &Option<PathBuf>) -> R {
     let desktop = Arc::new(fake_desktop(1600, 1000)?);
     overlay_basics(tmp, out, desktop.clone())?;
+    codes_on_demand(tmp, desktop.clone())?;
+    select_tool(tmp, out, desktop.clone())?;
     keys_and_text(tmp, out, desktop.clone())?;
     pointer_and_panels(tmp, out, desktop.clone())?;
     snapping(tmp, desktop.clone())?;
@@ -313,7 +316,7 @@ fn overlay_basics(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     for ch in "flatshot".chars() {
         tap(&mut s, 0, 0x41, &ch.to_string(), 0);
     }
-    tap(&mut s, 0, key::RETURN, "", 0);
+    tap(&mut s, 0, key::RETURN, "", CTRL);
     check!(s.st.text_edit.is_none() && s.overlays[0].annotations.len() == 8, "{}", s.overlays[0].annotations.len());
     s.undo();
     check!(s.overlays[0].annotations.len() == 7);
@@ -357,10 +360,10 @@ fn keys_and_text(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
         tap(&mut s, 0, 0x41, &ch.to_string(), 0); // (the key code doesn't matter while typing)
     }
     tap(&mut s, 0, key::BACKSPACE, "", 0);
-    // Shift+Enter: a new line; Enter: done.
-    tap(&mut s, 0, key::RETURN, "", SHIFT);
-    tap(&mut s, 0, 0x41, "x", 0);
+    // Enter: a new line; Ctrl+Enter: done.
     tap(&mut s, 0, key::RETURN, "", 0);
+    tap(&mut s, 0, 0x41, "x", 0);
+    tap(&mut s, 0, key::RETURN, "", CTRL);
     let typed = s.overlays[0].annotations.last().and_then(|a| a.as_text()).map(|t| t.edit.text.clone());
     check!(s.st.text_edit.is_none() && typed.as_deref() == Some("hi\nx"), "{typed:?}");
     tap(&mut s, 0, key::Z, "", CTRL);
@@ -381,7 +384,7 @@ fn keys_and_text(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     // Editing a text again: a click on it edits a copy; undo brings the original back.
     tap(&mut s, 0, 0x54, "t", 0);
     click(&mut s, 0, Point::new(1005.0, 770.0), 0);
-    check!(s.st.text_edit.as_ref().is_some_and(|(_, t)| t.as_text().is_some_and(|t| t.replaces.is_some())), "not editing the text again");
+    check!(s.st.text_edit.as_ref().is_some_and(|(_, t)| t.replaces.is_some()), "not editing the text again");
     check!(s.overlays[0].annotations[0].hidden, "the original shows under its copy");
     tap(&mut s, 0, 0x41, "y", 0);
     tap(&mut s, 0, key::ESCAPE, "", 0);
@@ -406,7 +409,7 @@ fn keys_and_text(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     let t = s.st.text_edit.as_ref().and_then(|(_, t)| t.as_text()).map(|t| t.edit.text.clone());
     check!(t.as_deref() == Some("big hello "), "{t:?}");
     save_png(&frame(&mut s, 0)?, out, "overlay-typing.png")?;
-    tap(&mut s, 0, key::RETURN, "", 0);
+    tap(&mut s, 0, key::RETURN, "", CTRL);
 
     // Esc acts when released, not pressed (the release would go to the
     // window underneath); a release without a press here does nothing.
@@ -593,6 +596,108 @@ fn snapping(tmp: &Path, desktop: Arc<Image>) -> R {
     Ok(())
 }
 
+/// The select tool: pick a drawing up again, move, resize, nudge, restyle
+/// and delete it, each an undo step.
+fn select_tool(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
+    let mut s = session(
+        test_config(tmp),
+        Request { image: true, ..Default::default() },
+        vec![image_screen(desktop, (1600, 1000))],
+        FakeRecorder { problem: None, span: false },
+    );
+    s.pointer_enter(0, Point::new(800.0, 500.0));
+    tap(&mut s, 0, 0x42, "b", 0);
+    drag(&mut s, 0, Point::new(300.0, 300.0), Point::new(500.0, 400.0), 0);
+    tap(&mut s, 0, 0x4C, "l", 0);
+    drag(&mut s, 0, Point::new(700.0, 300.0), Point::new(900.0, 300.0), 0);
+    let ov = |s: &Session| s.overlays[0].annotations.len();
+    check!(ov(&s) == 2);
+    tap(&mut s, 0, 0x53, "s", 0);
+    check!(s.st.tool == Tool::Select, "{:?}", s.st.tool);
+    // Inside an outline is nothing; on its line, the box.
+    click(&mut s, 0, Point::new(400.0, 350.0), 0);
+    check!(s.overlays[0].selection.current(&s.overlays[0].annotations).is_none());
+    click(&mut s, 0, Point::new(300.0, 350.0), 0);
+    check!(s.overlays[0].selection.current(&s.overlays[0].annotations) == Some(0), "the box isn't selected");
+    check!(s.cursor(0) == CursorShape::Move || s.cursor(0) == CursorShape::ResizeEW, "{:?}", s.cursor(0));
+    save_png(&frame(&mut s, 0)?, out, "overlay-selected.png")?;
+    // Moved: a copy in its place, one undo step.
+    drag(&mut s, 0, Point::new(300.0, 330.0), Point::new(340.0, 350.0), 0); // (off the middle handle)
+    check!(ov(&s) == 3 && s.overlays[0].annotations[0].hidden, "{} drawings", ov(&s));
+    check!(s.overlays[0].annotations[2].geometry() == Rect::new(340.0, 320.0, 200.0, 100.0), "{:?}", s.overlays[0].annotations[2].geometry());
+    check!(s.can_undo());
+    // Shift+Right nudges it 10 px; [ makes it thinner; 3 recolours it.
+    tap(&mut s, 0, key::RIGHT, "", SHIFT);
+    check!(s.overlays[0].annotations[3].geometry().x == 350.0);
+    let size = s.overlays[0].annotations[3].size;
+    tap(&mut s, 0, 0x5B, "[", 0);
+    check!(s.overlays[0].annotations.last().is_some_and(|a| a.size == size.saturating_sub(1)) || size == 0);
+    tap(&mut s, 0, 0x33, "3", 0);
+    check!(s.st.tool == Tool::Select && s.overlays[0].annotations.last().is_some_and(|a| a.color == s.st.color()), "not recoloured");
+    // The line by its end, with Shift in 45° steps.
+    click(&mut s, 0, Point::new(800.0, 301.0), 0);
+    let line = s.overlays[0].selection.current(&s.overlays[0].annotations);
+    check!(line == Some(1), "{line:?}");
+    drag(&mut s, 0, Point::new(900.0, 300.0), Point::new(800.0, 380.0), SHIFT);
+    let end = s.overlays[0].annotations.last().and_then(|a| a.drag()).map(|d| d.end).ok_or("no line")?;
+    check!((end.x - 700.0 - (end.y - 300.0)).abs() < 0.5, "{end:?}");
+    // Delete: gone (a "removed" in its place); undo brings it back.
+    let n = ov(&s);
+    tap(&mut s, 0, key::DELETE, "", 0);
+    check!(ov(&s) == n + 1 && s.overlays[0].annotations[n - 1].hidden);
+    tap(&mut s, 0, key::Z, "", CTRL);
+    check!(ov(&s) == n && !s.overlays[0].annotations[n - 1].hidden, "undo didn't bring it back");
+    // Esc deselects first, then cancels.
+    click(&mut s, 0, Point::new(350.0, 340.0), 0);
+    check!(s.overlays[0].selection.current(&s.overlays[0].annotations).is_some(), "the box isn't selected");
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    check!(!s.done && s.overlays[0].selection.current(&s.overlays[0].annotations).is_none(), "Esc didn't deselect");
+    // A counter after the first is moved keeps counting up.
+    tap(&mut s, 0, 0x4E, "n", 0);
+    click(&mut s, 0, Point::new(100.0, 100.0), 0);
+    tap(&mut s, 0, 0x53, "s", 0);
+    drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(150.0, 100.0), 0);
+    tap(&mut s, 0, 0x4E, "n", 0);
+    click(&mut s, 0, Point::new(100.0, 200.0), 0);
+    let number = match s.overlays[0].annotations.last().map(|a| &a.kind) {
+        Some(crate::ui::shapes::Kind::Counter { number, .. }) => *number,
+        _ => 0,
+    };
+    check!(number == 2, "the next counter is {number}");
+    s.cancel();
+    println!("self-test: select, move, resize, nudge, restyle and delete drawings");
+    Ok(())
+}
+
+/// Codes hidden at the start: nothing is looked for until they're shown.
+fn codes_on_demand(tmp: &Path, desktop: Arc<Image>) -> R {
+    let cfg = Config { show_codes: false, ..test_config(tmp) };
+    let mut s = session(
+        cfg,
+        Request { image: true, scan: true, ..Default::default() },
+        vec![image_screen(desktop, (1600, 1000))],
+        FakeRecorder { problem: None, span: false },
+    );
+    check!(s.code_scan() == CodeScan::NotYet, "{:?}", s.code_scan());
+    let codes = s.overlays[0].toolbar.as_ref().and_then(|t| t.items.iter().find(|i| i.id == "codes")).map(|i| i.hint.clone()).unwrap_or_default();
+    check!(codes.ends_with("Not looked for yet"), "{codes}");
+    tap(&mut s, 0, 0x51, "q", 0);
+    check!(s.st.codes_visible && s.code_scan() == CodeScan::Scanning, "{:?}", s.code_scan());
+    let deadline = Instant::now() + std::time::Duration::from_secs(20);
+    while s.code_scan() == CodeScan::Scanning && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        s.poll();
+    }
+    check!(s.code_scan() == CodeScan::Found(2), "{:?}", s.code_scan());
+    // Hidden and shown again: not looked for twice.
+    tap(&mut s, 0, 0x51, "q", 0);
+    tap(&mut s, 0, 0x51, "q", 0);
+    check!(s.code_scan() == CodeScan::Found(2), "{:?}", s.code_scan());
+    s.cancel();
+    println!("self-test: hidden codes are looked for once shown");
+    Ok(())
+}
+
 /// Recording: choose an area, the panel's options, the countdown, the job.
 fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     let mut cfg = test_config(tmp);
@@ -618,6 +723,12 @@ fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     // Resize by the bottom right handle.
     drag(&mut s, 0, Point::new(700.0, 500.0), Point::new(800.0, 560.0), 0);
     check!(s.overlays[0].rec_rect == Some(Rect::new(200.0, 200.0, 600.0, 360.0)), "{:?}", s.overlays[0].rec_rect);
+    // Ctrl resizes about the centre (500, 380): grabbed 2 px inside the right
+    // edge, the edge keeps that offset and the left one mirrors it.
+    drag(&mut s, 0, Point::new(798.0, 380.0), Point::new(818.0, 380.0), CTRL);
+    check!(s.overlays[0].rec_rect == Some(Rect::new(180.0, 200.0, 640.0, 360.0)), "{:?}", s.overlays[0].rec_rect);
+    drag(&mut s, 0, Point::new(500.0, 560.0), Point::new(500.0, 540.0), CTRL);
+    check!(s.overlays[0].rec_rect == Some(Rect::new(180.0, 220.0, 640.0, 320.0)), "{:?}", s.overlays[0].rec_rect);
     // Esc goes back to choosing; Enter on the whole screen otherwise.
     tap(&mut s, 0, key::ESCAPE, "", 0);
     check!(!s.done && s.overlays[0].rec_rect.is_none() && !s.st.any_armed);
@@ -674,6 +785,47 @@ fn multi_monitor(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
         }
         other => return Err(format!("the selection across monitors gave {other:?}")),
     }
+    drawings_across_monitors(tmp, out, desktop)
+}
+
+/// Drawings cross monitors: each overlay paints the others' that reach it,
+/// the select tool picks one up from either, and a capture of one monitor
+/// includes the parts that reach it.
+fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
+    let left = Arc::new(desktop.crop(IRect::new(0, 0, 800, 1000))?);
+    let right = Arc::new(desktop.crop(IRect::new(800, 0, 800, 1000))?);
+    let screens = vec![
+        Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 800, 1000), scale: 1.0 }, picture: left, pointer: None },
+        Screen { output: Output { name: "DP-2".into(), rect: IRect::new(800, 0, 800, 1000), scale: 1.0 }, picture: right, pointer: None },
+    ];
+    let mut s = session(test_config(tmp), Request::default(), screens, FakeRecorder { problem: None, span: true });
+    s.pointer_enter(0, Point::new(400.0, 500.0));
+    tap(&mut s, 0, 0x46, "f", 0); // (a filled box: its pixels are plain to check)
+    drag(&mut s, 0, Point::new(700.0, 300.0), Point::new(900.0, 400.0), 0);
+    let color = s.st.color().premul() | 0xFF00_0000;
+    let f = frame(&mut s, 1)?;
+    check!(s.overlays[1].foreign.len() == 1, "the right monitor doesn't have the left one's drawing");
+    check!(f.pixel(50, 350) == color, "the drawing isn't painted where it reaches the right monitor: {:08X}", f.pixel(50, 350));
+    save_png(&f, out, "overlay-across.png")?;
+    // Picked up from the right monitor (it belongs to the left one), and moved.
+    tap(&mut s, 0, 0x53, "s", 0);
+    s.pointer_enter(1, Point::new(50.0, 350.0));
+    drag(&mut s, 1, Point::new(50.0, 330.0), Point::new(80.0, 330.0), 0);
+    let moved = s.overlays[0].annotations.last().map(|a| a.geometry());
+    check!(moved == Some(Rect::new(730.0, 300.0, 200.0, 100.0)), "{moved:?}");
+    check!(s.overlays[1].annotations.is_empty(), "it changed hands");
+    // A capture of the right monitor alone includes the part that reaches it.
+    let _ = frame(&mut s, 1)?;
+    tap(&mut s, 1, 0x52, "r", 0);
+    click(&mut s, 1, Point::new(400.0, 800.0), 0);
+    match s.take_outcome() {
+        Some(Outcome::Image { image, .. }) => {
+            check!(image.size() == (800, 1000), "{:?}", image.size());
+            check!(image.pixel(100, 350) == color, "the capture lacks the drawing's part: {:08X}", image.pixel(100, 350));
+        }
+        other => return Err(format!("capturing the right monitor gave {other:?}")),
+    }
+    println!("self-test: drawings across monitors");
     Ok(())
 }
 

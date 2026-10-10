@@ -199,9 +199,9 @@ impl App {
             menu: None,
         };
         let size = pin.size();
-        if !self.dpy.add_layer(Owner::Pin(id), &mon, place, size, "flatshot-pin") {
+        if !self.dpy.add_layer(Owner::Pin(id), &mon, place, size, "flatshot-rs-pin") {
             pin.layered = false;
-            if let Err(e) = self.dpy.add_window(Owner::Pin(id), &format!("Flatshot pin {id}"), size, false) {
+            if let Err(e) = self.dpy.add_window(Owner::Pin(id), &format!("{} pin {id}", crate::APP_NAME), size, false) {
                 crate::warn!("can't pin: {e}");
                 return;
             }

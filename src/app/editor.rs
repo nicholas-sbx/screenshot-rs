@@ -24,6 +24,10 @@ pub struct EditorWin {
     dialog: Option<mpsc::Receiver<Result<Option<PathBuf>, String>>>,
     /// the clipboard's text, being read for it
     paste: Option<mpsc::Receiver<Option<String>>>,
+    /// the window's least size, as last set
+    min: (u32, u32),
+    /// a picture for the background being chosen
+    image_dialog: Option<mpsc::Receiver<Result<Option<PathBuf>, String>>>,
 }
 
 struct EditorPaint<'a>(&'a mut Editor);
@@ -81,7 +85,8 @@ impl App {
         let (mon, dpr) = monitors.first().map(|m| ((m.rect.w as f32, m.rect.h as f32), m.scale as f32)).unwrap_or(((1920.0, 1080.0), 1.0));
         let target = save_to.unwrap_or_else(|| path.to_path_buf());
         let ed = Editor::new(image, dpr, target, crate::config::load());
-        let size = initial_size((ed.image.width() as f32 / dpr, ed.image.height() as f32 / dpr), mon, ed.bar_width().ceil());
+        let min = ed.min_size();
+        let size = initial_size((ed.image.width() as f32 / dpr, ed.image.height() as f32 / dpr), mon, min.0 as f32);
         self.next_editor += 1;
         let id = self.next_editor;
         let title = ed.title();
@@ -89,8 +94,9 @@ impl App {
             crate::warn!("can't open the editor: {e}");
             return false;
         }
-        self.dpy.set_min_size(Owner::Editor(id), (480, 360));
-        self.editors.push(EditorWin { id, ed, title, dialog: None, paste: None });
+        // (never so small its bars overlap)
+        self.dpy.set_min_size(Owner::Editor(id), min);
+        self.editors.push(EditorWin { id, ed, title, dialog: None, paste: None, min, image_dialog: None });
         self.dpy.flush();
         true
     }
@@ -173,6 +179,19 @@ impl App {
                     });
                     self.editors[i].dialog = Some(rx);
                 }
+                Request::ChooseImage(start) => {
+                    if self.editors[i].image_dialog.is_some() {
+                        continue;
+                    }
+                    let (tx, rx) = mpsc::channel();
+                    let waker = self.waker.clone();
+                    let _ = std::thread::Builder::new().name("flatshot-dialog".into()).spawn(move || {
+                        let images = ["png", "jpg", "jpeg", "webp", "bmp", "gif"].iter().map(|e| format!("*.{e}")).collect();
+                        let _ = tx.send(portal::open_file("Background picture", &start, &[("Images".to_string(), images)]));
+                        waker();
+                    });
+                    self.editors[i].image_dialog = Some(rx);
+                }
                 Request::Close => {
                     self.dpy.remove(Owner::Editor(id));
                     self.editors.remove(i);
@@ -187,6 +206,12 @@ impl App {
         if title != w.title {
             self.dpy.set_title(Owner::Editor(id), &title);
             w.title = title;
+        }
+        // (and its least size the bars: the picture bar comes and goes)
+        let min = w.ed.min_size();
+        if min != w.min {
+            w.min = min;
+            self.dpy.set_min_size(Owner::Editor(id), min);
         }
     }
 
@@ -205,6 +230,16 @@ impl App {
                 w.paste = None;
                 if let Some(t) = text {
                     w.ed.paste(&t);
+                }
+            }
+            if let Some(rx) = &w.image_dialog
+                && let Ok(answer) = rx.try_recv()
+            {
+                w.image_dialog = None;
+                match answer {
+                    Ok(Some(path)) => w.ed.background_image(&path),
+                    Ok(None) => {}
+                    Err(e) => crate::warn!("no file dialog: {e}"),
                 }
             }
             if let Some(rx) = &w.dialog
@@ -276,7 +311,7 @@ impl App {
                 self.open_editor(&path, None);
             }
             Ok(None) => {}
-            Err(e) => self.report_failure("No file dialog", &format!("The desktop has no file dialog to offer ({e}). Use flatshot -i FILE instead.")),
+            Err(e) => self.report_failure("No file dialog", &format!("The desktop has no file dialog to offer ({e}). Use flatshot-rs -i FILE instead.")),
         }
     }
 }

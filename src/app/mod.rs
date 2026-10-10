@@ -91,6 +91,8 @@ pub struct App {
     recording: Option<recording::RecordingRun>,
     /// the tray app quits once the recording is saved
     quit_after_recording: bool,
+    /// the tray app starts again once it has quit
+    restarting: bool,
 }
 
 impl Painted for Session {
@@ -376,7 +378,7 @@ pub fn layer_namespace() -> String {
         return s;
     }
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
-    if desktop.contains("kde") { "utility".into() } else { "flatshot".into() }
+    if desktop.contains("kde") { "utility".into() } else { crate::APP_ID.into() }
 }
 
 /// The connection to the compositor and the event loop around it.
@@ -434,6 +436,7 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         settings: None,
         recording: None,
         quit_after_recording: false,
+        restarting: false,
     };
     match queue {
         Some(mut queue) => {

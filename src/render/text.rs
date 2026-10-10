@@ -249,7 +249,7 @@ pub fn remember_fonts() {
 }
 
 fn font_cache() -> PathBuf {
-    crate::config::cache_home().join("flatshot").join("fonts.txt")
+    crate::config::cache_home().join(crate::APP_ID).join("fonts.txt")
 }
 
 const CACHE_HEADER: &str = "flatshot fonts 1";

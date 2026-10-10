@@ -16,7 +16,7 @@ use crate::platform::{Owner, Painted};
 use crate::ui::session::{Button, Waker};
 use crate::ui::settings::{Request, Settings};
 
-const TITLE: &str = "Flatshot Settings";
+const TITLE: &str = "Flatshot RS Settings";
 const SIZE: (u32, u32) = (760, 560);
 const MIN_SIZE: (u32, u32) = (640, 440);
 
@@ -106,7 +106,7 @@ fn kde_worker(jobs: mpsc::Receiver<KdeJob>, answers: mpsc::Sender<KdeAnswer>, wa
                     if ok {
                         Some(KdeAnswer::Assigned(action, now, None))
                     } else {
-                        Some(KdeAnswer::Assigned(action, shortcuts::get(action), Some(format!("KDE didn't accept {what}."))))
+                        Some(KdeAnswer::Assigned(action, shortcuts::get(action), Some(format!("KDE rejected {what}."))))
                     }
                 }
             }
@@ -262,7 +262,9 @@ impl App {
                         e.ed.restyle();
                     }
                     self.restyle_pins();
+                    self.update_tray_icon(None); // (the theme style's colours)
                 }
+                Request::TrayIconChanged(style) => self.update_tray_icon(Some(style)),
                 Request::CopyText(text) => {
                     let mimes = TEXT_MIMES.iter().map(|m| m.to_string()).collect();
                     self.dpy.offer(mimes, Slot::ready(Arc::new(text.into_bytes())));

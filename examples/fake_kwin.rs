@@ -7,6 +7,9 @@
 //! (y % 256) << 8 | 0x10 * (i + 1), plus 0x80 in the low byte when the
 //! pointer was asked for. CaptureWorkspace answers 1500 x 900 in RGB32 (4),
 //! pixel (x, y) = 0xFF000000 | (x % 256) << 16 | (y % 256) << 8 | 0x5A.
+//! CaptureActiveWindow answers 300 x 200 premultiplied ARGB32 (6): opaque
+//! blue inside, a clear 20-pixel border (the window's "shadow"); it prints
+//! the options it was given.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -60,6 +63,21 @@ impl FakeKWin {
         let low = 0x10 * (i as u8 + 1) + if cursor(&options) { 0x80 } else { 0 };
         send(pipe, pixels(w, h, low));
         Ok(results(w, h, 5))
+    }
+
+    fn capture_active_window(&self, options: HashMap<String, OwnedValue>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedValue>> {
+        let flag = |k: &str| options.get(k).and_then(|v| bool::try_from(&**v).ok()).unwrap_or(false);
+        println!("window: cursor {} decoration {} shadow {}", flag("include-cursor"), flag("include-decoration"), flag("include-shadow"));
+        let (w, h) = (300u32, 200u32);
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let inside = (20..w - 20).contains(&x) && (20..h - 20).contains(&y);
+                out.extend_from_slice(if inside { &[0xFF, 0, 0, 0xFF] } else { &[0, 0, 0, 0] });
+            }
+        }
+        send(pipe, out);
+        Ok(results(w, h, 6))
     }
 
     fn capture_workspace(&self, _options: HashMap<String, OwnedValue>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedValue>> {

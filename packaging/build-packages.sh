@@ -12,7 +12,7 @@ command -v nfpm >/dev/null || { echo "nfpm not found: https://nfpm.goreleaser.co
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
     cargo build --release --locked
 fi
-./target/release/flatshot --version
+./target/release/flatshot-rs --version
 mkdir -p dist
 for fmt in deb rpm archlinux; do
     nfpm package --config packaging/nfpm.yaml --packager "$fmt" --target dist/
