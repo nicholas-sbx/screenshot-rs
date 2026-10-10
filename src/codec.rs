@@ -303,6 +303,8 @@ pub fn encode(img: &Image, format: &str, quality: u8) -> Result<Vec<u8>, String>
     let alpha = img.has_alpha();
     match format {
         "png" => encode_png(img, alpha),
+        // (JPEG fills transparency in white)
+        "jpg" | "jpeg" if alpha => encode_jpeg(&img.flattened(0xFFFFFF)?, quality),
         "jpg" | "jpeg" => encode_jpeg(img, quality),
         "webp" => {
             if quality < 100 && crate::util::have("cwebp") {

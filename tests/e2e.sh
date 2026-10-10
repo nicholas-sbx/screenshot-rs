@@ -217,6 +217,33 @@ $BIN -m > /dev/null && expect_size "current monitor" "$(newest)" "1600 1000" || 
 $BIN -r 64x48+0+0 -o "$work/out.png" > /dev/null && expect_size "--output" "$work/out.png" "64 48" || fail "--output failed"
 $BIN -r 64x48+0+0 -o - --no-copy > "$work/stdout.png" && expect_size "PNG to stdout" "$work/stdout.png" "64 48" || fail "-o - failed"
 
+# The active window on KDE: KWin's picture of the window itself, kept with
+# its transparent shadow (a stand-in KWin).
+cat > "$work/window.sh" <<SH
+#!/usr/bin/env bash
+$EX/fake_kwin > "$work/kwin.log" 2>&1 &
+sleep 0.5
+XDG_CURRENT_DESKTOP=KDE $BIN -w -o "$work/window.png" --no-copy > /dev/null 2>&1
+kill %1 2>/dev/null
+SH
+chmod +x "$work/window.sh"
+dbus-run-session -- "$work/window.sh" 2>/dev/null || true
+expect_size "active window from KWin" "$work/window.png" "300 200"
+python3 - "$work/window.png" <<'PY' && pass "the window's shadow kept transparent" || fail "the window's shadow isn't transparent"
+import sys, zlib
+d = open(sys.argv[1], "rb").read()
+assert d[25] == 6, "not RGBA"  # colour type
+data, i = b"", 8
+while i < len(d):
+    n = int.from_bytes(d[i:i + 4], "big")
+    if d[i + 4:i + 8] == b"IDAT":
+        data += d[i + 8:i + 8 + n]
+    i += 12 + n
+raw = zlib.decompress(data)
+assert raw[1 + 3] == 0, "corner"  # (the first pixel: zero under any of the filters)
+PY
+grep -q "window: cursor false decoration true shadow true" "$work/kwin.log" && pass "frame and shadow asked for" || fail "KWin asked: $(cat "$work/kwin.log")"
+
 # 8. The tray app, with stand-ins for KDE's services.
 cat > "$work/tray.sh" <<SH
 #!/usr/bin/env bash

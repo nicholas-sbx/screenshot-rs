@@ -101,6 +101,8 @@ pub(super) enum Source {
     Screencopy,
     /// a worker thread (KWin, the portal, a program)
     Worker(mpsc::Receiver<Result<Vec<Grabbed>, String>>),
+    /// KWin's picture of the active window on its own
+    Window(mpsc::Receiver<Result<Image, String>>),
 }
 
 /// A capture being taken.
@@ -122,6 +124,8 @@ pub(super) struct Taken {
     job: Job,
     mode: Mode,
     screens: Vec<(Monitor, Image)>,
+    /// the active window on its own (KWin), and the monitors then
+    alone: Option<(Image, Vec<Monitor>)>,
     pub(super) wait_until: Instant,
 }
 
@@ -180,6 +184,23 @@ impl App {
             self.monitors = monitors.clone();
         }
         let mut pending = Pending { job, mode, monitors, plan, backend: "none", source: Source::Screencopy, rest: order, errors: Vec::new() };
+        if mode == Mode::Window && !pending.job.record && pending.rest.first() == Some(&"kwin") && capture::kwin::available() {
+            // KWin's picture of the window itself, where it gives one (else
+            // it's cut from the desktop, as elsewhere).
+            let want = capture::kwin::WindowWant { cursor: self.cfg.include_pointer, decoration: self.cfg.window_frame, shadow: self.cfg.window_shadow };
+            let (tx, rx) = mpsc::channel();
+            let waker = self.waker.clone();
+            let started = std::thread::Builder::new().name("flatshot-capture".into()).spawn(move || {
+                let _ = tx.send(capture::kwin::capture_window(want));
+                waker();
+            });
+            if started.is_ok() {
+                pending.backend = "kwin";
+                pending.source = Source::Window(rx);
+                self.pending = Some(pending);
+                return;
+            }
+        }
         if self.next_backend(&mut pending) {
             self.pending = Some(pending);
         }
@@ -244,6 +265,24 @@ impl App {
                 Err(mpsc::TryRecvError::Empty) => return,
                 Err(mpsc::TryRecvError::Disconnected) => Err("the capture stopped".into()),
             },
+            Source::Window(rx) => {
+                let r = match rx.try_recv() {
+                    Ok(r) => r,
+                    Err(mpsc::TryRecvError::Empty) => return,
+                    Err(mpsc::TryRecvError::Disconnected) => Err("the capture stopped".into()),
+                };
+                let Some(mut p) = self.pending.take() else { return };
+                match r {
+                    Ok(image) => return self.window_alone(p, image),
+                    Err(e) => {
+                        crate::timing::log(format!("the active window on its own failed ({e}): cutting it from the desktop"));
+                        if self.next_backend(&mut p) {
+                            self.pending = Some(p);
+                        }
+                        return;
+                    }
+                }
+            }
             _ => return,
         };
         let Some(mut p) = self.pending.take() else { return };
@@ -291,7 +330,7 @@ impl App {
         self.clock.step("screenshot", format!("{detail} via {}", p.backend));
         if p.mode != Mode::Region {
             let screens = p.monitors.into_iter().zip(pictures.into_iter().map(|(pic, _)| pic)).collect();
-            self.taken = Some(Taken { job: p.job, mode: p.mode, screens, wait_until: Instant::now() + DESKTOP_WAIT });
+            self.taken = Some(Taken { job: p.job, mode: p.mode, screens, alone: None, wait_until: Instant::now() + DESKTOP_WAIT });
             return self.finish_instant(false);
         }
         let screens = p
@@ -316,6 +355,14 @@ impl App {
         self.first_frame = true;
     }
 
+    /// KWin's picture of the active window is in: delivered as it is, once
+    /// the desktop says which window it is (its name, and where).
+    fn window_alone(&mut self, p: Pending, image: Image) {
+        self.clock.step("window on its own", format!("{} × {} via KWin", image.width(), image.height()));
+        self.taken = Some(Taken { job: p.job, mode: p.mode, screens: Vec::new(), alone: Some((image, p.monitors)), wait_until: Instant::now() + DESKTOP_WAIT });
+        self.finish_instant(false);
+    }
+
     /// Crop an instant capture to its mode's area and deliver it, once the
     /// desktop is known (or `force`: it won't be).
     pub(super) fn finish_instant(&mut self, force: bool) {
@@ -330,6 +377,20 @@ impl App {
         if let Some(a) = &desktop.active {
             shot.app = a.app.clone();
             shot.title = a.title.clone();
+        }
+        if let Some((image, monitors)) = t.alone {
+            shot.mode = "window".into();
+            // Its logical size from its pixels (the frame and shadow make it
+            // bigger than the window), centred where the window is.
+            let at = desktop.active.as_ref().map(|w| {
+                let c = w.rect.center();
+                let scale = monitors.iter().find(|m| m.rect.contains(c)).or(monitors.first()).map_or(1.0, |m| m.scale as f64).max(0.1);
+                let (lw, lh) = ((image.width() as f64 / scale).round() as i32, (image.height() as f64 / scale).round() as i32);
+                IRect::new(c.x - lw / 2, c.y - lh / 2, lw, lh)
+            });
+            let code = self.deliver_image(image, shot, at, false, t.job.pin, None);
+            crate::mem::trim();
+            return self.ended(code);
         }
         let virt = t.screens.iter().fold(IRect::default(), |acc, (m, _)| acc.united(&m.rect));
         let area = match t.mode {

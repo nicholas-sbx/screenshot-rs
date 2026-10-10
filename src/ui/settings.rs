@@ -392,6 +392,23 @@ impl Settings {
                 ],
             },
             Block::Card {
+                heading: "Active window".into(),
+                rows: vec![
+                    Row::new(
+                        "window_frame",
+                        "Title bar and borders",
+                        "KDE Plasma takes the window on its own, even where something covers it.",
+                        Control::Toggle(c.window_frame),
+                    ),
+                    Row::new(
+                        "window_shadow",
+                        "Shadow",
+                        "Its real shadow and rounded corners, transparent around it. JPEG fills that in white.",
+                        Control::Toggle(c.window_shadow),
+                    ),
+                ],
+            },
+            Block::Card {
                 heading: "Magnifier and crosshair".into(),
                 rows: vec![
                     Row::new("show_loupe", "Magnifier", "Zoomed pixels, coordinates and colour beside the pointer.", Control::Toggle(c.show_loupe)),

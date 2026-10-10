@@ -64,6 +64,10 @@ pub struct Config {
     pub snap_sensitivity: i64,
     pub span_monitors: bool,
     pub detect_windows: bool,
+    /// The active window (instant capture) on KDE is KWin's picture of it:
+    /// with its title bar and borders, and its shadow (transparent round it).
+    pub window_frame: bool,
+    pub window_shadow: bool,
     /// QR codes and barcodes are looked for while shown (Q)
     pub show_codes: bool,
     pub toolbar_follows_mouse: bool,
@@ -199,6 +203,8 @@ impl Config {
             snap_sensitivity: i("snap_sensitivity", 5).clamp(1, 10),
             span_monitors: b("span_monitors", true),
             detect_windows: b("detect_windows", true),
+            window_frame: b("window_frame", true),
+            window_shadow: b("window_shadow", true),
             show_codes: b("show_codes", true),
             toolbar_follows_mouse: b("toolbar_follows_mouse", true),
             backend: one_of(get_str(data, "backend"), BACKENDS, "auto"),
@@ -251,6 +257,8 @@ impl Config {
         put("snap_sensitivity", self.snap_sensitivity.into());
         put("span_monitors", self.span_monitors.into());
         put("detect_windows", self.detect_windows.into());
+        put("window_frame", self.window_frame.into());
+        put("window_shadow", self.window_shadow.into());
         put("show_codes", self.show_codes.into());
         put("toolbar_follows_mouse", self.toolbar_follows_mouse.into());
         put("backend", self.backend.clone().into());

@@ -232,6 +232,24 @@ impl Image {
         self.data().as_chunks::<4>().0.iter().any(|p| p[3] != 255)
     }
 
+    /// On a plain `background` (0xRRGGBB), for formats without transparency.
+    pub fn flattened(&self, background: u32) -> Result<Image, String> {
+        let mut out = self.clone();
+        let [b0, g0, r0] = [(background & 0xFF) as u8, (background >> 8 & 0xFF) as u8, (background >> 16 & 0xFF) as u8];
+        for p in out.data_mut().as_chunks_mut::<4>().0 {
+            let rest = 255 - p[3] as u32;
+            if rest == 0 {
+                continue;
+            }
+            // (premultiplied: what shows of the background is added)
+            for (c, bg) in p[..3].iter_mut().zip([b0, g0, r0]) {
+                *c = (*c as u32 + (bg as u32 * rest + 127) / 255).min(255) as u8;
+            }
+            p[3] = 255;
+        }
+        Ok(out)
+    }
+
     /// Make every pixel opaque (a screenshot is: whatever its alpha says).
     pub fn force_opaque(&mut self) {
         // (a word at a time: the compiler does many at once)
@@ -480,6 +498,16 @@ pub fn hex(argb: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flattened_on_white() {
+        let mut img = Image::filled(2, 1, 0x0000_0000).unwrap();
+        img.set_pixel(1, 0, 0x8040_0000); // half-covered dark red (premultiplied)
+        let flat = img.flattened(0xFFFFFF).unwrap();
+        assert_eq!(flat.pixel(0, 0), 0xFFFF_FFFF);
+        assert_eq!(flat.pixel(1, 0), 0xFFBF_7F7F);
+        assert!(!flat.has_alpha());
+    }
 
     #[test]
     fn pixels_and_crop() {

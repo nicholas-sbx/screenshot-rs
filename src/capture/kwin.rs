@@ -3,7 +3,7 @@
 //! KWin only answers programs named, with X-KDE-DBUS-Restricted-Interfaces
 //! set to org.kde.KWin.ScreenShot2, in an installed desktop file (by the
 //! absolute path of their executable): the packages install one for
-//! /usr/bin/flatshot. KWin replies with the picture's size and format, then
+//! /usr/bin/flatshot-rs. KWin replies with the picture's size and format, then
 //! writes the raw pixels into a pipe of ours from a thread of its own; they
 //! go straight from the pipe into the picture's memory.
 
@@ -37,6 +37,15 @@ pub struct Want {
     pub cursor: bool,
 }
 
+/// The active window on its own (KWin's CaptureActiveWindow): with its
+/// title bar and borders, and its shadow, if asked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowWant {
+    pub cursor: bool,
+    pub decoration: bool,
+    pub shadow: bool,
+}
+
 /// How long KWin took, for --verbose.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Times {
@@ -55,7 +64,7 @@ pub fn capture(wants: &[Want]) -> Result<(Vec<Image>, Times), String> {
     let conn = crate::dbus::session()?;
     let started = Instant::now();
     let results: Vec<Result<(Image, Duration), String>> = std::thread::scope(|s| {
-        let handles: Vec<_> = wants.iter().map(|w| s.spawn(move || capture_one(conn, w, started))).collect();
+        let handles: Vec<_> = wants.iter().map(|w| s.spawn(move || capture_one(conn, &Ask::Screen(w), started))).collect();
         handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("the capture thread failed".into()))).collect()
     });
     let mut pictures = Vec::with_capacity(wants.len());
@@ -69,14 +78,45 @@ pub fn capture(wants: &[Want]) -> Result<(Vec<Image>, Times), String> {
     Ok((pictures, times))
 }
 
-fn capture_one(conn: &zbus::blocking::Connection, want: &Want, started: Instant) -> Result<(Image, Duration), String> {
+/// The active window on its own: nothing covering it shows, parts off
+/// screen are kept, and its rounded corners and shadow come out
+/// transparent (premultiplied alpha).
+pub fn capture_window(want: WindowWant) -> Result<Image, String> {
+    let conn = crate::dbus::session()?;
+    let started = Instant::now();
+    let (img, replied) = capture_one(conn, &Ask::Window(want), started)?;
+    crate::timing::log(format!(
+        "KWin answered in {:.0} ms, the window's pixels in {:.0} ms",
+        replied.as_secs_f64() * 1000.0,
+        started.elapsed().saturating_sub(replied).as_secs_f64() * 1000.0
+    ));
+    Ok(img)
+}
+
+enum Ask<'a> {
+    Screen(&'a Want),
+    Window(WindowWant),
+}
+
+fn capture_one(conn: &zbus::blocking::Connection, ask: &Ask<'_>, started: Instant) -> Result<(Image, Duration), String> {
     let (read_end, write_end) = big_pipe().map_err(|e| format!("pipe: {e}"))?;
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
     options.insert("native-resolution", Value::Bool(true));
-    options.insert("include-cursor", Value::Bool(want.cursor));
-    let reply = match &want.screen {
-        Some(name) => conn.call_method(Some(SERVICE), PATH, Some(IFACE), "CaptureScreen", &(name.as_str(), options, Fd::from(write_end.as_fd()))),
-        None => conn.call_method(Some(SERVICE), PATH, Some(IFACE), "CaptureWorkspace", &(options, Fd::from(write_end.as_fd()))),
+    let fd = Fd::from(write_end.as_fd());
+    let reply = match ask {
+        Ask::Screen(want) => {
+            options.insert("include-cursor", Value::Bool(want.cursor));
+            match &want.screen {
+                Some(name) => conn.call_method(Some(SERVICE), PATH, Some(IFACE), "CaptureScreen", &(name.as_str(), options, fd)),
+                None => conn.call_method(Some(SERVICE), PATH, Some(IFACE), "CaptureWorkspace", &(options, fd)),
+            }
+        }
+        Ask::Window(w) => {
+            options.insert("include-cursor", Value::Bool(w.cursor));
+            options.insert("include-decoration", Value::Bool(w.decoration));
+            options.insert("include-shadow", Value::Bool(w.shadow));
+            conn.call_method(Some(SERVICE), PATH, Some(IFACE), "CaptureActiveWindow", &(options, fd))
+        }
     };
     // Our copy of the write end goes: the end of the pixels is when KWin
     // closes its own.
@@ -113,7 +153,7 @@ fn capture_one(conn: &zbus::blocking::Connection, want: &Want, started: Instant)
             px.swap(0, 2);
         }
     }
-    if format == ARGB32 {
+    if matches!(format, ARGB32 | RGBA8888) {
         // Straight alpha (a screen is opaque, so this is rare): premultiply.
         for px in img.data_mut().as_chunks_mut::<4>().0 {
             let a = px[3] as u32;
@@ -124,7 +164,9 @@ fn capture_one(conn: &zbus::blocking::Connection, want: &Want, started: Instant)
             }
         }
     }
-    img.force_opaque();
+    if matches!(ask, Ask::Screen(_)) || matches!(format, RGB32 | RGBX8888) {
+        img.force_opaque();
+    }
     Ok((img, replied))
 }
 
