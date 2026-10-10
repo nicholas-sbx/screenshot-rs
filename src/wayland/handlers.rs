@@ -29,7 +29,7 @@ use crate::keyseq;
 
 impl CompositorHandler for App {
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, factor: i32) {
-        if let Some(s) = self.wl.surfaces.iter_mut().find(|s| &s.wl == surface) {
+        if let Some(s) = self.wl().surfaces.iter_mut().find(|s| &s.wl == surface) {
             s.int_scale = factor.max(1);
         }
     }
@@ -37,7 +37,7 @@ impl CompositorHandler for App {
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
 
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, _: u32) {
-        self.wl.frame_done(surface);
+        self.wl().frame_done(surface);
     }
 
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
@@ -47,7 +47,7 @@ impl CompositorHandler for App {
 
 impl OutputHandler for App {
     fn output_state(&mut self) -> &mut OutputState {
-        &mut self.wl.outputs
+        &mut self.wl().outputs
     }
 
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
@@ -55,19 +55,21 @@ impl OutputHandler for App {
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
-        self.monitor_gone(&output);
+        self.monitor_gone(&crate::platform::Output::Wayland(output));
     }
 }
 
 impl LayerShellHandler for App {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
         let id = layer.wl_surface().id();
-        self.surface_closed(&id);
+        if let Some(owner) = self.wl().owner_of(&id) {
+            self.surface_closed(owner);
+        }
     }
 
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
         let id = layer.wl_surface().id();
-        if let Some(s) = self.wl.surfaces.iter_mut().find(|s| s.wl.id() == id) {
+        if let Some(s) = self.wl().surfaces.iter_mut().find(|s| s.wl.id() == id) {
             let (w, h) = configure.new_size;
             if w > 0 && h > 0 {
                 s.logical = (w, h);
@@ -88,12 +90,14 @@ use smithay_client_toolkit::shell::WaylandSurface;
 impl WindowHandler for App {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
         let id = window.wl_surface().id();
-        self.surface_closed(&id);
+        if let Some(owner) = self.wl().owner_of(&id) {
+            self.surface_closed(owner);
+        }
     }
 
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window, configure: WindowConfigure, _: u32) {
         let id = window.wl_surface().id();
-        if let Some(s) = self.wl.surfaces.iter_mut().find(|s| s.wl.id() == id) {
+        if let Some(s) = self.wl().surfaces.iter_mut().find(|s| s.wl.id() == id) {
             if let (Some(w), Some(h)) = configure.new_size {
                 s.logical = (w.get(), h.get());
             }
@@ -105,7 +109,7 @@ impl WindowHandler for App {
 impl PopupHandler for App {
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, popup: &Popup, config: PopupConfigure) {
         let id = popup.wl_surface().id();
-        if let Some(s) = self.wl.surfaces.iter_mut().find(|s| s.wl.id() == id) {
+        if let Some(s) = self.wl().surfaces.iter_mut().find(|s| s.wl.id() == id) {
             if config.width > 0 && config.height > 0 {
                 s.logical = (config.width as u32, config.height as u32);
             }
@@ -115,25 +119,27 @@ impl PopupHandler for App {
 
     fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, popup: &Popup) {
         let id = popup.wl_surface().id();
-        self.surface_closed(&id);
+        if let Some(owner) = self.wl().owner_of(&id) {
+            self.surface_closed(owner);
+        }
     }
 }
 
 impl SeatHandler for App {
     fn seat_state(&mut self) -> &mut SeatState {
-        &mut self.wl.seats
+        &mut self.wl().seats
     }
 
     fn new_seat(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
-        self.wl.clipboard.add_seat(&seat, qh);
+        self.wl().clipboard.add_seat(&seat, qh);
     }
 
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
-        self.wl.clipboard.add_seat(&seat, qh);
+        self.wl().clipboard.add_seat(&seat, qh);
         match capability {
-            Capability::Keyboard if self.wl.keyboard.is_none() => {
+            Capability::Keyboard if self.wl().keyboard.is_none() => {
                 let handle = self.loop_handle.clone();
-                let keyboard = self.wl.seats.get_keyboard_with_repeat(
+                let keyboard = self.wl().seats.get_keyboard_with_repeat(
                     qh,
                     &seat,
                     None,
@@ -141,24 +147,25 @@ impl SeatHandler for App {
                     Box::new(|app: &mut App, _: &wl_keyboard::WlKeyboard, event: KeyEvent| app.key_event(event, true, true)),
                 );
                 match keyboard {
-                    Ok(k) => self.wl.keyboard = Some(k),
+                    Ok(k) => self.wl().keyboard = Some(k),
                     Err(e) => crate::warn!("no keyboard: {e}"),
                 }
-                self.wl.create_text_input(&seat);
+                self.wl().create_text_input(&seat);
             }
-            Capability::Pointer if self.wl.pointer.is_none() => {
-                let surface = self.wl.compositor.create_surface(qh);
-                match self.wl.seats.get_pointer_with_theme::<App, ()>(qh, &seat, self.wl.shm.wl_shm(), surface, ThemeSpec::System) {
+            Capability::Pointer if self.wl().pointer.is_none() => {
+                let surface = self.wl().compositor.create_surface(qh);
+                let wl = self.wl();
+                match wl.seats.get_pointer_with_theme::<App, ()>(qh, &seat, wl.shm.wl_shm(), surface, ThemeSpec::System) {
                     Ok(p) => {
-                        self.wl.pointer = Some(p);
-                        self.wl.create_relative_pointer();
+                        self.wl().pointer = Some(p);
+                        self.wl().create_relative_pointer();
                     }
                     Err(e) => crate::warn!("no pointer: {e}"),
                 }
             }
-            Capability::Touch if self.wl.touch.is_none() => {
-                if let Ok(t) = self.wl.seats.get_touch(qh, &seat) {
-                    self.wl.touch = Some(t);
+            Capability::Touch if self.wl().touch.is_none() => {
+                if let Ok(t) = self.wl().seats.get_touch(qh, &seat) {
+                    self.wl().touch = Some(t);
                 }
             }
             _ => {}
@@ -168,27 +175,27 @@ impl SeatHandler for App {
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, capability: Capability) {
         match capability {
             Capability::Keyboard => {
-                if let Some(k) = self.wl.keyboard.take() {
+                if let Some(k) = self.wl().keyboard.take() {
                     // Its data stops key repeat in the event loop when it's
                     // dropped, which can't be done from inside the loop's
                     // dispatch (where the compositor's "forget it" comes):
                     // hold on to it until things are quiet.
                     if let Some(data) = k.object_data().cloned() {
-                        self.wl.retired.push((std::time::Instant::now(), data));
+                        self.wl().retired.push((std::time::Instant::now(), data));
                     }
                     k.release();
                 }
             }
             Capability::Pointer => {
-                if let Some(r) = self.wl.relative.take() {
+                if let Some(r) = self.wl().relative.take() {
                     r.destroy();
                 }
-                if let Some(p) = self.wl.pointer.take() {
+                if let Some(p) = self.wl().pointer.take() {
                     p.pointer().release();
                 }
             }
             Capability::Touch => {
-                if let Some(t) = self.wl.touch.take() {
+                if let Some(t) = self.wl().touch.take() {
                     t.release();
                 }
             }
@@ -210,18 +217,18 @@ impl KeyboardHandler for App {
         _: &[u32],
         _: &[Keysym],
     ) {
-        self.wl.keyboard_on = Some(surface.id());
-        self.wl.serial = serial;
+        self.wl().keyboard_on = Some(surface.id());
+        self.wl().serial = serial;
     }
 
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, surface: &wl_surface::WlSurface, _: u32) {
-        if self.wl.keyboard_on.as_ref() == Some(&surface.id()) {
-            self.wl.keyboard_on = None;
+        if self.wl().keyboard_on.as_ref() == Some(&surface.id()) {
+            self.wl().keyboard_on = None;
         }
     }
 
     fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, serial: u32, event: KeyEvent) {
-        self.wl.serial = serial;
+        self.wl().serial = serial;
         self.key_event(event, true, false);
     }
 
@@ -247,7 +254,7 @@ impl KeyboardHandler for App {
         if m.logo {
             mods |= keyseq::META;
         }
-        self.wl.mods = mods;
+        self.wl().mods = mods;
         self.input(None, Input::Modifiers(mods));
     }
 }
@@ -260,9 +267,16 @@ impl App {
         let key = keyseq::keysym_to_qt(event.keysym.raw(), ch);
         // Keypad keys carry their own modifier bit in Qt.
         let keypad = if keyseq::is_keypad(event.keysym.raw()) { keyseq::KEYPAD } else { 0 };
-        let press = KeyPress { key, mods: self.wl.mods | keypad, text: if pressed { text } else { String::new() }, keysym: event.keysym.raw(), repeat };
-        let on = self.wl.keyboard_on.clone();
+        let press = KeyPress { key, mods: self.wl().mods | keypad, text: if pressed { text } else { String::new() }, keysym: event.keysym.raw(), repeat };
+        let on = self.wl().keyboard_owner();
         self.input(on, if pressed { Input::Key(press) } else { Input::KeyUp(press) });
+    }
+
+    /// Input for surface `id` (none of ours: ignored).
+    fn input_on(&mut self, id: &wayland_client::backend::ObjectId, ev: Input) {
+        if let Some(owner) = self.wl().owner_of(id) {
+            self.input(Some(owner), ev);
+        }
     }
 }
 
@@ -273,27 +287,27 @@ impl PointerHandler for App {
             let at = (e.position.0, e.position.1);
             match e.kind {
                 PointerEventKind::Enter { serial } => {
-                    self.wl.pointer_on = Some(id.clone());
-                    if let Some(s) = self.wl.surfaces.iter_mut().find(|s| s.wl.id() == id) {
+                    self.wl().pointer_on = Some(id.clone());
+                    if let Some(s) = self.wl().surfaces.iter_mut().find(|s| s.wl.id() == id) {
                         s.cursor = None; // (set again for this entry)
                     }
-                    self.wl.serial = serial;
-                    self.input(Some(id), Input::Enter(at));
+                    self.wl().serial = serial;
+                    self.input_on(&id, Input::Enter(at));
                 }
                 PointerEventKind::Leave { .. } => {
-                    if self.wl.pointer_on.as_ref() == Some(&id) {
-                        self.wl.pointer_on = None;
+                    if self.wl().pointer_on.as_ref() == Some(&id) {
+                        self.wl().pointer_on = None;
                     }
-                    self.input(Some(id), Input::Leave);
+                    self.input_on(&id, Input::Leave);
                 }
-                PointerEventKind::Motion { .. } => self.input(Some(id), Input::Motion(at, false)),
+                PointerEventKind::Motion { .. } => self.input_on(&id, Input::Motion(at, false)),
                 PointerEventKind::Press { button, serial, .. } => {
-                    self.wl.serial = serial;
-                    self.input(Some(id), Input::Button(button, true, at));
+                    self.wl().serial = serial;
+                    self.input_on(&id, Input::Button(button, true, at));
                 }
                 PointerEventKind::Release { button, serial, .. } => {
-                    self.wl.serial = serial;
-                    self.input(Some(id), Input::Button(button, false, at));
+                    self.wl().serial = serial;
+                    self.input_on(&id, Input::Button(button, false, at));
                 }
                 PointerEventKind::Axis { vertical, .. } => {
                     // Notches up are positive, as Qt's angle delta.
@@ -305,7 +319,7 @@ impl PointerHandler for App {
                         -(vertical.absolute / 15.0) as f32
                     };
                     if steps != 0.0 {
-                        self.input(Some(id), Input::Scroll(steps));
+                        self.input_on(&id, Input::Scroll(steps));
                     }
                 }
             }
@@ -325,34 +339,34 @@ impl TouchHandler for App {
         id: i32,
         position: (f64, f64),
     ) {
-        self.wl.serial = serial;
+        self.wl().serial = serial;
         // The first finger acts as the left button; more are ignored.
-        if !self.wl.touches.is_empty() {
-            self.wl.touches.insert(id, (surface.id(), position));
+        if !self.wl().touches.is_empty() {
+            self.wl().touches.insert(id, (surface.id(), position));
             return;
         }
-        self.wl.touches.insert(id, (surface.id(), position));
-        self.input(Some(surface.id()), Input::Motion(position, true));
-        self.input(Some(surface.id()), Input::Button(smithay_client_toolkit::seat::pointer::BTN_LEFT, true, position));
+        self.wl().touches.insert(id, (surface.id(), position));
+        self.input_on(&surface.id(), Input::Motion(position, true));
+        self.input_on(&surface.id(), Input::Button(smithay_client_toolkit::seat::pointer::BTN_LEFT, true, position));
     }
 
     fn up(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, serial: u32, _: u32, id: i32) {
-        self.wl.serial = serial;
-        let first = self.wl.touches.len() == 1;
-        if let Some((surface, at)) = self.wl.touches.remove(&id)
+        self.wl().serial = serial;
+        let first = self.wl().touches.len() == 1;
+        if let Some((surface, at)) = self.wl().touches.remove(&id)
             && first
         {
-            self.input(Some(surface), Input::Button(smithay_client_toolkit::seat::pointer::BTN_LEFT, false, at));
+            self.input_on(&surface, Input::Button(smithay_client_toolkit::seat::pointer::BTN_LEFT, false, at));
         }
     }
 
     fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, _: u32, id: i32, position: (f64, f64)) {
-        let single = self.wl.touches.len() == 1;
-        if let Some(t) = self.wl.touches.get_mut(&id) {
+        let single = self.wl().touches.len() == 1;
+        if let Some(t) = self.wl().touches.get_mut(&id) {
             t.1 = position;
             if single {
                 let surface = t.0.clone();
-                self.input(Some(surface), Input::Motion(position, true));
+                self.input_on(&surface, Input::Motion(position, true));
             }
         }
     }
@@ -362,9 +376,9 @@ impl TouchHandler for App {
     fn orientation(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, _: i32, _: f64) {}
 
     fn cancel(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch) {
-        let first = self.wl.touches.drain().next();
+        let first = self.wl().touches.drain().next();
         if let Some((_, (surface, at))) = first {
-            self.input(Some(surface), Input::Button(smithay_client_toolkit::seat::pointer::BTN_LEFT, false, at));
+            self.input_on(&surface, Input::Button(smithay_client_toolkit::seat::pointer::BTN_LEFT, false, at));
         }
     }
 }
@@ -381,11 +395,11 @@ impl DataSourceHandler for App {
     fn accept_mime(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: Option<String>) {}
 
     fn send_request(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, mime: String, fd: WritePipe) {
-        self.wl.clipboard.send(&mime, fd.into());
+        self.wl().clipboard.send(&mime, fd.into());
     }
 
     fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource) {
-        self.wl.clipboard.core_cancelled(source);
+        self.wl().clipboard.core_cancelled(source);
     }
 
     fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
@@ -400,13 +414,13 @@ impl DataOfferHandler for App {
 
 impl ShmHandler for App {
     fn shm_state(&mut self) -> &mut Shm {
-        &mut self.wl.shm
+        &mut self.wl().shm
     }
 }
 
 impl ProvidesRegistryState for App {
     fn registry(&mut self) -> &mut RegistryState {
-        &mut self.wl.registry
+        &mut self.wl().registry
     }
     registry_handlers![OutputState, SeatState];
 }

@@ -62,7 +62,8 @@ impl Wayland {
             };
             for &c in wants {
                 let id = self.captures.len();
-                let frame = manager.capture_output(c as i32, &m.output, &self.qh, FrameData(id));
+                let Some(output) = m.wl_output() else { return Err("not a Wayland monitor".into()) };
+                let frame = manager.capture_output(c as i32, output, &self.qh, FrameData(id));
                 self.captures.push(Grab {
                     monitor: i,
                     cursor: c,

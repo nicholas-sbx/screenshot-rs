@@ -81,7 +81,7 @@ pub fn method() -> Method {
         Ok("test-gst") => return Method::TestGst,
         _ => {}
     }
-    if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_some() {
+    if crate::x11::chosen() {
         return Method::X11;
     }
     let wlroots = std::env::var_os("SWAYSOCK").is_some() || std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some();

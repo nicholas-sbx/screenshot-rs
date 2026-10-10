@@ -82,6 +82,15 @@ impl Image {
         Ok(Image { width, height, pixels: Pixels::Map(map) })
     }
 
+    /// [`Image::shared`], its memory there from the start: for a picture
+    /// another program fills at once (the X server), which then doesn't
+    /// stop at each new page, nor do we when reading it.
+    pub fn shared_populated(width: u32, height: u32) -> Result<Image, String> {
+        let len = check(width, height)?;
+        let map = Mapping::memfd("flatshot-capture", len, true).map_err(|e| e.to_string())?;
+        Ok(Image { width, height, pixels: Pixels::Map(map) })
+    }
+
     /// The memfd behind a shared picture.
     pub fn fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
         match &self.pixels {
@@ -225,8 +234,9 @@ impl Image {
 
     /// Make every pixel opaque (a screenshot is: whatever its alpha says).
     pub fn force_opaque(&mut self) {
+        // (a word at a time: the compiler does many at once)
         for p in self.data_mut().as_chunks_mut::<4>().0 {
-            p[3] = 255;
+            *p = (u32::from_le_bytes(*p) | 0xFF00_0000).to_le_bytes();
         }
     }
 

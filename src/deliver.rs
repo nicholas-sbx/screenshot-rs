@@ -66,7 +66,7 @@ pub fn deliver(image: &Image, cfg: &Config, explicit: Option<&str>, shot: &Shot,
         "path" => {
             if let Some(p) = &result.path {
                 let text = p.to_string_lossy().into_owned().into_bytes();
-                let mimes = crate::wayland::clipboard::TEXT_MIMES.iter().map(|m| m.to_string()).collect();
+                let mimes = crate::clipboard::TEXT_MIMES.iter().map(|m| m.to_string()).collect();
                 result.clip = Some((mimes, Arc::new(text)));
             }
         }
@@ -170,11 +170,16 @@ fn human_size(n: usize) -> String {
     if n < 1 << 20 { format!("{:.0} KiB", n as f64 / 1024.0) } else { format!("{:.1} MiB", n as f64 / (1 << 20) as f64) }
 }
 
-/// Hand clipboard data to wl-copy, which stays in the background to serve
-/// it: a one-off capture can then end at once.
-pub fn hand_to_wl_copy(mime: &str, data: &[u8]) -> bool {
-    let Some(mut cmd) = util::command("wl-copy") else { return false };
-    let child = cmd.args(["--type", mime]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+/// Hand clipboard data to `helper` (wl-copy or xclip), which stays in the
+/// background to serve it: a one-off capture can then end at once.
+pub fn hand_to(helper: &str, mime: &str, data: &[u8]) -> bool {
+    let Some(mut cmd) = util::command(helper) else { return false };
+    if helper == "xclip" {
+        cmd.args(["-selection", "clipboard", "-t", mime, "-i"]);
+    } else {
+        cmd.args(["--type", mime]);
+    }
+    let child = cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
     let Ok(mut child) = child else { return false };
     let written = child.stdin.take().is_some_and(|mut s| s.write_all(data).is_ok());
     // It reads everything, takes the clipboard, then forks: the one we

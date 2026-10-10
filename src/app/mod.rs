@@ -19,20 +19,18 @@ use std::time::{Duration, Instant};
 
 use calloop::{EventLoop, LoopHandle};
 use calloop_wayland_source::WaylandSource;
-use smithay_client_toolkit::seat::pointer::CursorIcon;
-use wayland_client::backend::ObjectId;
-use wayland_client::protocol::wl_output;
 
 use crate::cli::Args;
 use crate::config::{self, Config};
 use crate::geom::{Damage, IRect, Point};
 use crate::image::Canvas;
 use crate::keys::KeyPress;
+use crate::platform::{Display, Monitor, Output, Owner, Painted, TRAY_MENU};
 use crate::render::theme;
 use crate::timing::{self, Clock};
 use crate::ui::session::{Button, CursorShape, Effect, Session, Waker};
 use crate::ui::state::Desktop;
-use crate::wayland::{Monitor, Owner, Painted, Wayland};
+use crate::wayland::Wayland;
 
 /// Input for a surface, as the platform reports it.
 pub enum Input {
@@ -50,7 +48,7 @@ pub enum Input {
 }
 
 pub struct App {
-    pub wl: Wayland,
+    pub dpy: Display,
     pub loop_handle: LoopHandle<'static, App>,
     pub cfg: Config,
     pub session: Option<Session>,
@@ -108,11 +106,20 @@ impl Painted for Session {
 }
 
 impl App {
-    /// Input for `surface` (the focused one for keys).
-    pub fn input(&mut self, surface: Option<ObjectId>, ev: Input) {
-        let owner = surface.as_ref().and_then(|id| self.wl.owner_of(id));
+    /// The Wayland connection's state (only Wayland's events ask for it).
+    pub fn wl(&mut self) -> &mut Wayland {
+        match &mut self.dpy {
+            Display::Wayland(w) => w,
+            Display::X11(_) => unreachable!("a Wayland event on X11"),
+        }
+    }
+
+    /// Input for `owner`'s surface (the focused one for keys).
+    pub fn input(&mut self, owner: Option<Owner>, ev: Input) {
         match owner {
             Some(Owner::Pin(id)) => return self.pin_input(id, ev),
+            Some(Owner::Menu(TRAY_MENU)) => return self.tray_menu_input(ev),
+            Some(Owner::TrayIcon) => return self.tray_icon_input(ev),
             Some(Owner::Menu(id)) => return self.menu_input(id, ev),
             Some(Owner::Editor(id)) => return self.editor_input(id, ev),
             Some(Owner::Settings) => return self.settings_input(ev),
@@ -131,7 +138,7 @@ impl App {
             },
         };
         let p = |at: (f64, f64)| Point::new(at.0 as f32, at.1 as f32);
-        let mods = self.wl.mods;
+        let mods = self.dpy.mods();
         match ev {
             Input::Enter(at) => s.pointer_enter(o, p(at)),
             Input::Leave => s.pointer_leave(o),
@@ -166,7 +173,7 @@ impl App {
 
     /// Text from an input method.
     pub fn commit_string(&mut self, text: &str) {
-        let focus = self.wl.text_focus.as_ref().or(self.wl.keyboard_on.as_ref()).and_then(|id| self.wl.owner_of(id));
+        let focus = self.dpy.text_owner().or(self.dpy.keyboard_owner());
         match focus {
             Some(Owner::Editor(id)) => return self.editor_commit_string(id, text),
             Some(Owner::Settings) => return self.settings_commit_string(text),
@@ -177,26 +184,33 @@ impl App {
         }
     }
 
-    /// The compositor closed one of our surfaces (or asked to).
-    pub fn surface_closed(&mut self, id: &ObjectId) {
-        match self.wl.owner_of(id) {
-            Some(Owner::Overlay(_)) => {
+    /// The display server closed one of our surfaces (or asked to).
+    pub fn surface_closed(&mut self, owner: Owner) {
+        match owner {
+            Owner::Overlay(_) => {
                 if let Some(s) = &mut self.session {
                     s.cancel();
                 }
             }
-            Some(Owner::Pin(p)) => self.close_pin(p),
-            Some(Owner::Menu(p)) => self.close_menu(p),
-            Some(Owner::Editor(e)) => self.editor_close_requested(e),
-            Some(Owner::Settings) => self.close_settings(),
+            Owner::Pin(p) => self.close_pin(p),
+            Owner::Menu(TRAY_MENU) => self.close_tray_menu(),
+            Owner::Menu(p) => self.close_menu(p),
+            Owner::TrayIcon => {}
+            Owner::Editor(e) => self.editor_close_requested(e),
+            Owner::Settings => self.close_settings(),
             // (the bar's window closed by the desktop: done recording)
-            Some(Owner::RecBar) => self.stop_recording(),
-            Some(Owner::RecMark(_)) | None => {}
+            Owner::RecBar => self.stop_recording(),
+            Owner::RecMark(_) => {}
         }
     }
 
+    /// The monitors the capture in progress covers.
+    pub fn monitors_in_use(&self) -> Vec<Output> {
+        self.monitors.iter().map(|m| m.output.clone()).collect()
+    }
+
     /// A monitor went away: a capture on it can't go on.
-    pub fn monitor_gone(&mut self, output: &wl_output::WlOutput) {
+    pub fn monitor_gone(&mut self, output: &Output) {
         if self.monitors.iter().any(|m| &m.output == output)
             && let Some(s) = &mut self.session
         {
@@ -214,9 +228,9 @@ impl App {
 
     fn close_session(&mut self) {
         self.session = None;
-        self.wl.remove_overlays();
+        self.dpy.remove_overlays();
         self.monitors.clear();
-        let _ = self.wl.conn.flush();
+        self.dpy.flush();
         crate::render::text::remember_fonts();
         crate::mem::trim();
     }
@@ -227,14 +241,14 @@ impl App {
     fn timeout(&self) -> Option<Duration> {
         let session = self.session.as_ref().and_then(|s| s.next_deadline());
         let taken = self.taken.as_ref().map(|t| t.wait_until);
-        let deadline = [session, self.hold_until, taken, self.editors_deadline(), self.recording_deadline()].into_iter().flatten().min()?;
+        let deadline =
+            [session, self.hold_until, taken, self.editors_deadline(), self.recording_deadline(), self.dpy.next_deadline()].into_iter().flatten().min()?;
         Some(deadline.saturating_duration_since(Instant::now()))
     }
 
     /// After each round of events: finish what's ready, draw what changed.
     pub fn after_dispatch(&mut self) {
-        // (long since forgotten by the compositor: safe to drop here)
-        self.wl.retired.retain(|(t, _)| t.elapsed() < Duration::from_secs(5));
+        self.dpy.tick();
         self.poll_capture();
         if let Some(rx) = &self.desktop_rx
             && let Ok(found) = rx.try_recv()
@@ -271,7 +285,7 @@ impl App {
             for effect in s.take_effects() {
                 match effect {
                     Effect::Clipboard(text) => self.copy_now(&text),
-                    Effect::Paste => self.paste_rx = Some(self.wl.clipboard.paste_text(self.waker.clone())),
+                    Effect::Paste => self.paste_rx = Some(self.dpy.paste_text(self.waker.clone())),
                 }
             }
         }
@@ -281,7 +295,14 @@ impl App {
         self.redraw();
         self.update_cursor();
         self.update_text_input();
-        let _ = self.wl.conn.flush();
+        self.dpy.flush();
+        // (events read meanwhile, while waiting for a reply, are no longer
+        // on the socket for the loop to hear: another round for them)
+        if let Display::X11(x) = &mut self.dpy
+            && x.has_events()
+        {
+            (self.waker)();
+        }
         if let Some(code) = self.finished
             && self.exit.is_none()
             && self.may_exit()
@@ -295,11 +316,12 @@ impl App {
         self.redraw_editors();
         self.redraw_settings();
         self.redraw_recording();
+        self.redraw_tray_icon();
         let Some(s) = &mut self.session else { return };
         let mut drawn = false;
-        for i in 0..self.wl.surfaces.len() {
-            if let Owner::Overlay(o) = self.wl.surfaces[i].owner {
-                drawn |= self.wl.redraw(i, o, s);
+        for owner in self.dpy.owners() {
+            if let Owner::Overlay(o) = owner {
+                drawn |= self.dpy.redraw(owner, o, s);
             }
         }
         if drawn && self.first_frame {
@@ -309,9 +331,8 @@ impl App {
     }
 
     fn update_cursor(&mut self) {
-        let Some(on) = &self.wl.pointer_on else { return };
-        let Some(i) = self.wl.surface_index(on) else { return };
-        let shape = match (self.wl.surfaces[i].owner, &self.session) {
+        let Some(owner) = self.dpy.pointer_owner() else { return };
+        let shape = match (owner, &self.session) {
             (Owner::Overlay(o), Some(s)) => s.cursor(o),
             (Owner::Pin(_), _) => CursorShape::Move,
             (Owner::Menu(_), _) => CursorShape::Arrow,
@@ -323,42 +344,20 @@ impl App {
                 Some(w) => w.s.cursor(),
                 None => return,
             },
-            (Owner::RecBar, _) => CursorShape::Arrow,
+            (Owner::RecBar | Owner::TrayIcon, _) => CursorShape::Arrow,
             _ => return,
         };
-        let icon = match shape {
-            CursorShape::Crosshair => CursorIcon::Crosshair,
-            CursorShape::Text => CursorIcon::Text,
-            CursorShape::Move => CursorIcon::Move,
-            CursorShape::Hand => CursorIcon::Pointer,
-            CursorShape::Arrow => CursorIcon::Default,
-            CursorShape::ResizeNS => CursorIcon::NsResize,
-            CursorShape::ResizeEW => CursorIcon::EwResize,
-            CursorShape::ResizeNWSE => CursorIcon::NwseResize,
-            CursorShape::ResizeNESW => CursorIcon::NeswResize,
-        };
-        if self.wl.surfaces[i].cursor != Some(icon)
-            && let Some(p) = &self.wl.pointer
-            && p.set_cursor(&self.wl.conn, icon).is_ok()
-        {
-            self.wl.surfaces[i].cursor = Some(icon);
-        }
+        self.dpy.set_cursor(owner, shape);
     }
 
     fn update_text_input(&mut self) {
-        let caret = match (&self.session, &self.wl.keyboard_on) {
-            (_, Some(on)) if matches!(self.wl.owner_of(on), Some(Owner::Editor(_) | Owner::Settings)) => match self.wl.owner_of(on) {
-                Some(Owner::Editor(id)) => self.editors.iter().find(|e| e.id == id).filter(|e| e.ed.wants_text()).and_then(|e| e.ed.text_input()),
-                Some(Owner::Settings) => self.settings.as_ref().filter(|w| w.s.wants_text()).and_then(|w| w.s.text_input()),
-                _ => None,
-            },
-            (Some(s), Some(on)) => match self.wl.owner_of(on) {
-                Some(Owner::Overlay(o)) => s.text_input(o),
-                _ => None,
-            },
+        let caret = match (&self.session, self.dpy.keyboard_owner()) {
+            (_, Some(Owner::Editor(id))) => self.editors.iter().find(|e| e.id == id).filter(|e| e.ed.wants_text()).and_then(|e| e.ed.text_input()),
+            (_, Some(Owner::Settings)) => self.settings.as_ref().filter(|w| w.s.wants_text()).and_then(|w| w.s.text_input()),
+            (Some(s), Some(Owner::Overlay(o))) => s.text_input(o),
             _ => None,
         };
-        self.wl.set_text_input(caret);
+        self.dpy.set_text_input(caret);
     }
 }
 
@@ -384,7 +383,7 @@ pub fn layer_namespace() -> String {
 fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoop<'static, App>), i32> {
     let cfg = config::load();
     theme::use_theme(&cfg.theme);
-    let (wl, mut queue) = Wayland::connect().map_err(|e| {
+    let (dpy, queue) = connect().map_err(|e| {
         crate::warn!("{e}");
         2
     })?;
@@ -407,7 +406,7 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         });
     }
     let mut app = App {
-        wl,
+        dpy,
         loop_handle: event_loop.handle(),
         cfg,
         session: None,
@@ -436,19 +435,41 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         recording: None,
         quit_after_recording: false,
     };
-    // The monitors (and xdg-output's logical layout) arrive in two rounds.
-    for _ in 0..2 {
-        queue.roundtrip(&mut app).map_err(|e| {
-            crate::warn!("Wayland: {e}");
-            2
-        })?;
+    match queue {
+        Some(mut queue) => {
+            // The monitors (and xdg-output's logical layout) arrive in two rounds.
+            for _ in 0..2 {
+                queue.roundtrip(&mut app).map_err(|e| {
+                    crate::warn!("Wayland: {e}");
+                    2
+                })?;
+            }
+            timing::log(format!("connected to Wayland in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0));
+            let conn = app.wl().conn.clone();
+            WaylandSource::new(conn, queue).insert(event_loop.handle()).map_err(|e| {
+                crate::warn!("Wayland source: {e}");
+                2
+            })?;
+        }
+        None => {
+            timing::log(format!("connected to X11 in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0));
+            crate::x11::insert_source(&event_loop.handle(), &app).map_err(|e| {
+                crate::warn!("X11: {e}");
+                2
+            })?;
+        }
     }
-    timing::log(format!("connected to Wayland in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0));
-    WaylandSource::new(app.wl.conn.clone(), queue).insert(event_loop.handle()).map_err(|e| {
-        crate::warn!("Wayland source: {e}");
-        2
-    })?;
     Ok((app, event_loop))
+}
+
+/// The display server: Wayland when there is one (with its event queue,
+/// still to be read), else X11.
+fn connect() -> Result<(Display, Option<wayland_client::EventQueue<App>>), String> {
+    if crate::x11::chosen() {
+        return Ok((Display::X11(crate::x11::X11::connect()?), None));
+    }
+    let (wl, queue) = Wayland::connect()?;
+    Ok((Display::Wayland(wl), Some(queue)))
 }
 
 /// One capture from the command line: the overlay, then the result.

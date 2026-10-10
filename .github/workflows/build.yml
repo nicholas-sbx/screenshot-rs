@@ -80,7 +80,7 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev sway grim wl-clipboard dbus fonts-dejavu-core python3 ffmpeg wf-recorder
+          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev sway grim wl-clipboard dbus fonts-dejavu-core python3 ffmpeg wf-recorder xvfb xkb-data stalonetray
       - name: Rust
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
@@ -98,6 +98,8 @@ jobs:
           FLATSHOT_SELFTEST_OUT=shots ./target/debug/flatshot --self-test
       - name: End to end on a headless sway (overlay, pins, editor, settings, recording, instant captures, clipboard, tray app)
         run: timeout 300 ./tests/e2e.sh
+      - name: End to end on a headless X server (the same, on X11)
+        run: timeout 300 ./tests/e2e-x11.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

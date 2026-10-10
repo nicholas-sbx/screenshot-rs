@@ -14,12 +14,12 @@ use super::{App, Input};
 use crate::geom::{Damage, IRect, Point, Rect};
 use crate::image::{Canvas, Image};
 use crate::keyseq::key;
+use crate::platform::{Monitor, Owner, Painted};
 use crate::render::Painter;
 use crate::render::paint::Pen;
 use crate::render::theme;
 use crate::template::Shot;
 use crate::ui::menu::{Choice, Entry, Menu};
-use crate::wayland::{Monitor, Owner, Painted};
 
 const MIN_SIDE: f32 = 16.0;
 
@@ -129,7 +129,7 @@ fn paint_picture(src: &Image, logical: (u32, u32), scale: f32, target: &mut Canv
 }
 
 /// A pin's menu, painted on its popup.
-struct MenuPaint<'a>(&'a mut Menu);
+pub(super) struct MenuPaint<'a>(pub(super) &'a mut Menu);
 
 impl Painted for MenuPaint<'_> {
     fn damage(&mut self, _: usize) -> Damage {
@@ -158,7 +158,7 @@ impl App {
     /// pin opens right there, at that size. `size`: the size it was
     /// captured at, when where can't be used (the monitors changed since).
     pub(super) fn pin(&mut self, image: Arc<Image>, at: Option<IRect>, size: Option<(u32, u32)>) {
-        let monitors = self.wl.monitors();
+        let monitors = self.dpy.monitors();
         let Some(first) = monitors.first() else { return };
         let mon = at
             .and_then(|a| {
@@ -199,15 +199,15 @@ impl App {
             menu: None,
         };
         let size = pin.size();
-        if !self.wl.add_layer(Owner::Pin(id), &mon, place, size, "flatshot-pin") {
+        if !self.dpy.add_layer(Owner::Pin(id), &mon, place, size, "flatshot-pin") {
             pin.layered = false;
-            if let Err(e) = self.wl.add_window(Owner::Pin(id), &format!("Flatshot pin {id}"), size, false) {
+            if let Err(e) = self.dpy.add_window(Owner::Pin(id), &format!("Flatshot pin {id}"), size, false) {
                 crate::warn!("can't pin: {e}");
                 return;
             }
         }
         self.pins.push(pin);
-        let _ = self.wl.conn.flush();
+        self.dpy.flush();
     }
 
     pub(super) fn has_pins(&self) -> bool {
@@ -219,8 +219,8 @@ impl App {
     }
 
     pub(super) fn close_pin(&mut self, id: u32) {
-        self.wl.remove(Owner::Menu(id));
-        self.wl.remove(Owner::Pin(id));
+        self.dpy.remove(Owner::Menu(id));
+        self.dpy.remove(Owner::Pin(id));
         self.pins.retain(|p| p.id != id);
         crate::mem::trim();
     }
@@ -248,10 +248,8 @@ impl App {
                 pin.last_click = Some((now, at));
                 if pin.layered {
                     pin.drag = Some(Drag { from: pin.at, grab: at, moved: (0.0, 0.0) });
-                } else if let (Some(s), Some(seat)) = (self.wl.surf(Owner::Pin(id)), self.wl.seats.seats().next())
-                    && let Some(w) = &s.window
-                {
-                    w.move_(&seat, self.wl.serial);
+                } else {
+                    self.dpy.start_move(Owner::Pin(id));
                 }
             }
             Input::Button(0x110, false, _) => {
@@ -259,7 +257,7 @@ impl App {
             }
             Input::Button(0x112, true, _) => self.close_pin(id),
             Input::Button(0x111, true, at) => self.open_pin_menu(id, p(at)),
-            Input::Motion(at, _) if self.wl.relative.is_none() => {
+            Input::Motion(at, _) if !self.dpy.has_relative() => {
                 // (no relative motion: where the pointer is on the pin, as
                 // compositors report it while a button is held, relative
                 // to where the pin was when it was pressed)
@@ -312,7 +310,7 @@ impl App {
         if target != pin.at {
             pin.at = target;
             let (id, size) = (pin.id, pin.size());
-            self.wl.place_layer(Owner::Pin(id), target, size);
+            self.dpy.place_layer(Owner::Pin(id), target, size);
         }
     }
 
@@ -326,19 +324,19 @@ impl App {
         pin.dirty = true;
         let (id, at, size, layered) = (pin.id, pin.at, pin.size(), pin.layered);
         if layered {
-            self.wl.place_layer(Owner::Pin(id), at, size);
+            self.dpy.place_layer(Owner::Pin(id), at, size);
         }
-        self.wl.set_logical_size(Owner::Pin(id), size);
+        self.dpy.set_logical_size(Owner::Pin(id), size);
     }
 
     fn open_pin_menu(&mut self, id: u32, at: Point) {
-        self.wl.remove(Owner::Menu(id));
+        self.dpy.remove(Owner::Menu(id));
         let Some(i) = self.pin_index(id) else { return };
         let mut menu = Menu::new(menu_entries());
         menu.set_scale(self.pins[i].scale);
         let (w, h) = menu.size();
         let anchor = IRect::new(at.x.round() as i32, at.y.round() as i32, 1, 1);
-        match self.wl.add_popup(Owner::Menu(id), Owner::Pin(id), anchor, (w, h)) {
+        match self.dpy.add_popup(Owner::Menu(id), Owner::Pin(id), anchor, (w, h)) {
             Ok(()) => self.pins[i].menu = Some(menu),
             Err(e) => crate::warn!("no menu: {e}"),
         }
@@ -381,7 +379,7 @@ impl App {
     }
 
     pub(super) fn close_menu(&mut self, id: u32) {
-        self.wl.remove(Owner::Menu(id));
+        self.dpy.remove(Owner::Menu(id));
         if let Some(i) = self.pin_index(id) {
             self.pins[i].menu = None;
         }
@@ -390,8 +388,8 @@ impl App {
     fn copy_pin(&mut self, i: usize) {
         match crate::codec::encode_png(&self.pins[i].image, false) {
             Ok(png) => {
-                let slot = crate::wayland::clipboard::Slot::ready(Arc::new(png));
-                if !self.wl.clipboard.offer(vec!["image/png".into()], slot, self.wl.serial, &self.wl.qh) {
+                let slot = crate::clipboard::Slot::ready(Arc::new(png));
+                if !self.dpy.offer(vec!["image/png".into()], slot) {
                     crate::warn!("could not copy: no clipboard");
                 }
             }
@@ -416,20 +414,19 @@ impl App {
 
     /// Draw the pins (and their menus) that changed.
     pub(super) fn redraw_pins(&mut self) {
-        for i in 0..self.wl.surfaces.len() {
-            match self.wl.surfaces[i].owner {
+        for owner in self.dpy.owners() {
+            let Some((_, scale)) = self.dpy.surface(owner) else { continue };
+            match owner {
                 Owner::Pin(id) => {
-                    let scale = self.wl.surfaces[i].scale();
                     if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
                         pin.set_scale(scale);
-                        self.wl.redraw(i, 0, pin);
+                        self.dpy.redraw(owner, 0, pin);
                     }
                 }
                 Owner::Menu(id) => {
-                    let scale = self.wl.surfaces[i].scale();
                     if let Some(menu) = self.pins.iter_mut().find(|p| p.id == id).and_then(|p| p.menu.as_mut()) {
                         menu.set_scale(scale);
-                        self.wl.redraw(i, 0, &mut MenuPaint(menu));
+                        self.dpy.redraw(owner, 0, &mut MenuPaint(menu));
                     }
                 }
                 _ => {}

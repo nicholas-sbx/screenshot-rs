@@ -421,6 +421,26 @@ fn pixmap(img: &Image) -> (i32, i32, Vec<u8>) {
 }
 
 /// Flatshot's icon at the sizes panels use.
+/// The tray icon as a picture of `size` pixels square: Flatshot's, or a
+/// stop button while recording.
+pub fn icon_image(size: u32, recording: bool) -> Option<Image> {
+    if recording {
+        let mut img = Image::new(size, size).ok()?;
+        let f = size as f32;
+        let mut pm = img.pixmap_mut();
+        let mut paint = tiny_skia::Paint { anti_alias: true, ..Default::default() };
+        paint.set_color_rgba8(0xE5, 0x48, 0x4D, 0xFF);
+        let circle = tiny_skia::PathBuilder::from_circle(f / 2.0, f / 2.0, f / 2.0 - 1.0)?;
+        pm.fill_path(&circle, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+        paint.set_color_rgba8(0xFF, 0xFF, 0xFF, 0xFF);
+        let s = f * 0.32;
+        let square = tiny_skia::Rect::from_xywh((f - s) / 2.0, (f - s) / 2.0, s, s)?;
+        pm.fill_rect(square, &paint, tiny_skia::Transform::identity(), None);
+        return Some(img);
+    }
+    crate::codec::decode_png(include_bytes!("../../assets/flatshot.png")).ok()?.scaled_area(size, size).ok()
+}
+
 fn app_icon() -> Pixmaps {
     let Ok(full) = crate::codec::decode_png(include_bytes!("../../assets/flatshot.png")) else { return Vec::new() };
     [16u32, 22, 32, 48, 64].iter().filter_map(|&s| full.scaled_area(s, s).ok()).map(|i| pixmap(&i)).collect()
@@ -428,23 +448,7 @@ fn app_icon() -> Pixmaps {
 
 /// The icon while recording: the recording bar's red stop button.
 fn stop_icon() -> Pixmaps {
-    [16u32, 22, 32, 48, 64]
-        .iter()
-        .filter_map(|&size| {
-            let mut img = Image::new(size, size).ok()?;
-            let f = size as f32;
-            let mut pm = img.pixmap_mut();
-            let mut paint = tiny_skia::Paint { anti_alias: true, ..Default::default() };
-            paint.set_color_rgba8(0xE5, 0x48, 0x4D, 0xFF);
-            let circle = tiny_skia::PathBuilder::from_circle(f / 2.0, f / 2.0, f / 2.0 - 1.0)?;
-            pm.fill_path(&circle, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
-            paint.set_color_rgba8(0xFF, 0xFF, 0xFF, 0xFF);
-            let s = f * 0.32;
-            let square = tiny_skia::Rect::from_xywh((f - s) / 2.0, (f - s) / 2.0, s, s)?;
-            pm.fill_rect(square, &paint, tiny_skia::Transform::identity(), None);
-            Some(pixmap(&img))
-        })
-        .collect()
+    [16u32, 22, 32, 48, 64].iter().filter_map(|&size| icon_image(size, true)).map(|i| pixmap(&i)).collect()
 }
 
 #[cfg(test)]

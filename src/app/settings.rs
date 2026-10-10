@@ -8,13 +8,13 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use super::{App, Input};
+use crate::clipboard::{Slot, TEXT_MIMES};
 use crate::desktop::{portal, shortcuts, sound};
 use crate::geom::{Damage, IRect, Point};
 use crate::image::Canvas;
+use crate::platform::{Owner, Painted};
 use crate::ui::session::{Button, Waker};
 use crate::ui::settings::{Request, Settings};
-use crate::wayland::clipboard::{Slot, TEXT_MIMES};
-use crate::wayland::{Owner, Painted};
 
 const TITLE: &str = "Flatshot Settings";
 const SIZE: (u32, u32) = (760, 560);
@@ -139,13 +139,11 @@ impl App {
         if self.settings.is_some() {
             return; // (Wayland has no raising a window without the desktop's token)
         }
-        if let Err(e) = self.wl.add_window(Owner::Settings, TITLE, SIZE, true) {
+        if let Err(e) = self.dpy.add_window(Owner::Settings, TITLE, SIZE, true) {
             self.report_failure("Can't show the settings", &e);
             return;
         }
-        if let Some(w) = self.wl.surf(Owner::Settings).and_then(|s| s.window.as_ref()) {
-            w.set_min_size(Some(MIN_SIZE));
-        }
+        self.dpy.set_min_size(Owner::Settings, MIN_SIZE);
         let (kde, jobs) = mpsc::channel();
         let (answers_tx, answers) = mpsc::channel();
         let waker = self.waker.clone();
@@ -165,7 +163,7 @@ impl App {
         let format = crate::config::load().record_format;
         let recorder = Some(check_recorder(format, self.waker.clone()));
         self.settings = Some(SettingsWin { s, dialog: None, paste: None, recorder, kde, answers });
-        let _ = self.wl.conn.flush();
+        self.dpy.flush();
     }
 
     pub(super) fn has_settings(&self) -> bool {
@@ -191,7 +189,7 @@ impl App {
     }
 
     pub(super) fn settings_input(&mut self, ev: Input) {
-        let mods = self.wl.mods;
+        let mods = self.dpy.mods();
         let Some(w) = &mut self.settings else { return };
         let s = &mut w.s;
         let p = |at: (f64, f64)| Point::new(at.0 as f32, at.1 as f32);
@@ -229,7 +227,7 @@ impl App {
         w.s.closing();
         self.serve_settings();
         if self.settings.is_some() {
-            self.wl.remove(Owner::Settings);
+            self.dpy.remove(Owner::Settings);
             self.settings = None; // (the worker ends with its last job)
             crate::mem::trim();
         }
@@ -267,12 +265,12 @@ impl App {
                 }
                 Request::CopyText(text) => {
                     let mimes = TEXT_MIMES.iter().map(|m| m.to_string()).collect();
-                    self.wl.clipboard.offer(mimes, Slot::ready(Arc::new(text.into_bytes())), self.wl.serial, &self.wl.qh);
+                    self.dpy.offer(mimes, Slot::ready(Arc::new(text.into_bytes())));
                 }
-                Request::Paste => w.paste = Some(self.wl.clipboard.paste_text(self.waker.clone())),
+                Request::Paste => w.paste = Some(self.dpy.paste_text(self.waker.clone())),
                 Request::CheckRecorder(format) => w.recorder = Some(check_recorder(format, self.waker.clone())),
                 Request::Close => {
-                    self.wl.remove(Owner::Settings);
+                    self.dpy.remove(Owner::Settings);
                     self.settings = None; // (the worker ends with its last job)
                     crate::mem::trim();
                     return;
@@ -326,11 +324,10 @@ impl App {
     /// Draw the settings window, if it changed.
     pub(super) fn redraw_settings(&mut self) {
         let Some(w) = &mut self.settings else { return };
-        let Some(i) = self.wl.surfaces.iter().position(|s| s.owner == Owner::Settings) else { return };
-        let (logical, scale) = (self.wl.surfaces[i].logical, self.wl.surfaces[i].scale());
+        let Some((logical, scale)) = self.dpy.surface(Owner::Settings) else { return };
         w.s.set_view(logical.0 as f32, logical.1 as f32);
         w.s.set_scale(scale);
-        self.wl.redraw(i, 0, &mut SettingsPaint(&mut w.s));
+        self.dpy.redraw(Owner::Settings, 0, &mut SettingsPaint(&mut w.s));
     }
 }
 

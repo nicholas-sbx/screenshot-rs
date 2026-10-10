@@ -66,13 +66,18 @@ pub fn report() -> String {
         ("desktop", if desktop.is_empty() { "unknown".into() } else { desktop.clone() }),
     ];
     let globals = match std::env::var_os("WAYLAND_DISPLAY") {
-        Some(d) => {
+        Some(d) if !crate::x11::chosen() => {
             data.push(("session", format!("Wayland ({})", d.to_string_lossy())));
             wayland_globals()
         }
-        None => {
-            data.push(("session", if std::env::var_os("DISPLAY").is_some() { "X11 (not supported yet)".into() } else { "none found".into() }));
-            Err("no Wayland session".into())
+        _ if crate::x11::chosen() => {
+            data.push(("session", format!("X11 ({})", std::env::var("DISPLAY").unwrap_or_default())));
+            data.extend(crate::x11::diagnose());
+            Err("an X11 session".into())
+        }
+        _ => {
+            data.push(("session", "none found (neither WAYLAND_DISPLAY nor DISPLAY is set)".into()));
+            Err("no session".into())
         }
     };
     let has = |name: &str| globals.as_ref().is_ok_and(|g| g.iter().any(|i| i == name));
@@ -91,7 +96,8 @@ pub fn report() -> String {
             data.push(("clipboard without focus", yes(has("ext_data_control_manager_v1") || has("zwlr_data_control_manager_v1")).into()));
             data.push(("fractional scaling", yes(has("wp_fractional_scale_manager_v1") && has("wp_viewporter")).into()));
         }
-        Err(e) => data.push(("compositor", format!("not reached: {e}"))),
+        Err(e) if !crate::x11::chosen() => data.push(("compositor", format!("not reached: {e}"))),
+        Err(_) => {}
     }
     let order = capture::backend_order(&cfg.backend, has("zwlr_screencopy_manager_v1"));
     data.push(("capture, in order", order.join(", ")));

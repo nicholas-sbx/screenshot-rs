@@ -7,13 +7,13 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use super::{App, Input};
+use crate::clipboard::{Slot, TEXT_MIMES};
 use crate::desktop::portal;
 use crate::geom::{Damage, IRect, Point};
 use crate::image::Canvas;
+use crate::platform::{Owner, Painted};
 use crate::ui::editor::{Editor, Request, initial_size};
 use crate::ui::session::Button;
-use crate::wayland::clipboard::{Slot, TEXT_MIMES};
-use crate::wayland::{Owner, Painted};
 
 /// An editor and its window.
 pub struct EditorWin {
@@ -77,23 +77,21 @@ impl App {
                 return false;
             }
         };
-        let monitors = self.wl.monitors();
+        let monitors = self.dpy.monitors();
         let (mon, dpr) = monitors.first().map(|m| ((m.rect.w as f32, m.rect.h as f32), m.scale as f32)).unwrap_or(((1920.0, 1080.0), 1.0));
         let target = save_to.unwrap_or_else(|| path.to_path_buf());
         let ed = Editor::new(image, dpr, target, crate::config::load());
-        let size = initial_size((ed.image.width() as f32 / dpr, ed.image.height() as f32 / dpr), mon);
+        let size = initial_size((ed.image.width() as f32 / dpr, ed.image.height() as f32 / dpr), mon, ed.bar_width().ceil());
         self.next_editor += 1;
         let id = self.next_editor;
         let title = ed.title();
-        if let Err(e) = self.wl.add_window(Owner::Editor(id), &title, size, true) {
+        if let Err(e) = self.dpy.add_window(Owner::Editor(id), &title, size, true) {
             crate::warn!("can't open the editor: {e}");
             return false;
         }
-        if let Some(w) = self.wl.surf(Owner::Editor(id)).and_then(|s| s.window.as_ref()) {
-            w.set_min_size(Some((480, 360)));
-        }
+        self.dpy.set_min_size(Owner::Editor(id), (480, 360));
         self.editors.push(EditorWin { id, ed, title, dialog: None, paste: None });
-        let _ = self.wl.conn.flush();
+        self.dpy.flush();
         true
     }
 
@@ -107,7 +105,7 @@ impl App {
 
     /// Input on editor `id`'s window.
     pub(super) fn editor_input(&mut self, id: u32, ev: Input) {
-        let mods = self.wl.mods;
+        let mods = self.dpy.mods();
         let Some(w) = self.editor_mut(id) else { return };
         let ed = &mut w.ed;
         let p = |at: (f64, f64)| Point::new(at.0 as f32, at.1 as f32);
@@ -152,15 +150,15 @@ impl App {
         for req in self.editors[i].ed.take_requests() {
             match req {
                 Request::CopyImage(png) => {
-                    if !self.wl.clipboard.offer(vec!["image/png".into()], Slot::ready(png), self.wl.serial, &self.wl.qh) {
+                    if !self.dpy.offer(vec!["image/png".into()], Slot::ready(png)) {
                         crate::warn!("could not copy: no clipboard");
                     }
                 }
                 Request::CopyText(text) => {
                     let mimes = TEXT_MIMES.iter().map(|m| m.to_string()).collect();
-                    self.wl.clipboard.offer(mimes, Slot::ready(Arc::new(text.into_bytes())), self.wl.serial, &self.wl.qh);
+                    self.dpy.offer(mimes, Slot::ready(Arc::new(text.into_bytes())));
                 }
-                Request::Paste => self.editors[i].paste = Some(self.wl.clipboard.paste_text(self.waker.clone())),
+                Request::Paste => self.editors[i].paste = Some(self.dpy.paste_text(self.waker.clone())),
                 Request::SaveAs => {
                     if self.editors[i].dialog.is_some() {
                         continue; // (one is open already)
@@ -176,7 +174,7 @@ impl App {
                     self.editors[i].dialog = Some(rx);
                 }
                 Request::Close => {
-                    self.wl.remove(Owner::Editor(id));
+                    self.dpy.remove(Owner::Editor(id));
                     self.editors.remove(i);
                     crate::mem::trim();
                     return;
@@ -186,10 +184,8 @@ impl App {
         // (the title follows the unsaved changes)
         let w = &mut self.editors[i];
         let title = w.ed.title();
-        if title != w.title
-            && let Some(win) = self.wl.surf(Owner::Editor(id)).and_then(|s| s.window.as_ref())
-        {
-            win.set_title(title.clone());
+        if title != w.title {
+            self.dpy.set_title(Owner::Editor(id), &title);
             w.title = title;
         }
     }
@@ -247,13 +243,13 @@ impl App {
 
     /// Draw the editors that changed.
     pub(super) fn redraw_editors(&mut self) {
-        for i in 0..self.wl.surfaces.len() {
-            let Owner::Editor(id) = self.wl.surfaces[i].owner else { continue };
-            let (logical, scale) = (self.wl.surfaces[i].logical, self.wl.surfaces[i].scale());
+        for owner in self.dpy.owners() {
+            let Owner::Editor(id) = owner else { continue };
+            let Some((logical, scale)) = self.dpy.surface(owner) else { continue };
             if let Some(w) = self.editors.iter_mut().find(|e| e.id == id) {
                 w.ed.set_view(logical.0 as f32, logical.1 as f32);
                 w.ed.set_scale(scale);
-                self.wl.redraw(i, 0, &mut EditorPaint(&mut w.ed));
+                self.dpy.redraw(owner, 0, &mut EditorPaint(&mut w.ed));
             }
         }
     }

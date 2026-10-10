@@ -1,6 +1,6 @@
 # Flatshot (Rust)
 
-A ShareX-style screenshot tool for Linux on Wayland, built mainly for KDE Plasma: a rewrite of [Flatshot](https://github.com/nicholas-sbx/screenshot) as a single native binary, with no Python, Qt or helper programs.
+A ShareX-style screenshot tool for Linux, on Wayland and X11, built mainly for KDE Plasma: a rewrite of [Flatshot](https://github.com/nicholas-sbx/screenshot) as a single native binary, with no Python, Qt or helper programs.
 
 Flatshot lives in your system tray. Press your shortcut and the screen freezes. **Drag a region, or click a window, and it's saved and copied straight away.** To mark it up first, draw on the frozen screen with the floating toolbar, then drag. **QR codes and barcodes** on screen are found automatically, each with a card to copy or open it.
 
@@ -12,7 +12,7 @@ Flatshot lives in your system tray. Press your shortcut and the screen freezes. 
 
 ### Measured
 
-Both versions on the same machine and desktop (a headless Sway, 1600 × 1000, software rendering), from the moment of the key press, or of starting the program, to the overlay's first frame on screen (taken from the Wayland protocol trace), and the tray app's memory:
+Both versions on the same machine and desktop, 1600 × 1000, software rendering, from the moment of the key press, or of starting the program, to the overlay's first frame on screen, and the tray app's memory. On Wayland (a headless Sway; times from the Wayland protocol trace):
 
 | | Flatshot (Python) | Flatshot (Rust) |
 |---|---|---|
@@ -22,7 +22,17 @@ Both versions on the same machine and desktop (a headless Sway, 1600 × 1000, so
 | Tray app, after six captures | 93 MB | **16 MB** |
 | Peak during a capture | 124 MB | **40 MB** |
 
-Most of the Rust version's 19 ms is the compositor copying the screen. (Memory is resident set size; times are means of 6–7 runs, ranges in brackets.)
+On X11 (Xvfb with Openbox; times from the X server's own damage reports):
+
+| | Flatshot (Python) | Flatshot (Rust) |
+|---|---|---|
+| Shortcut → overlay on screen, tray app running | 74 ms (66–88) | **17 ms** (16–18) |
+| `flatshot` → overlay on screen, no tray app | 296 ms (282–310) | **21 ms** (18–23) |
+| Tray app, idle | 61 MB | **10 MB** |
+| Tray app, after six captures | 79 MB | **14 MB** |
+| Peak during a capture | 107 MB | **38 MB** |
+
+Most of the Rust version's time is the display server copying the screen. (Memory is resident set size; times are means of 7 runs, ranges in brackets. The shortcut is KDE's shortcut service, a stand-in that notes when it fires.)
 
 ## Install
 
@@ -74,7 +84,7 @@ Or `packaging/arch/PKGBUILD` with `makepkg`, or `packaging/build-packages.sh` (w
 
 1. Start **Flatshot** from the app menu. This runs `flatshot --tray`, and the icon appears in the system tray.
 2. On KDE the shortcuts are registered for you: <kbd>Ctrl</kbd>+<kbd>Print</kbd> (region), <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Print</kbd> (active window) and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Print</kbd> (all screens). Change them, or set keys for current monitor, last region, pin and record, on the Shortcuts page of Flatshot's settings (or in **System Settings → Shortcuts → Flatshot**).
-3. On other desktops, bind the command `flatshot` (or `flatshot --full`, ...) in your desktop's keyboard settings: it hands the capture to the running tray app at once, or captures by itself when there is none.
+3. On other desktops, bind the command `flatshot` (or `flatshot --full`, ...) in your desktop's keyboard settings: it hands the capture to the running tray app at once, or captures by itself when there is none. The same goes for X11 sessions; KDE's X11 session registers the shortcuts like its Wayland one.
 
 Replacing the Python Flatshot: starting this one's tray app asks the old one to quit, and takes over its shortcuts and settings (`~/.config/flatshot/config.json` is shared).
 
@@ -102,10 +112,10 @@ Replacing the Python Flatshot: starting this one's tray app asks the old one to 
 
 Choose **Record screen** in the tray menu (or its shortcut, or <kbd>V</kbd> on the overlay, or `flatshot --record`), pick an area or a window or a whole monitor, set MP4, WebM or GIF, sound and frame rate in the panel under it, and press <kbd>Enter</kbd>. A small bar under the area (outside it, so it's never in the video) shows the time and has pause, stop and discard; red marks show the area's corners. Stop with the bar, the tray icon, the shortcut again, or <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal: the video is saved to `~/Videos/Screencasts` (settings: Recording), copied as a file, and announced.
 
-| | KDE Plasma, GNOME | Sway, Hyprland, wlroots |
-|---|---|---|
-| Records with | the screen-cast portal and GStreamer (the first time, the desktop asks which screen to share) | wf-recorder |
-| Needs | `gst-launch-1.0` with the PipeWire plugin, and x264enc (MP4) or vp8enc (WebM) | `wf-recorder` |
+| | KDE Plasma, GNOME | Sway, Hyprland, wlroots | X11 |
+|---|---|---|---|
+| Records with | the screen-cast portal and GStreamer (the first time, the desktop asks which screen to share) | wf-recorder | ffmpeg (x11grab) |
+| Needs | `gst-launch-1.0` with the PipeWire plugin, and x264enc (MP4) or vp8enc (WebM) | `wf-recorder` | `ffmpeg` |
 
 Pausing and GIFs also need `ffmpeg`. The recorders are programs of their own: no frame passes through Flatshot.
 
@@ -130,19 +140,24 @@ Exit codes: 0 captured, 1 cancelled, 2 failed.
 
 ## How it works
 
-| | KDE Plasma | Sway, Hyprland, wlroots | GNOME |
-|---|---|---|---|
-| Taking the screen | KWin's ScreenShot2 API, raw pixels over a pipe | wlr-screencopy, into shared memory | the screenshot portal |
-| The overlay | a layer-shell surface (no window animations) | layer-shell | a full-screen window |
-| Window detection | a KWin script | sway IPC / Hyprland IPC | — |
-| Shortcuts | KGlobalAccel | your compositor's key bindings | your desktop's key bindings |
-| Clipboard | data-control (after the overlay is gone) | data-control | while the overlay has the keyboard |
+| | KDE Plasma | Sway, Hyprland, wlroots | GNOME | X11 (any desktop) |
+|---|---|---|---|---|
+| Taking the screen | KWin's ScreenShot2 API, raw pixels over a pipe | wlr-screencopy, into shared memory | the screenshot portal | MIT-SHM, straight into shared memory |
+| The overlay | a layer-shell surface (no window animations) | layer-shell | a full-screen window | a window per monitor the window manager never sees, holding the keyboard and pointer |
+| Window detection | a KWin script | sway IPC / Hyprland IPC | — | what the window manager publishes (EWMH) |
+| Shortcuts | KGlobalAccel | your compositor's key bindings | your desktop's key bindings | KGlobalAccel on KDE, else your desktop's key bindings |
+| Clipboard | data-control (after the overlay is gone) | data-control | while the overlay has the keyboard | the CLIPBOARD selection (big pictures in pieces) |
+| Tray icon | StatusNotifierItem | StatusNotifierItem | StatusNotifierItem (with the AppIndicator extension) | StatusNotifierItem, else the panel's tray (XEmbed) |
+
+On X11 the scale is Xft.dpi's, in whole steps. A one-off capture that copies hands the copy to the desktop's clipboard manager, or to `xclip`; with neither it stays in the background (up to 10 minutes, until something else is copied) to serve it, as the Python version does.
 
 Change settings in the settings window (the tray menu's **Settings…**, or `flatshot --settings`): they apply from the next capture. They live in `~/.config/flatshot/config.json` (the same file and keys as the Python Flatshot); `flatshot --print-config` shows them all.
 
 ## Security
 
-- **Untrusted input is parsed by memory-safe code**: the barcode decoders (rxing), image decoders, the compositor's and D-Bus messages. A decoder that panics on a strange picture is caught; the capture goes on without codes.
+On X11 any program can read the screen and the keyboard: that's X11's design, which Wayland was made to end. What follows is what Flatshot itself does.
+
+- **Untrusted input is parsed by memory-safe code**: the barcode decoders (rxing), image decoders, the compositor's, the X server's and D-Bus messages (no libwayland, no Xlib or libxcb: pure Rust on the wire). A decoder that panics on a strange picture is caught; the capture goes on without codes.
 - **Files**: captures are created with `O_EXCL | O_NOFOLLOW` under a unique name, so a capture never replaces a file or writes through a planted link; temporary files and the KWin script live in a private (0700) runtime folder and are created exclusively, mode 0600. The editor saves into the folder it opened the picture from (held open since), replacing the file by rename: a link put in its place meanwhile is replaced, not followed. File names made from window titles lose control characters and the invisible ones that turn text around ("photo‮gnp.exe").
 - **IPC**: the tray app's socket is in a folder only you can enter, and both ends check the other's user ID (`SO_PEERCRED`). Commands are a fixed, small grammar; lines are capped.
 - **D-Bus**: replies from KWin's window script are only accepted from KWin's own connection; shortcut presses only from the shortcut service's, notification clicks only from the notification server's (its current owner, followed through the bus's own announcements). Nothing waits on the bus while its messages come in, so a flood of forged ones can't stall it. Window lists and titles are capped in size.

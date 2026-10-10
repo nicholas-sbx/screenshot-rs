@@ -165,8 +165,9 @@ fn picture_size(img: &Image, dpr: f32) -> (f32, f32) {
 
 /// The window's first size for a picture of `size` (logical) on a monitor
 /// of `monitor` (logical).
-pub fn initial_size(size: (f32, f32), monitor: (f32, f32)) -> (u32, u32) {
-    let w = (monitor.0 * 0.85).min(size.0 + 48.0).max(720.0);
+pub fn initial_size(size: (f32, f32), monitor: (f32, f32), bar: f32) -> (u32, u32) {
+    // (never so narrow the bar doesn't fit)
+    let w = (monitor.0 * 0.85).min(size.0 + 48.0).max(720.0).max(bar);
     let h = (monitor.1 * 0.85).min(size.1 + BAR_H + STATUS_H + 64.0).max(480.0);
     (w.round() as u32, h.round() as u32)
 }
@@ -344,6 +345,13 @@ impl Editor {
         }
         self.layout_bar();
         self.damaged = true;
+    }
+
+    /// The narrowest the window can be with all of the bar showing.
+    pub fn bar_width(&self) -> f32 {
+        let tools: f32 = self.bar.iter().map(|it| it.size().0 + 2.0).sum();
+        let actions: f32 = self.actions.iter().map(|b| b.width + 4.0).sum();
+        8.0 + tools + 16.0 + actions + 8.0
     }
 
     fn layout_bar(&mut self) {

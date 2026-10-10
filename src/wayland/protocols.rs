@@ -46,7 +46,7 @@ impl Dispatch2<wl_buffer::WlBuffer, App> for BufferData {
     fn event(&self, app: &mut App, _: &wl_buffer::WlBuffer, event: wl_buffer::Event, _: &Connection, _: &QueueHandle<App>) {
         if let wl_buffer::Event::Release = event {
             self.0.store(false, Ordering::Release);
-            app.wl.buffer_released = true;
+            app.wl().buffer_released = true;
         }
     }
 }
@@ -82,7 +82,7 @@ impl Dispatch2<wp_fractional_scale_v1::WpFractionalScaleV1, App> for FractionalD
         _: &QueueHandle<App>,
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event
-            && let Some(s) = app.wl.surfaces.iter_mut().find(|s| s.wl.id() == self.0)
+            && let Some(s) = app.wl().surfaces.iter_mut().find(|s| s.wl.id() == self.0)
         {
             s.preferred_scale = Some(scale as f32 / 120.0);
         }
@@ -101,7 +101,7 @@ impl Dispatch2<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, App> for FrameDa
         _: &Connection,
         qh: &QueueHandle<App>,
     ) {
-        app.wl.screencopy_event(self.0, frame, event, qh);
+        app.wl().screencopy_event(self.0, frame, event, qh);
     }
 }
 
@@ -111,14 +111,14 @@ pub struct TextInputData;
 impl Dispatch2<zwp_text_input_v3::ZwpTextInputV3, App> for TextInputData {
     fn event(&self, app: &mut App, _: &zwp_text_input_v3::ZwpTextInputV3, event: zwp_text_input_v3::Event, _: &Connection, _: &QueueHandle<App>) {
         match event {
-            zwp_text_input_v3::Event::Enter { surface } => app.wl.text_focus = Some(surface.id()),
+            zwp_text_input_v3::Event::Enter { surface } => app.wl().text_focus = Some(surface.id()),
             zwp_text_input_v3::Event::Leave { .. } => {
-                app.wl.text_focus = None;
-                app.wl.text_enabled = false;
+                app.wl().text_focus = None;
+                app.wl().text_enabled = false;
             }
-            zwp_text_input_v3::Event::CommitString { text: Some(t) } => app.wl.pending_text.push_str(&t),
+            zwp_text_input_v3::Event::CommitString { text: Some(t) } => app.wl().pending_text.push_str(&t),
             zwp_text_input_v3::Event::Done { .. } => {
-                let text = std::mem::take(&mut app.wl.pending_text);
+                let text = std::mem::take(&mut app.wl().pending_text);
                 if !text.is_empty() {
                     app.commit_string(&text);
                 }

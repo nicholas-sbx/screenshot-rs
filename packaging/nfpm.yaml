@@ -11,7 +11,7 @@ section: graphics
 priority: optional
 maintainer: nicholas-sbx <nicholas-sbx@users.noreply.github.com>
 description: |
-  Region screenshots for Wayland (KDE first) with a floating draw toolbar.
+  Region screenshots for Wayland and X11 (KDE first) with a floating draw toolbar.
   Drag to capture instantly, or annotate first with pen, arrows, shapes,
   text, highlighter, pixelate and counters. QR codes and barcodes on screen
   are detected with one-click Copy / Open. A single native binary.
@@ -63,8 +63,9 @@ overrides:
     suggests:
       - kde-spectacle | grim
       - libnotify-bin
-      - ffmpeg  # pausing a recording, and GIFs
+      - ffmpeg  # pausing a recording, GIFs, recording on X11
       - wf-recorder  # screen recording on wlroots compositors
+      - xclip  # X11: keep the clipboard after a one-off capture exits
   rpm:
     depends:
       - glibc >= 2.35
@@ -80,6 +81,8 @@ overrides:
       - gstreamer1-plugins-good
       - gstreamer1-plugin-openh264
       - ffmpeg-free
+    suggests:
+      - xclip  # X11: keep the clipboard after a one-off capture exits
   archlinux:
     depends:
       - glibc
@@ -97,3 +100,4 @@ overrides:
       - spectacle
       - wf-recorder
       - grim
+      - xclip

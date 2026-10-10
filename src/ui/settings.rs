@@ -335,7 +335,7 @@ impl Settings {
                     Row::new(
                         "detect_windows",
                         "Detect windows",
-                        "Hover a window and click to capture just that window. KDE Plasma, Sway and Hyprland.",
+                        "Hover a window and click to capture just that window. KDE Plasma, Sway, Hyprland and X11.",
                         Control::Toggle(c.detect_windows),
                     ),
                     Row::new(

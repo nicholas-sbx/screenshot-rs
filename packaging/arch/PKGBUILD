@@ -6,7 +6,7 @@
 pkgname=flatshot
 pkgver=0.9.0
 pkgrel=1
-pkgdesc="Region screenshots for Wayland (KDE first) with a floating draw toolbar and QR code scanning"
+pkgdesc="Region screenshots for Wayland and X11 (KDE first) with a floating draw toolbar and QR code scanning"
 arch=('x86_64' 'aarch64')
 url="https://github.com/nicholas-sbx/screenshot-rs"
 license=('MIT')
@@ -20,8 +20,9 @@ optdepends=(
     'gst-plugin-pipewire: screen recording on KDE and GNOME (with gst-plugins-good)'
     'gst-plugins-good: screen recording on KDE and GNOME (WebM, MP4 files)'
     'gst-plugins-ugly: H.264 for MP4 recordings'
-    'ffmpeg: pausing a recording, and GIFs'
+    'ffmpeg: pausing a recording, GIFs, and screen recording on X11'
     'wf-recorder: screen recording on wlroots compositors'
+    'xclip: on X11, keep the clipboard after a one-off capture exits'
 )
 options=('!lto')
 if [ -z "${FLATSHOT_SRC:-}" ]; then

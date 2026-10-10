@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::App;
 use super::tray::NoteTarget;
+use crate::clipboard::{Slot, TEXT_MIMES};
 use crate::config;
 use crate::deliver;
 use crate::desktop::{notify, sound};
@@ -14,7 +15,6 @@ use crate::image::Image;
 use crate::template::Shot;
 use crate::ui::session::Outcome;
 use crate::util;
-use crate::wayland::clipboard::{Slot, TEXT_MIMES};
 
 /// How long a one-off capture stays to serve the clipboard, when nothing
 /// else can (no wl-copy to hand it to).
@@ -36,7 +36,7 @@ impl App {
         // follows once it's ready.
         let slot = self.claim_clipboard(&outcome);
         self.close_session();
-        let _ = self.wl.conn.flush();
+        self.dpy.flush();
         let code = match outcome {
             Outcome::Image { image, shot, at, pin } => self.deliver_image(image, shot, at, from_screen, pin, slot),
             Outcome::Color { hex, rgb: (r, g, b) } => {
@@ -86,8 +86,9 @@ impl App {
     pub(super) fn ended(&mut self, code: i32) {
         if self.one_shot {
             self.finished = Some(code);
-            if self.wl.clipboard.holds() {
+            if self.dpy.holds() {
                 self.hold_until = Some(Instant::now() + HOLD_CLIPBOARD);
+                self.dpy.hand_off_clipboard();
             }
         }
     }
@@ -95,14 +96,14 @@ impl App {
     /// Is a one-off capture done with everything (the clipboard served
     /// long enough, no pins left)?
     pub(super) fn may_exit(&self) -> bool {
-        let holding = self.wl.clipboard.holds() && self.hold_until.is_some_and(|t| Instant::now() < t);
+        let holding = self.dpy.holds() && self.hold_until.is_some_and(|t| Instant::now() < t);
         !holding && !self.has_pins() && !self.has_editors() && !self.has_settings() && !self.is_recording()
     }
 
     /// Will a one-off capture hand what it copies to wl-copy (so it can
     /// end now, with the clipboard still served)?
     fn hand_off(&self) -> bool {
-        self.one_shot && self.wl.clipboard.without_focus() && util::have("wl-copy")
+        self.one_shot && self.dpy.copy_helper().is_some()
     }
 
     /// Own the clipboard for what `outcome` copies, before the overlays go.
@@ -120,7 +121,7 @@ impl App {
             return None;
         }
         let slot = Arc::new(Slot::default());
-        self.wl.clipboard.offer(mimes, slot.clone(), self.wl.serial, &self.wl.qh).then_some(slot)
+        self.dpy.offer(mimes, slot.clone()).then_some(slot)
     }
 
     /// Put `data` (as `mimes`) on the clipboard: into the claimed `slot`,
@@ -130,10 +131,12 @@ impl App {
             slot.fill(data);
             return true;
         }
-        if self.hand_off() {
-            return deliver::hand_to_wl_copy(&mimes[0], &data);
+        if self.hand_off()
+            && let Some(helper) = self.dpy.copy_helper()
+        {
+            return deliver::hand_to(helper, &mimes[0], &data);
         }
-        self.wl.clipboard.offer(mimes, Slot::ready(data), self.wl.serial, &self.wl.qh)
+        self.dpy.offer(mimes, Slot::ready(data))
     }
 
     fn copy_text(&mut self, text: &str, slot: Option<Arc<Slot>>) -> bool {
@@ -143,7 +146,7 @@ impl App {
     /// Text copied while a session goes on (a code's text from the picker...).
     pub(super) fn copy_now(&mut self, text: &str) {
         let slot = Slot::ready(Arc::new(text.as_bytes().to_vec()));
-        if !self.wl.clipboard.offer(text_mimes(), slot, self.wl.serial, &self.wl.qh) {
+        if !self.dpy.offer(text_mimes(), slot) {
             crate::warn!("could not copy: no clipboard");
         }
     }
@@ -166,7 +169,7 @@ impl App {
             Ok(r) => r,
             Err(e) => {
                 if slot.is_some() {
-                    self.wl.clipboard.withdraw();
+                    self.dpy.withdraw();
                 }
                 self.report_failure("Screenshot failed", &e);
                 return 2;
@@ -186,12 +189,12 @@ impl App {
             }
             None => {
                 if slot.is_some() {
-                    self.wl.clipboard.withdraw();
+                    self.dpy.withdraw();
                 }
                 false
             }
         };
-        let _ = self.wl.conn.flush();
+        self.dpy.flush();
         if self.cfg.sound {
             sound::play(&self.cfg.sound_file);
         }
@@ -216,7 +219,7 @@ impl App {
                 // (the tray app stays to hear the buttons)
                 let buttons = [("default", "Open"), ("open", "Open"), ("folder", "Show in folder"), ("annotate", "Annotate"), ("pin", "Pin")];
                 note.actions = buttons.iter().filter(|(k, _)| result.saved || *k != "folder").map(|(k, l)| (k.to_string(), l.to_string())).collect();
-                let layout = self.wl.monitors().into_iter().map(|m| (m.name, m.rect, m.scale as f64)).collect();
+                let layout = self.dpy.monitors().into_iter().map(|m| (m.name, m.rect, m.scale as f64)).collect();
                 target = Some(NoteTarget { path, at, layout });
             }
             self.notify_with(note, target);

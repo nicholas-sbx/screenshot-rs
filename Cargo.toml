@@ -3,7 +3,7 @@ name = "flatshot"
 version = "0.9.0"
 edition = "2024"
 rust-version = "1.88"
-description = "ShareX-style region screenshots for Wayland (KDE first) with a floating draw toolbar and QR/barcode scanning"
+description = "ShareX-style region screenshots for Wayland and X11 (KDE first) with a floating draw toolbar and QR/barcode scanning"
 license = "MIT"
 repository = "https://github.com/nicholas-sbx/screenshot-rs"
 readme = "README.md"
@@ -52,13 +52,15 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # System calls with safe wrappers; libc for the few rustix lacks.
 rustix = { version = "1", features = ["fs", "mm", "pipe", "net", "process", "thread", "event", "time", "stdio", "rand", "system"] }
 libc = "0.2"
-# X11 sessions.
+# X11 sessions (the keymap is compiled by libxkbcommon, as on Wayland).
 x11rb = { version = "0.14", default-features = false, features = ["allow-unsafe-code", "randr", "shm", "xfixes", "xkb", "cursor", "resource_manager"] }
+xkbcommon = { version = "0.8", default-features = false }
 
 [dev-dependencies]
 # For the input injection tool used in tests on a headless compositor.
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
-xkbcommon = { version = "0.8", default-features = false }
+# ... and on a headless X server.
+x11rb = { version = "0.14", default-features = false, features = ["xtest"] }
 
 [profile.release]
 opt-level = 3

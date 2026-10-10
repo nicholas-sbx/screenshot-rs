@@ -19,19 +19,19 @@ use calloop::{Interest, Mode as PollMode, PostAction};
 
 use super::tray::NoteTarget;
 use super::{App, Input};
+use crate::clipboard::TEXT_MIMES;
 use crate::config::{self, Config};
 use crate::deliver;
 use crate::desktop::notify;
 use crate::geom::{Damage, IRect, Point};
 use crate::image::{Canvas, Image};
+use crate::platform::{Monitor, Owner, Painted};
 use crate::record::portal::{Failure, ScreenCast};
 use crate::record::{self, Method, Options, Target};
 use crate::template::{self, Shot};
 use crate::ui::recbar::{self, BarAction, Corner, RecBar};
 use crate::ui::session::{RecordJob, RecordSupport, Waker};
 use crate::util;
-use crate::wayland::clipboard::TEXT_MIMES;
-use crate::wayland::{Monitor, Owner, Painted};
 
 /// For a recorder to finish its file after being asked to stop.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -656,7 +656,7 @@ impl App {
         if self.recording.is_some() {
             return false;
         }
-        let monitors = self.wl.monitors();
+        let monitors = self.dpy.monitors();
         let rec = match Recording::new(job, &monitors, self.cfg.clone(), self.waker.clone()) {
             Ok(r) => r,
             Err(e) => {
@@ -787,7 +787,7 @@ impl App {
     fn show_controls(&mut self) {
         let Some(r) = &mut self.recording else { return };
         let area = r.rec.area();
-        let monitors = self.wl.monitors();
+        let monitors = self.dpy.monitors();
         let own = monitors.iter().find(|m| m.name == r.rec.target.monitor_name).or_else(|| monitors.iter().find(|m| m.rect.contains(area.center()))).cloned();
         let others: Vec<&Monitor> = monitors.iter().filter(|m| Some(&m.name) != own.as_ref().map(|o| &o.name)).collect();
         let bar = RecBar::new(r.rec.can_pause, r.rec.mic());
@@ -814,7 +814,7 @@ impl App {
             let placed = match on {
                 Some(m) => {
                     let at = (spot.x - m.rect.x, spot.y - m.rect.y);
-                    let ok = self.wl.add_control(Owner::RecBar, m, at, size, &namespace, false);
+                    let ok = self.dpy.add_control(Owner::RecBar, m, at, size, &namespace, false);
                     if ok {
                         r.bar_place = Some((m.clone(), at));
                     }
@@ -824,12 +824,8 @@ impl App {
             };
             if !placed {
                 // (no layer-shell: a small window the desktop places)
-                match self.wl.add_window(Owner::RecBar, "Flatshot recording", size, false) {
-                    Ok(()) => {
-                        if let Some(s) = self.wl.surfaces.iter_mut().find(|s| s.owner == Owner::RecBar) {
-                            s.transparent = true;
-                        }
-                    }
+                match self.dpy.add_window(Owner::RecBar, "Flatshot recording", size, false) {
+                    Ok(()) => self.dpy.set_transparent(Owner::RecBar),
                     Err(e) => crate::warn!("no room for the recording's controls: {e}"),
                 }
             }
@@ -837,10 +833,10 @@ impl App {
         }
         // Marks round the area, when they fit outside it.
         let screen = if r.rec.target.spans() { record::workspace(&r.rec.target.monitors) } else { own.as_ref().map(|m| m.rect).unwrap_or(area) };
-        if area.intersected(&screen) != screen && self.wl.layer_shell.is_some() {
+        if area.intersected(&screen) != screen && self.dpy.can_place() {
             for (i, (corner, rect)) in recbar::mark_rects(area).into_iter().enumerate() {
                 let Some(m) = monitors.iter().find(|m| m.rect.intersects(&rect)) else { continue };
-                if self.wl.add_control(
+                if self.dpy.add_control(
                     Owner::RecMark(i as u8),
                     m,
                     (rect.x - m.rect.x, rect.y - m.rect.y),
@@ -852,7 +848,7 @@ impl App {
                 }
             }
         }
-        let _ = self.wl.conn.flush();
+        self.dpy.flush();
         if no_bar {
             self.notify(notify::Note {
                 summary: "Recording the whole screen".into(),
@@ -866,14 +862,14 @@ impl App {
     fn hide_controls(&mut self) {
         let Some(r) = &mut self.recording else { return };
         if r.bar.take().is_some() {
-            self.wl.remove(Owner::RecBar);
+            self.dpy.remove(Owner::RecBar);
         }
         r.bar_place = None;
         r.bar_drag = None;
         for (i, _, _) in std::mem::take(&mut r.marks) {
-            self.wl.remove(Owner::RecMark(i));
+            self.dpy.remove(Owner::RecMark(i));
         }
-        let _ = self.wl.conn.flush();
+        self.dpy.flush();
     }
 
     /// Input on the bar.
@@ -885,7 +881,7 @@ impl App {
         match ev {
             Input::Enter(at) | Input::Motion(at, _) => {
                 bar.pointer_motion(Some(p(at)));
-                if self.wl.relative.is_none()
+                if !self.dpy.has_relative()
                     && let Some(d) = &mut r.bar_drag
                 {
                     // (no relative motion: where the pointer is on the bar,
@@ -900,10 +896,8 @@ impl App {
             Input::Button(0x110, true, at) if !bar.on_button(p(at)) => {
                 if let Some((_, place)) = &r.bar_place {
                     r.bar_drag = Some(BarDrag { from: *place, grab: p(at), moved: (0.0, 0.0) });
-                } else if let (Some(s), Some(seat)) = (self.wl.surf(Owner::RecBar), self.wl.seats.seats().next())
-                    && let Some(w) = &s.window
-                {
-                    w.move_(&seat, self.wl.serial);
+                } else {
+                    self.dpy.start_move(Owner::RecBar);
                 }
             }
             Input::Button(0x110, pressed, at) => {
@@ -941,27 +935,27 @@ impl App {
         let y = ((d.from.1 as f64 + d.moved.1).round() as i32).clamp(0, (m.rect.h - size.1 as i32).max(0));
         if (x, y) != *at {
             *at = (x, y);
-            self.wl.place_layer(Owner::RecBar, (x, y), size);
+            self.dpy.place_layer(Owner::RecBar, (x, y), size);
         }
     }
 
     /// Draw the bar and the marks, if they changed.
     pub(super) fn redraw_recording(&mut self) {
         let Some(r) = &mut self.recording else { return };
-        for i in 0..self.wl.surfaces.len() {
-            let scale = self.wl.surfaces[i].scale();
-            match self.wl.surfaces[i].owner {
+        for owner in self.dpy.owners() {
+            let Some((_, scale)) = self.dpy.surface(owner) else { continue };
+            match owner {
                 Owner::RecBar => {
                     if let Some(bar) = &mut r.bar {
                         bar.set_scale(scale);
-                        self.wl.redraw(i, 0, &mut BarPaint(bar));
+                        self.dpy.redraw(owner, 0, &mut BarPaint(bar));
                     }
                 }
                 Owner::RecMark(n) => {
                     // (drawn once; a new scale draws it again)
                     if let Some(m) = r.marks.iter_mut().find(|m| m.0 == n)
                         && m.2 != scale
-                        && self.wl.redraw(i, 0, &mut MarkPaint { corner: m.1, scale, damaged: true })
+                        && self.dpy.redraw(owner, 0, &mut MarkPaint { corner: m.1, scale, damaged: true })
                     {
                         m.2 = scale;
                     }
@@ -1010,15 +1004,15 @@ impl App {
             "path" => {
                 let text = Arc::new(path.to_string_lossy().into_owned().into_bytes());
                 let mimes: Vec<String> = TEXT_MIMES.iter().map(|m| m.to_string()).collect();
-                if self.one_shot && self.wl.clipboard.without_focus() && util::have("wl-copy") {
-                    deliver::hand_to_wl_copy(&mimes[0], &text)
+                if let Some(helper) = self.dpy.copy_helper().filter(|_| self.one_shot) {
+                    deliver::hand_to(helper, &mimes[0], &text)
                 } else {
-                    self.wl.clipboard.offer_each(mimes.into_iter().map(|m| (m, text.clone())).collect(), self.wl.serial, &self.wl.qh)
+                    self.dpy.offer_each(mimes.into_iter().map(|m| (m, text.clone())).collect())
                 }
             }
             _ => false,
         };
-        let _ = self.wl.conn.flush();
+        self.dpy.flush();
         match cfg.open_after.as_str() {
             "image" => {
                 deliver::open_file(path);
@@ -1059,14 +1053,14 @@ impl App {
     /// A file on the clipboard, to paste into file managers and chats.
     fn copy_file(&mut self, path: &Path) -> bool {
         let uri = util::file_uri(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
-        if self.one_shot && self.wl.clipboard.without_focus() && util::have("wl-copy") {
-            return deliver::hand_to_wl_copy("text/uri-list", format!("{uri}\r\n").as_bytes());
+        if let Some(helper) = self.dpy.copy_helper().filter(|_| self.one_shot) {
+            return deliver::hand_to(helper, "text/uri-list", format!("{uri}\r\n").as_bytes());
         }
         let parts = vec![
             ("text/uri-list".to_string(), Arc::new(format!("{uri}\r\n").into_bytes())),
             ("x-special/gnome-copied-files".to_string(), Arc::new(format!("copy\n{uri}").into_bytes())),
         ];
-        self.wl.clipboard.offer_each(parts, self.wl.serial, &self.wl.qh)
+        self.dpy.offer_each(parts)
     }
 }
 

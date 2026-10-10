@@ -9,11 +9,11 @@ use super::{App, layer_namespace, names_window};
 use crate::capture::{self, Grabbed, Plan};
 use crate::geom::{IPoint, IRect};
 use crate::image::Image;
+use crate::platform::{Monitor, Owner};
 use crate::template::Shot;
 use crate::timing::Clock;
 use crate::ui::overlay::Output;
 use crate::ui::session::{Request, Screen, Session, Setup};
-use crate::wayland::{Monitor, Owner};
 
 /// How long an instant capture waits for the compositor to describe the
 /// desktop (the active window, where the pointer is).
@@ -143,7 +143,7 @@ impl App {
         let instant = mode != Mode::Region;
         let what = if job.record { "recording".to_string() } else { format!("{} capture", mode.name()) };
         self.clock = Clock::since(what, job.asked);
-        let monitors = self.wl.monitors();
+        let monitors = self.dpy.monitors();
         if monitors.is_empty() {
             return self.fail("no monitors found");
         }
@@ -155,7 +155,7 @@ impl App {
             cursor: if instant { self.cfg.include_pointer } else { self.cfg.region_pointer == "shown" },
             both: !instant && self.cfg.region_pointer == "toggle",
         };
-        let order = capture::backend_order(&self.cfg.backend, self.wl.screencopy.is_some());
+        let order = capture::backend_order(&self.cfg.backend, self.dpy.has_screencopy());
         // Ask the compositor about its windows now, while they are as captured.
         self.desktop = None;
         self.desktop_rx = None;
@@ -173,7 +173,7 @@ impl App {
             // screen is taken: the first frame can go up as the pixels arrive.
             let namespace = layer_namespace();
             for (o, mon) in monitors.iter().enumerate() {
-                if let Err(e) = self.wl.add_overlay(Owner::Overlay(o), mon, &namespace) {
+                if let Err(e) = self.dpy.add_overlay(Owner::Overlay(o), mon, &namespace) {
                     return self.fail(&e);
                 }
             }
@@ -191,7 +191,7 @@ impl App {
             let backend = p.rest.remove(0);
             p.backend = backend;
             if backend == "screencopy" {
-                match self.wl.start_screencopy(&p.monitors, p.plan.cursor, p.plan.both) {
+                match self.dpy.start_screencopy(&p.monitors, p.plan.cursor, p.plan.both) {
                     Ok(()) => {
                         p.source = Source::Screencopy;
                         return true;
@@ -225,10 +225,10 @@ impl App {
     pub(super) fn poll_capture(&mut self) {
         let Some(p) = &mut self.pending else { return };
         let result = match &p.source {
-            Source::Screencopy if self.wl.screencopy_done() => {
+            Source::Screencopy if self.dpy.screencopy_done() => {
                 let mut out = Vec::new();
                 let mut err = None;
-                for (monitor, cursor, r) in self.wl.take_screencopy() {
+                for (monitor, cursor, r) in self.dpy.take_screencopy() {
                     match r {
                         Ok(picture) => out.push(Grabbed { monitor, cursor, picture }),
                         Err(e) => err = Some(e),
@@ -349,7 +349,7 @@ impl App {
                     shot.mode = "window".into();
                     w.rect
                 }
-                None => return self.fail("No active window to capture. Active-window capture needs KDE Plasma, Sway or Hyprland."),
+                None => return self.fail("No active window to capture. Active-window capture needs KDE Plasma, Sway, Hyprland or an X11 window manager."),
             },
             _ => virt,
         };

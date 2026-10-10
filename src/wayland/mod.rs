@@ -35,50 +35,9 @@ use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1;
 
 use crate::app::App;
 use crate::geom::{Damage, IRect};
-use crate::image::{Canvas, Image};
+use crate::image::Image;
+pub use crate::platform::{Monitor, Output, Owner, Painted};
 use protocols::{BufferData, FractionalData, NoEvents, RelativeData, TextInputData};
-
-/// A monitor, as the compositor describes it.
-#[derive(Clone, Debug)]
-pub struct Monitor {
-    pub output: wl_output::WlOutput,
-    /// connector name: DP-1, HDMI-A-1, ...
-    pub name: String,
-    /// where it is in the desktop, in logical pixels
-    pub rect: IRect,
-    /// its integer scale (the real one may be fractional)
-    pub scale: i32,
-}
-
-/// Whose a surface is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Owner {
-    /// the capture overlay on the session's monitor `.0`
-    Overlay(usize),
-    /// a pinned capture, by id
-    Pin(u32),
-    /// a popup menu, by id
-    Menu(u32),
-    /// an annotation editor's window, by id
-    Editor(u32),
-    /// the settings window
-    Settings,
-    /// the bar with a recording's controls
-    RecBar,
-    /// a corner mark round the area being recorded (0-3)
-    RecMark(u8),
-}
-
-/// Something drawn on surfaces: what changed, and how to draw a part of it.
-pub trait Painted {
-    /// What changed on part `part` since it was last drawn (device pixels).
-    fn damage(&mut self, part: usize) -> Damage;
-    /// Draw `region` (device pixels) of part `part` into `target`, whose
-    /// top left is at `origin` (device pixels).
-    fn paint(&self, part: usize, target: &mut Canvas<'_>, origin: (i32, i32), region: IRect);
-    /// The size of part `part`'s buffer, in device pixels.
-    fn buffer_size(&self, part: usize) -> (u32, u32);
-}
 
 struct Buf {
     img: Image,
@@ -283,7 +242,7 @@ impl Wayland {
                 continue;
             }
             let name = info.name.clone().unwrap_or_else(|| format!("{}-{}", info.make, info.id));
-            out.push(Monitor { output, name, rect: IRect::new(x, y, w, h), scale });
+            out.push(Monitor { output: Output::Wayland(output), name, rect: IRect::new(x, y, w, h), scale });
         }
         out
     }
@@ -297,7 +256,7 @@ impl Wayland {
         let mut layer = None;
         let mut window = None;
         if let Some(ls) = &self.layer_shell {
-            let l = ls.create_layer_surface(qh, surface.clone(), Layer::Overlay, Some(namespace), Some(&monitor.output));
+            let l = ls.create_layer_surface(qh, surface.clone(), Layer::Overlay, Some(namespace), monitor.wl_output());
             l.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
             l.set_exclusive_zone(-1);
             l.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
@@ -307,7 +266,7 @@ impl Wayland {
             let w = xdg.create_window(surface.clone(), WindowDecorations::None, qh);
             w.set_title("Flatshot");
             w.set_app_id("flatshot");
-            w.set_fullscreen(Some(&monitor.output));
+            w.set_fullscreen(monitor.wl_output());
             window = Some(w);
         } else {
             surface.destroy();
@@ -346,7 +305,7 @@ impl Wayland {
         let Some(ls) = &self.layer_shell else { return false };
         let qh = &self.qh;
         let surface = self.compositor.create_surface(qh);
-        let l = ls.create_layer_surface(qh, surface.clone(), Layer::Top, Some(namespace), Some(&monitor.output));
+        let l = ls.create_layer_surface(qh, surface.clone(), Layer::Top, Some(namespace), monitor.wl_output());
         l.set_anchor(Anchor::TOP | Anchor::LEFT);
         l.set_margin(at.1, 0, 0, at.0);
         l.set_size(size.0.max(1), size.1.max(1));
@@ -374,7 +333,7 @@ impl Wayland {
         if click_through && let Ok(region) = smithay_client_toolkit::compositor::Region::new(&self.compositor) {
             surface.set_input_region(Some(region.wl_region()));
         }
-        let l = ls.create_layer_surface(qh, surface.clone(), Layer::Overlay, Some(namespace), Some(&monitor.output));
+        let l = ls.create_layer_surface(qh, surface.clone(), Layer::Overlay, Some(namespace), monitor.wl_output());
         l.set_anchor(Anchor::TOP | Anchor::LEFT);
         l.set_margin(at.1, 0, 0, at.0);
         l.set_size(size.0.max(1), size.1.max(1));
@@ -559,31 +518,9 @@ impl Wayland {
         if todo.is_empty() {
             return false;
         }
-        let full = IRect::new(0, 0, w as i32, h as i32);
-        let rects = todo.rects_in(full);
         let buf = &mut s.bufs[idx];
         let started = std::time::Instant::now();
-        for r in &rects {
-            if *r == full {
-                ui.paint(part, &mut buf.img.canvas(), (0, 0), *r);
-                continue;
-            }
-            // A part: drawn on its own (everything outside it clipped
-            // away), then copied into place.
-            let len = r.w as usize * r.h as usize * 4;
-            if s.scratch.len() < len {
-                s.scratch.resize(len, 0);
-            }
-            let Some(mut c) = Canvas::new(&mut s.scratch, r.w as u32, r.h as u32) else { continue };
-            ui.paint(part, &mut c, (r.x, r.y), *r);
-            let (src, stride) = (c.data(), r.w as usize * 4);
-            let dst_stride = buf.img.stride();
-            let data = buf.img.data_mut();
-            for row in 0..r.h as usize {
-                let at = (r.y as usize + row) * dst_stride + r.x as usize * 4;
-                data[at..at + stride].copy_from_slice(&src[row * stride..(row + 1) * stride]);
-            }
-        }
+        let rects = crate::platform::paint_damage(&mut buf.img, &mut s.scratch, &todo, ui, part);
         if crate::timing::enabled() && todo.is_full() {
             crate::timing::log(format!("painted {w} × {h} in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0));
         }
@@ -647,6 +584,133 @@ impl Wayland {
         {
             self.text_input = Some(m.get_text_input(seat, &self.qh, TextInputData));
         }
+    }
+}
+
+impl Wayland {
+    // -- what the app asks through platform::Display -----------------------------------
+
+    pub fn surface(&self, owner: Owner) -> Option<((u32, u32), f32)> {
+        self.surf(owner).map(|s| (s.logical, s.scale()))
+    }
+
+    pub fn owners(&self) -> Vec<Owner> {
+        self.surfaces.iter().map(|s| s.owner).collect()
+    }
+
+    pub fn redraw_owner(&mut self, owner: Owner, part: usize, ui: &mut dyn Painted) -> bool {
+        match self.surfaces.iter().position(|s| s.owner == owner) {
+            Some(i) => self.redraw(i, part, ui),
+            None => false,
+        }
+    }
+
+    pub fn set_min_size(&mut self, owner: Owner, size: (u32, u32)) {
+        if let Some(w) = self.surf(owner).and_then(|s| s.window.as_ref()) {
+            w.set_min_size(Some(size));
+        }
+    }
+
+    pub fn set_title(&mut self, owner: Owner, title: &str) {
+        if let Some(w) = self.surf(owner).and_then(|s| s.window.as_ref()) {
+            w.set_title(title.to_string());
+        }
+    }
+
+    pub fn set_transparent(&mut self, owner: Owner) {
+        if let Some(s) = self.surfaces.iter_mut().find(|s| s.owner == owner) {
+            s.transparent = true;
+        }
+    }
+
+    pub fn flush(&self) {
+        let _ = self.conn.flush();
+    }
+
+    pub fn pointer_owner(&self) -> Option<Owner> {
+        self.pointer_on.as_ref().and_then(|id| self.owner_of(id))
+    }
+
+    pub fn keyboard_owner(&self) -> Option<Owner> {
+        self.keyboard_on.as_ref().and_then(|id| self.owner_of(id))
+    }
+
+    pub fn text_owner(&self) -> Option<Owner> {
+        self.text_focus.as_ref().and_then(|id| self.owner_of(id))
+    }
+
+    pub fn set_cursor(&mut self, owner: Owner, shape: crate::ui::session::CursorShape) {
+        use crate::ui::session::CursorShape;
+        use smithay_client_toolkit::seat::pointer::CursorIcon;
+        let icon = match shape {
+            CursorShape::Crosshair => CursorIcon::Crosshair,
+            CursorShape::Text => CursorIcon::Text,
+            CursorShape::Move => CursorIcon::Move,
+            CursorShape::Hand => CursorIcon::Pointer,
+            CursorShape::Arrow => CursorIcon::Default,
+            CursorShape::ResizeNS => CursorIcon::NsResize,
+            CursorShape::ResizeEW => CursorIcon::EwResize,
+            CursorShape::ResizeNWSE => CursorIcon::NwseResize,
+            CursorShape::ResizeNESW => CursorIcon::NeswResize,
+        };
+        let Some(i) = self.surfaces.iter().position(|s| s.owner == owner) else { return };
+        if self.surfaces[i].cursor != Some(icon)
+            && let Some(p) = &self.pointer
+            && p.set_cursor(&self.conn, icon).is_ok()
+        {
+            self.surfaces[i].cursor = Some(icon);
+        }
+    }
+
+    pub fn start_move(&mut self, owner: Owner) -> bool {
+        match (self.surf(owner).and_then(|s| s.window.as_ref()), self.seats.seats().next()) {
+            (Some(w), Some(seat)) => {
+                w.move_(&seat, self.serial);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn has_relative(&self) -> bool {
+        self.relative.is_some()
+    }
+
+    pub fn can_place(&self) -> bool {
+        self.layer_shell.is_some()
+    }
+
+    pub fn offer(&mut self, mimes: Vec<String>, slot: Arc<crate::clipboard::Slot>) -> bool {
+        self.clipboard.offer(mimes, slot, self.serial, &self.qh)
+    }
+
+    pub fn offer_each(&mut self, parts: Vec<(String, Arc<Vec<u8>>)>) -> bool {
+        self.clipboard.offer_each(parts, self.serial, &self.qh)
+    }
+
+    pub fn holds(&self) -> bool {
+        self.clipboard.holds()
+    }
+
+    pub fn withdraw(&mut self) {
+        self.clipboard.withdraw();
+    }
+
+    pub fn without_focus(&self) -> bool {
+        self.clipboard.without_focus()
+    }
+
+    pub fn paste_text(&mut self, wake: crate::ui::session::Waker) -> std::sync::mpsc::Receiver<Option<String>> {
+        self.clipboard.paste_text(wake)
+    }
+
+    pub fn tick(&mut self) {
+        // (long since forgotten by the compositor: safe to drop here)
+        self.retired.retain(|(t, _)| t.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    pub fn next_deadline(&self) -> Option<std::time::Instant> {
+        None
     }
 }
 

@@ -66,6 +66,9 @@ const SCRIPT: &str = r#"
 
 /// Ask whichever compositor this is; None if none can answer in `timeout`.
 pub fn query(timeout: Duration) -> Option<Desktop> {
+    if crate::x11::chosen() {
+        return crate::x11::windows::query();
+    }
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
         return hyprland();
     }
@@ -77,7 +80,7 @@ pub fn query(timeout: Duration) -> Option<Desktop> {
 
 /// Is there a compositor to ask (without asking)?
 pub fn supported() -> bool {
-    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() || std::env::var_os("SWAYSOCK").is_some() || crate::dbus::has_owner(KWIN)
+    crate::x11::chosen() || std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() || std::env::var_os("SWAYSOCK").is_some() || crate::dbus::has_owner(KWIN)
 }
 
 // -- KWin -----------------------------------------------------------------------------

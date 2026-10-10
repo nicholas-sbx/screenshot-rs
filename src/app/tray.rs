@@ -12,15 +12,18 @@ use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::{Interest, Mode as PollMode, PostAction};
 
-use super::{App, Job, Mode};
+use super::{App, Input, Job, Mode};
 use crate::cli::{self, Args};
 use crate::config;
 use crate::desktop::notify::{self, NoteEvent, Notifier};
 use crate::desktop::shortcuts::{self, ShortcutEvent};
 use crate::desktop::tray::{MenuItem, Tray, TrayEvent};
-use crate::geom::IRect;
+use crate::geom::{Damage, IRect, Point};
+use crate::image::{Canvas, Image};
 use crate::ipc;
+use crate::platform::{Owner, Painted, TRAY_MENU};
 use crate::timing;
+use crate::ui::menu::{Choice, Entry, Menu};
 
 /// Let the tray's menu (or a notification) fade before the screen is frozen.
 const MENU_DELAY: Duration = Duration::from_millis(220);
@@ -37,6 +40,8 @@ pub enum Event {
     Keys(HashMap<String, String>),
     /// KDE's shortcuts are registered, or can't be
     ShortcutsReady(bool),
+    /// no D-Bus tray: why
+    NoTray(String),
 }
 
 /// What a notification's buttons act on.
@@ -60,6 +65,68 @@ pub struct TrayState {
     pub shortcuts: Option<bool>,
     /// their keys, for the menu
     keys: HashMap<String, String>,
+    /// the icon in an X11 panel's tray (XEmbed), without a D-Bus tray
+    embedded: Option<Embedded>,
+}
+
+/// The tray icon embedded in an X11 panel, and its menu (ours: the panel
+/// draws neither).
+#[derive(Default)]
+struct Embedded {
+    menu: Option<Menu>,
+    recording: bool,
+    /// as last drawn: its size (device pixels) and whether recording
+    drawn: Option<((u32, u32), bool)>,
+    image: Option<Image>,
+}
+
+/// The menu's keys, as the popup menu has them.
+const MENU_KEYS: [&str; 12] =
+    ["region", "monitor", "screen", "last", "pin", "record", "region-delayed", "window-delayed", "annotate", "folder", "settings", "quit"];
+
+struct IconPaint<'a> {
+    e: &'a mut Embedded,
+    size: (u32, u32),
+}
+
+impl Painted for IconPaint<'_> {
+    fn damage(&mut self, _: usize) -> Damage {
+        let now = (self.size, self.e.recording);
+        if self.e.drawn == Some(now) {
+            return Damage::new();
+        }
+        self.e.image = crate::desktop::tray::icon_image(self.size.0.min(self.size.1).max(1), self.e.recording);
+        self.e.drawn = Some(now);
+        Damage::full()
+    }
+
+    fn paint(&self, _: usize, target: &mut Canvas<'_>, origin: (i32, i32), region: IRect) {
+        // (centred, on nothing)
+        let (tw, stride) = (target.width() as usize, target.stride());
+        let data = target.data_mut();
+        data.fill(0);
+        let Some(img) = &self.e.image else { return };
+        let off = ((self.size.0 as i32 - img.width() as i32) / 2, (self.size.1 as i32 - img.height() as i32) / 2);
+        for row in 0..region.h {
+            let y = region.y + row - off.1;
+            if y < 0 || y >= img.height() as i32 {
+                continue;
+            }
+            let src = img.row(y as u32);
+            for col in 0..region.w.min(tw as i32) {
+                let x = region.x + col - off.0;
+                if x < 0 || x >= img.width() as i32 {
+                    continue;
+                }
+                let at = (region.y + row - origin.1) as usize * stride + (region.x + col - origin.0) as usize * 4;
+                data[at..at + 4].copy_from_slice(&src[x as usize * 4..x as usize * 4 + 4]);
+            }
+        }
+    }
+
+    fn buffer_size(&self, _: usize) -> (u32, u32) {
+        self.size
+    }
 }
 
 /// The menu: (key, label); shortcuts' keys are filled in when known.
@@ -170,7 +237,9 @@ impl App {
                 Ok(t) => {
                     let _ = tx.send(Event::TrayShown(t));
                 }
-                Err(e) => crate::warn!("{e}; running in the background anyway"),
+                Err(e) => {
+                    let _ = tx.send(Event::NoTray(e));
+                }
             }
             let to_main = tx.clone();
             match shortcuts::start(move |e| {
@@ -209,6 +278,15 @@ impl App {
                 }
             }
             Event::TrayShown(t) => self.tray.tray = Some(t),
+            Event::NoTray(why) => match self.dpy.add_tray_icon() {
+                // (an X11 panel without the D-Bus tray: its own)
+                Ok(()) => {
+                    timing::log("tray icon embedded in the panel (XEmbed)");
+                    self.tray.embedded = Some(Embedded { recording: self.is_recording(), ..Default::default() });
+                }
+                Err(e) if self.dpy.is_x11() => crate::warn!("{why}; {e}: running in the background anyway"),
+                Err(_) => crate::warn!("{why}; running in the background anyway"),
+            },
             Event::ShortcutsReady(ok) => {
                 self.tray.shortcuts = Some(ok);
                 self.shortcuts_ready(ok);
@@ -264,6 +342,94 @@ impl App {
     pub(super) fn refresh_tray_menu(&mut self) {
         if let Some(t) = &self.tray.tray {
             t.set_items(menu_items(&self.tray.keys, self.recording.is_some()));
+        }
+        if let Some(e) = &mut self.tray.embedded {
+            e.recording = self.recording.is_some();
+        }
+    }
+
+    /// A click on the embedded tray icon: as on the D-Bus one, and the
+    /// right button opens the menu.
+    pub(super) fn tray_icon_input(&mut self, ev: Input) {
+        match ev {
+            Input::Button(0x110, true, _) => self.tray_event(Event::Tray(TrayEvent::Activate)),
+            Input::Button(0x112, true, _) => self.tray_event(Event::Tray(TrayEvent::SecondaryActivate)),
+            Input::Button(0x111, true, at) => self.open_tray_menu(at),
+            _ => {}
+        }
+    }
+
+    fn open_tray_menu(&mut self, at: (f64, f64)) {
+        self.dpy.remove(Owner::Menu(TRAY_MENU));
+        let items = menu_items(&self.tray.keys, self.is_recording());
+        let entries = items
+            .iter()
+            .filter_map(|i| match MENU_KEYS.iter().find(|k| **k == i.key) {
+                Some(k) => Some(Entry::new(k, &i.label, &crate::keyseq::label(&i.keys))),
+                None if i.key.is_empty() => Some(Entry::separator()),
+                None => None,
+            })
+            .collect();
+        let mut menu = Menu::new(entries);
+        if let Some((_, scale)) = self.dpy.surface(Owner::TrayIcon) {
+            menu.set_scale(scale);
+        }
+        let anchor = IRect::new(at.0.round() as i32, at.1.round() as i32, 1, 1);
+        match self.dpy.add_popup(Owner::Menu(TRAY_MENU), Owner::TrayIcon, anchor, menu.size()) {
+            Ok(()) => {
+                if let Some(e) = &mut self.tray.embedded {
+                    e.menu = Some(menu);
+                }
+            }
+            Err(e) => crate::warn!("no menu: {e}"),
+        }
+    }
+
+    pub(super) fn tray_menu_input(&mut self, ev: Input) {
+        let Some(menu) = self.tray.embedded.as_mut().and_then(|e| e.menu.as_mut()) else { return };
+        let p = |at: (f64, f64)| Point::new(at.0 as f32, at.1 as f32);
+        let choice = match ev {
+            Input::Enter(at) | Input::Motion(at, _) => {
+                menu.motion(p(at));
+                Choice::None
+            }
+            Input::Leave => {
+                menu.leave();
+                Choice::None
+            }
+            Input::Button(_, true, at) => menu.press(p(at)),
+            Input::Button(_, false, at) => menu.release(p(at)),
+            Input::Key(k) => menu.key(&k),
+            _ => Choice::None,
+        };
+        match choice {
+            Choice::None => {}
+            Choice::Close => self.close_tray_menu(),
+            Choice::Chosen(key) => {
+                self.close_tray_menu();
+                self.tray_event(Event::Tray(TrayEvent::Menu(key.to_string())));
+            }
+        }
+    }
+
+    pub(super) fn close_tray_menu(&mut self) {
+        self.dpy.remove(Owner::Menu(TRAY_MENU));
+        if let Some(e) = &mut self.tray.embedded {
+            e.menu = None;
+        }
+    }
+
+    /// Draw the embedded tray icon and its menu, if they changed.
+    pub(super) fn redraw_tray_icon(&mut self) {
+        let Some(e) = &mut self.tray.embedded else { return };
+        if let Some((logical, scale)) = self.dpy.surface(Owner::TrayIcon) {
+            let size = ((logical.0 as f32 * scale).round() as u32, (logical.1 as f32 * scale).round() as u32);
+            self.dpy.redraw(Owner::TrayIcon, 0, &mut IconPaint { e, size });
+        }
+        let Some(e) = &mut self.tray.embedded else { return };
+        if let (Some(menu), Some((_, scale))) = (e.menu.as_mut(), self.dpy.surface(Owner::Menu(TRAY_MENU))) {
+            menu.set_scale(scale);
+            self.dpy.redraw(Owner::Menu(TRAY_MENU), 0, &mut super::pins::MenuPaint(menu));
         }
     }
 
@@ -370,7 +536,7 @@ impl App {
             Ok(img) => img,
             Err(e) => return crate::warn!("can't pin {}: {e}", path.display()),
         };
-        let now: Vec<(String, IRect, f64)> = self.wl.monitors().into_iter().map(|m| (m.name, m.rect, m.scale as f64)).collect();
+        let now: Vec<(String, IRect, f64)> = self.dpy.monitors().into_iter().map(|m| (m.name, m.rect, m.scale as f64)).collect();
         let same = at.is_some() && now == layout;
         self.pin(std::sync::Arc::new(image), at.filter(|_| same), at.map(|a| (a.w as u32, a.h as u32)));
     }

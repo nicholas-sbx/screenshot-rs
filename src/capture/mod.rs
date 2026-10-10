@@ -50,6 +50,14 @@ impl Plan {
 /// "auto" picks by desktop).
 pub fn backend_order(preferred: &str, has_screencopy: bool) -> Vec<&'static str> {
     let named = crate::config::BACKENDS.iter().find(|b| **b == preferred && **b != "auto" && **b != "qt").copied();
+    if crate::x11::chosen() {
+        // X11 lets the screen be read directly ("qt": the Python version's
+        // name for that); the desktop's tools only when asked for.
+        return match named {
+            Some(b @ ("spectacle" | "gnome-screenshot")) => vec![b, "x11"],
+            _ => vec!["x11"],
+        };
+    }
     if let Some(b) = named {
         return vec![b];
     }
@@ -71,6 +79,7 @@ pub fn backend_order(preferred: &str, has_screencopy: bool) -> Vec<&'static str>
 /// through the Wayland connection). Blocks: run it off the event loop.
 pub fn grab(backend: &str, plan: &Plan) -> Result<Vec<Grabbed>, String> {
     match backend {
+        "x11" => crate::x11::capture::grab(plan),
         "kwin" => grab_kwin(plan),
         "portal" => split_all(plan, |_| portal::screenshot()),
         "grim" | "spectacle" | "gnome-screenshot" => {
