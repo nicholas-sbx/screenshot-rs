@@ -24,6 +24,8 @@ pub struct EditorWin {
     dialog: Option<mpsc::Receiver<Result<Option<PathBuf>, String>>>,
     /// the clipboard's text, being read for it
     paste: Option<mpsc::Receiver<Option<String>>>,
+    /// the window's least size, as last set
+    min: (u32, u32),
 }
 
 struct EditorPaint<'a>(&'a mut Editor);
@@ -81,7 +83,8 @@ impl App {
         let (mon, dpr) = monitors.first().map(|m| ((m.rect.w as f32, m.rect.h as f32), m.scale as f32)).unwrap_or(((1920.0, 1080.0), 1.0));
         let target = save_to.unwrap_or_else(|| path.to_path_buf());
         let ed = Editor::new(image, dpr, target, crate::config::load());
-        let size = initial_size((ed.image.width() as f32 / dpr, ed.image.height() as f32 / dpr), mon, ed.bar_width().ceil());
+        let min = ed.min_size();
+        let size = initial_size((ed.image.width() as f32 / dpr, ed.image.height() as f32 / dpr), mon, min.0 as f32);
         self.next_editor += 1;
         let id = self.next_editor;
         let title = ed.title();
@@ -89,8 +92,9 @@ impl App {
             crate::warn!("can't open the editor: {e}");
             return false;
         }
-        self.dpy.set_min_size(Owner::Editor(id), (480, 360));
-        self.editors.push(EditorWin { id, ed, title, dialog: None, paste: None });
+        // (never so small its bars overlap)
+        self.dpy.set_min_size(Owner::Editor(id), min);
+        self.editors.push(EditorWin { id, ed, title, dialog: None, paste: None, min });
         self.dpy.flush();
         true
     }
@@ -187,6 +191,12 @@ impl App {
         if title != w.title {
             self.dpy.set_title(Owner::Editor(id), &title);
             w.title = title;
+        }
+        // (and its least size the bars: the picture bar comes and goes)
+        let min = w.ed.min_size();
+        if min != w.min {
+            w.min = min;
+            self.dpy.set_min_size(Owner::Editor(id), min);
         }
     }
 

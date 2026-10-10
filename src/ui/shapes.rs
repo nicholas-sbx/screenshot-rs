@@ -47,6 +47,8 @@ pub enum Tool {
     Pixelate,
     Blur,
     Counter,
+    /// the editor's: crop, cut out, rotate and resize the picture
+    Crop,
 }
 
 /// (tool, id, label), in toolbar order.
@@ -65,6 +67,7 @@ pub const TOOLS: &[(Tool, &str, &str)] = &[
     (Tool::Pixelate, "pixelate", "Pixelate"),
     (Tool::Blur, "blur", "Blur"),
     (Tool::Counter, "counter", "Counter"),
+    (Tool::Crop, "crop", "Crop, cut out, rotate and resize"),
 ];
 
 impl Tool {
@@ -196,6 +199,8 @@ pub enum Kind {
     /// A deleted drawing: nothing, in place of the one it replaces, so undo
     /// brings that back.
     Removed,
+    /// The editor's picture changed (cropped, turned, ...): an undo step.
+    Step(std::rc::Rc<crate::ui::picture::Step>),
 }
 
 /// A drawing. One that's moved, resized, restyled, removed or its text
@@ -244,20 +249,26 @@ impl Shape {
         Shape { kind: Kind::Counter { pos, number }, color, size, hidden: false, replaces: None }
     }
 
+    /// A change to the editor's picture, as an undo step.
+    pub fn step(step: std::rc::Rc<crate::ui::picture::Step>) -> Shape {
+        Shape { kind: Kind::Step(step), color: Color::BLACK, size: 0, hidden: false, replaces: None }
+    }
+
     /// Nothing, in place of drawing `index` (deleted).
     pub fn removed(of: &Shape, index: usize) -> Shape {
         Shape { kind: Kind::Removed, color: of.color, size: of.size, hidden: false, replaces: Some(index) }
     }
 
+    /// Nothing to see or pick up: a deleted drawing, or a step changing the picture.
     pub fn is_removed(&self) -> bool {
-        matches!(self.kind, Kind::Removed)
+        matches!(self.kind, Kind::Removed | Kind::Step(_))
     }
 
     // -- picking it up again (the select tool) -----------------------------------
 
     /// Text and counters can only be moved.
     pub fn resizable(&self) -> bool {
-        !matches!(self.kind, Kind::Text(_) | Kind::Counter { .. } | Kind::Removed)
+        !matches!(self.kind, Kind::Text(_) | Kind::Counter { .. } | Kind::Removed | Kind::Step(_))
     }
 
     /// Resized by its two ends (lines, arrows), not a box.
@@ -274,7 +285,7 @@ impl Shape {
                 let r = COUNTER_RADII[self.size.min(2)];
                 Rect::new(pos.x - r, pos.y - r, 2.0 * r, 2.0 * r)
             }
-            Kind::Removed => Rect::default(),
+            Kind::Removed | Kind::Step(_) => Rect::default(),
             _ => self.drag().map(Drag::rect).unwrap_or_default(),
         }
     }
@@ -285,7 +296,7 @@ impl Shape {
         match &self.kind {
             Kind::Stroke(s) => stroke_reach(s, w),
             // (filled: no stroke past its box)
-            Kind::Text(_) | Kind::Counter { .. } | Kind::Solid(_) | Kind::Pixelate(..) | Kind::Blur(..) | Kind::Removed => 0.0,
+            Kind::Text(_) | Kind::Counter { .. } | Kind::Solid(_) | Kind::Pixelate(..) | Kind::Blur(..) | Kind::Removed | Kind::Step(_) => 0.0,
             _ => w / 2.0,
         }
     }
@@ -295,7 +306,7 @@ impl Shape {
     pub fn contains(&self, pos: Point, slack: f32) -> bool {
         let w = self.width();
         match &self.kind {
-            Kind::Removed => false,
+            Kind::Removed | Kind::Step(_) => false,
             Kind::Stroke(s) => {
                 let reach = stroke_reach(s, w) + slack;
                 match s.points[..] {
@@ -344,7 +355,7 @@ impl Shape {
             Kind::Stroke(s) => s.points.iter_mut().for_each(|p| *p = f(*p)),
             Kind::Text(t) => t.pos = f(t.pos),
             Kind::Counter { pos, .. } => *pos = f(*pos),
-            Kind::Removed => {}
+            Kind::Removed | Kind::Step(_) => {}
             _ => {
                 if let Some(d) = self.drag_mut() {
                     d.start = f(d.start);
@@ -354,6 +365,13 @@ impl Shape {
                 }
             }
         }
+    }
+
+    /// A copy with each point moved through `f`.
+    pub fn mapped(&self, f: impl Fn(Point) -> Point) -> Shape {
+        let mut c = self.copy();
+        c.map_points(f);
+        c
     }
 
     /// A copy moved by `d`.
@@ -455,7 +473,7 @@ impl Shape {
 
     pub fn is_valid(&self) -> bool {
         match &self.kind {
-            Kind::Stroke(_) | Kind::Counter { .. } | Kind::Removed => true,
+            Kind::Stroke(_) | Kind::Counter { .. } | Kind::Removed | Kind::Step(_) => true,
             Kind::Text(t) => !t.edit.text.trim().is_empty() || (t.original.is_some() && self.text_changed()),
             _ => self.drag().is_some_and(Drag::is_valid),
         }
@@ -490,7 +508,7 @@ impl Shape {
                 let r = COUNTER_RADII[self.size.min(2)] + 2.0;
                 Rect::new(pos.x - r, pos.y - r, 2.0 * r, 2.0 * r)
             }
-            Kind::Removed => Rect::default(),
+            Kind::Removed | Kind::Step(_) => Rect::default(),
         }
     }
 
@@ -548,7 +566,7 @@ impl Shape {
                 let fg = if self.color.is_light() { OUTLINE_DARK } else { OUTLINE_LIGHT };
                 p.draw_text(bx, Align::Center, &number.to_string(), text::font((r * 1.05).round(), BOLD), fg);
             }
-            Kind::Removed => {}
+            Kind::Removed | Kind::Step(_) => {}
         }
     }
 }

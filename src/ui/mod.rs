@@ -1,10 +1,12 @@
 //! The capture overlay: what's drawn on it, its panels, and the session
 //! that runs it.
 
+pub mod cropper;
 pub mod editor;
 pub mod menu;
 pub mod overlay;
 pub mod panels;
+pub mod picture;
 pub mod recbar;
 pub mod selection;
 pub mod session;

@@ -31,6 +31,7 @@ pub const BINDINGS: &[(&str, &str, &str, Where)] = &[
     ("tool.pixelate", "Pixelate", "X", Where::Both),
     ("tool.blur", "Blur", "U", Where::Both),
     ("tool.counter", "Counter", "N", Where::Both),
+    ("tool.crop", "Crop, cut out, rotate and resize", "C", Where::Editor),
     ("color.1", "Colour 1: ember", "1", Where::Both),
     ("color.2", "Colour 2: amber", "2", Where::Both),
     ("color.3", "Colour 3: mint", "3", Where::Both),

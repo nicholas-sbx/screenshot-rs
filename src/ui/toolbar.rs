@@ -104,7 +104,7 @@ fn build(v: &View<'_>) -> Vec<Item> {
     let km = v.keymap;
     let recording = v.tool == Tool::Record;
     let mut items = vec![Item::new("grip", Look::Grip, "")];
-    for (tool, id, label) in TOOLS {
+    for (tool, id, label) in TOOLS.iter().filter(|t| t.0 != Tool::Crop) {
         if *tool == Tool::Record && !v.can_record {
             items.push(Item::new("divider.record", Look::Divider, ""));
             continue;
