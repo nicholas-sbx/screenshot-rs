@@ -223,10 +223,10 @@ mod tests {
     fn layout_like_qt() {
         let km = Keymap::new(&BTreeMap::new());
         let t = Toolbar::new(&view(&km));
-        // grip 18, 13 tools of 36, 4 dividers of 13, 8 swatches of 26,
+        // grip 18, 14 tools of 36, 4 dividers of 13, 8 swatches of 26,
         // size 40, codes + snap + undo + redo + pin + screen + close (7 x 36)
-        let widths = 18.0 + 13.0 * 36.0 + 4.0 * 13.0 + 8.0 * 26.0 + 40.0 + 7.0 * 36.0;
-        let n = 1 + 13 + 4 + 8 + 1 + 7;
+        let widths = 18.0 + 14.0 * 36.0 + 4.0 * 13.0 + 8.0 * 26.0 + 40.0 + 7.0 * 36.0;
+        let n = 1 + 14 + 4 + 8 + 1 + 7;
         assert_eq!(t.size, (6.0 + widths + 2.0 * (n as f32 - 1.0) + 8.0, 48.0));
         let undo = t.items.iter().find(|i| i.id == "undo").unwrap();
         assert!(!undo.enabled);

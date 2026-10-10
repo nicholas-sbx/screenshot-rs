@@ -21,7 +21,7 @@ use crate::template::Shot;
 use crate::timing::{self, Clock};
 use crate::ui::overlay::{Code, Grab, Handle, LOUPE_ZOOM, Output, Overlay, Window};
 use crate::ui::panels::{CodeChip, ColorPicker, PickerEvent, RecordPanel, RecordView, place_chips};
-use crate::ui::shapes::{Mods, Shape, Tool, copy_for_editing};
+use crate::ui::shapes::{self, Mods, Shape, Tool, copy_for_editing};
 use crate::ui::snapping::{self, EdgeMaps, py_round};
 use crate::ui::state::{CUSTOM, Desktop, State};
 use crate::ui::textedit::KeyResult;
@@ -396,6 +396,9 @@ impl Session {
             {
                 return handle_cursor(h);
             }
+            if self.st.tool == Tool::Select && !self.st.eyedropper {
+                return ov.cursor_pos.map_or(CursorShape::Arrow, |p| ov.selection.cursor(&ov.annotations, p, 1.0));
+            }
             if self.st.tool == Tool::Text && !self.st.eyedropper { CursorShape::Text } else { CursorShape::Crosshair }
         };
         let float = match ov.grab {
@@ -729,6 +732,16 @@ impl Session {
         if self.st.countdown.is_some() {
             return;
         }
+        if self.st.tool == Tool::Select
+            && let Some(so) = self.selected_on()
+        {
+            let len = self.overlays[so].annotations.len();
+            let ov = &mut self.overlays[so];
+            if ov.selection.key(&mut ov.annotations, press) {
+                self.selection_changed(so, len); // (Delete, or an arrow key nudging it)
+                return;
+            }
+        }
         let save_keys = ctrl && (press.key == key::S || press.key == key::C);
         if self.st.tool == Tool::Record && enter {
             match (0..self.overlays.len()).find(|&i| self.overlays[i].rec_rect.is_some()) {
@@ -1045,6 +1058,9 @@ impl Session {
         if self.st.tool == Tool::Record && tool != Tool::Record {
             self.disarm();
         }
+        if tool != Tool::Select {
+            self.select_on(None);
+        }
         self.st.tool = tool;
         if tool.uses_color() {
             self.st.colour_tool = tool;
@@ -1056,6 +1072,15 @@ impl Session {
     /// back to the last drawing tool, so the colour is used.
     pub fn set_color(&mut self, index: usize) {
         if self.st.tool == Tool::Record {
+            return;
+        }
+        if self.st.tool == Tool::Select
+            && let Some(so) = self.selected_on()
+        {
+            // (it changes the selected drawing)
+            self.st.color_index = index.min(CUSTOM);
+            let color = self.st.color();
+            self.restyle_selected(so, Some(color), None);
             return;
         }
         if !self.st.tool.uses_color() {
@@ -1128,6 +1153,11 @@ impl Session {
         self.st.size = size.min(SIZES.len() - 1);
         if let Some((_, shape)) = &mut self.st.text_edit {
             shape.size = self.st.size;
+        }
+        if self.st.tool == Tool::Select
+            && let Some(so) = self.selected_on()
+        {
+            return self.restyle_selected(so, None, Some(self.st.size));
         }
         self.refresh();
     }
@@ -1206,7 +1236,8 @@ impl Session {
     }
 
     fn next_number(&self) -> u32 {
-        1 + self.overlays.iter().flat_map(|o| o.annotations.iter()).filter(|s| s.is_counter()).count() as u32
+        // (one more than the highest shown: a moved counter keeps its number)
+        shapes::next_number(self.overlays.iter().flat_map(|o| o.annotations.iter()))
     }
 
     // -- recording -----------------------------------------------------------------------
@@ -1374,6 +1405,42 @@ impl Session {
         self.record(o);
     }
 
+    // The select tool: one drawing selected at a time, on one monitor.
+
+    /// Selecting on overlay `o` (None: nowhere): drop what's selected on the others.
+    fn select_on(&mut self, o: Option<usize>) {
+        for (i, ov) in self.overlays.iter_mut().enumerate() {
+            if Some(i) != o {
+                ov.selection.clear(&mut ov.annotations);
+            }
+        }
+    }
+
+    /// The overlay with a drawing selected, if any.
+    fn selected_on(&mut self) -> Option<usize> {
+        (0..self.overlays.len()).find(|&i| {
+            let ov = &mut self.overlays[i];
+            ov.selection.index(&ov.annotations).is_some()
+        })
+    }
+
+    /// The selection on `o` changed its drawings (they were `before` long):
+    /// a changed copy is an undo step.
+    fn selection_changed(&mut self, o: usize, before: usize) {
+        if self.overlays[o].annotations.len() > before {
+            self.overlays[o].undone.clear();
+            self.record(o);
+        }
+        self.refresh();
+    }
+
+    fn restyle_selected(&mut self, o: usize, color: Option<Color>, size: Option<usize>) {
+        let len = self.overlays[o].annotations.len();
+        let ov = &mut self.overlays[o];
+        ov.selection.restyle(&mut ov.annotations, color, size);
+        self.selection_changed(o, len);
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.history.is_empty() || self.st.text_edit.is_some()
     }
@@ -1384,6 +1451,7 @@ impl Session {
 
     pub fn undo(&mut self) {
         self.commit_text();
+        self.select_on(None);
         if let Some(o) = self.history.pop()
             && self.overlays[o].undo()
         {
@@ -1394,6 +1462,7 @@ impl Session {
 
     pub fn redo(&mut self) {
         self.commit_text();
+        self.select_on(None);
         if let Some(o) = self.redo_stack.pop()
             && self.overlays[o].redo()
         {
@@ -1406,10 +1475,7 @@ impl Session {
 
     fn begin_text(&mut self, o: usize, shape: Shape) {
         self.commit_text();
-        if let Some(t) = shape.as_text()
-            && let Some((i, ..)) = &t.replaces
-            && let Some(orig) = self.overlays[o].annotations.get_mut(*i)
-        {
+        if let Some(orig) = shape.replaces.and_then(|i| self.overlays[o].annotations.get_mut(i)) {
             orig.hidden = true; // (the copy is shown while it's edited)
         }
         self.st.text_edit = Some((o, shape));
@@ -1419,10 +1485,9 @@ impl Session {
     /// Finish the text being typed; true if there was one.
     pub fn commit_text(&mut self) -> bool {
         let Some((o, mut shape)) = self.st.text_edit.take() else { return false };
-        let mut replaces = None;
+        let replaces = shape.replaces;
         if let Some(t) = shape.as_text_mut() {
             t.editing = false;
-            replaces = t.replaces.as_ref().map(|r| r.0);
         }
         if o < self.overlays.len() {
             if shape.is_valid() && shape.text_changed() {
@@ -1780,6 +1845,10 @@ impl Session {
 
     fn cancel_gesture(&mut self, o: usize) -> bool {
         let ov = &mut self.overlays[o];
+        if ov.selection.clear(&mut ov.annotations) {
+            self.refresh();
+            return true;
+        }
         if ov.sel_rect.is_some() || ov.active.is_some() || ov.rec_drag.is_some() {
             let spanned = ov.sel_rect.is_some() && self.st.spans;
             ov.sel_origin = None;
@@ -2251,6 +2320,11 @@ impl Session {
         } else if tool == Tool::Counter {
             let n = self.next_number();
             self.commit_shape(o, Shape::counter(pos, self.st.color(), self.st.size, n));
+        } else if tool == Tool::Select {
+            self.select_on(Some(o));
+            let ov = &mut self.overlays[o];
+            ov.selection.press(&mut ov.annotations, pos, mods, 1.0);
+            self.refresh();
         } else {
             self.overlays[o].active = Shape::create(tool, pos, self.st.color(), self.st.size);
         }
@@ -2275,6 +2349,7 @@ impl Session {
             }
         } else if ov.rec_drag.is_some() {
             self.drag_area(o, pos, snap, mods & keyseq::CTRL != 0);
+        } else if ov.selection.motion(&mut ov.annotations, pos, mods) {
         } else if let Some((start, origin)) = ov.text_drag
             && editing_here
         {
@@ -2297,6 +2372,12 @@ impl Session {
         }
         if self.overlays[o].text_drag.take().is_some() {
             return;
+        }
+        if self.overlays[o].selection.dragging() {
+            let len = self.overlays[o].annotations.len();
+            let ov = &mut self.overlays[o];
+            ov.selection.release(&mut ov.annotations);
+            return self.selection_changed(o, len);
         }
         if self.overlays[o].sel_origin.is_some() {
             let mut rect = self.overlays[o].sel_rect.take();

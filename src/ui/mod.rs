@@ -6,6 +6,7 @@ pub mod menu;
 pub mod overlay;
 pub mod panels;
 pub mod recbar;
+pub mod selection;
 pub mod session;
 pub mod settings;
 pub mod shapes;

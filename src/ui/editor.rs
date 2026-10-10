@@ -22,8 +22,9 @@ use crate::render::text::{self, DEMIBOLD, MEDIUM};
 use crate::render::theme::{self, Color, SIZES, SWATCHES};
 use crate::render::{Painter, icons};
 use crate::ui::panels::{ColorPicker, PICKER_SIZE, PickerEvent};
+use crate::ui::selection::{Drawings, DrawingsMut, Selection};
 use crate::ui::session::{Button, CursorShape};
-use crate::ui::shapes::{Mods, Shape, TOOLS, Tool, copy_for_editing};
+use crate::ui::shapes::{self, Mods, Shape, TOOLS, Tool, copy_for_editing};
 use crate::ui::textedit::KeyResult;
 use crate::ui::widgets::{Item, Look, Pointer, layout_row, paint_item};
 
@@ -100,6 +101,43 @@ impl ActionButton {
     }
 }
 
+/// The editor's drawings, as the select tool works on them.
+struct Shapes<'a> {
+    list: &'a mut Vec<(u64, Shape)>,
+    next_id: &'a mut u64,
+}
+
+impl Drawings for Shapes<'_> {
+    fn count(&self) -> usize {
+        self.list.len()
+    }
+    fn get(&self, i: usize) -> &Shape {
+        &self.list[i].1
+    }
+}
+
+/// ... and only looked at.
+struct ShapesRef<'a>(&'a [(u64, Shape)]);
+
+impl Drawings for ShapesRef<'_> {
+    fn count(&self) -> usize {
+        self.0.len()
+    }
+    fn get(&self, i: usize) -> &Shape {
+        &self.0[i].1
+    }
+}
+
+impl DrawingsMut for Shapes<'_> {
+    fn get_mut(&mut self, i: usize) -> &mut Shape {
+        &mut self.list[i].1
+    }
+    fn commit(&mut self, shape: Shape) {
+        self.list.push((*self.next_id, shape));
+        *self.next_id += 1;
+    }
+}
+
 /// The picture and its drawings as last drawn, at the view's zoom.
 type Layer = ((u32, u32, i64, i64, i64, u64), Image);
 
@@ -121,6 +159,8 @@ pub struct Editor {
     next_id: u64,
     active: Option<Shape>,
     text_edit: Option<Shape>,
+    /// the select tool's drawing
+    selection: Selection,
     pub tool: Tool,
     colour_tool: Tool,
     color_index: usize,
@@ -194,6 +234,7 @@ impl Editor {
             next_id: 1,
             active: None,
             text_edit: None,
+            selection: Selection::default(),
             tool,
             colour_tool: tool,
             custom_color,
@@ -407,6 +448,9 @@ impl Editor {
             return;
         }
         self.commit_text();
+        if tool != Tool::Select {
+            self.with_selection(|sel, d| sel.clear(d));
+        }
         self.tool = tool;
         if tool.uses_color() {
             self.colour_tool = tool;
@@ -414,9 +458,37 @@ impl Editor {
         self.refresh_bar();
     }
 
+    /// Work on the drawings with the select tool: a changed copy it adds is
+    /// an undo step.
+    fn with_selection<R>(&mut self, f: impl FnOnce(&mut Selection, &mut dyn DrawingsMut) -> R) -> R {
+        let before = self.shapes.len();
+        let mut sel = std::mem::take(&mut self.selection);
+        let r = f(&mut sel, &mut Shapes { list: &mut self.shapes, next_id: &mut self.next_id });
+        self.selection = sel;
+        if self.shapes.len() > before {
+            self.undone.clear();
+            self.changed();
+        }
+        // (a drawing hidden or shown while it's dragged)
+        self.shapes_version += 1;
+        self.damaged = true;
+        r
+    }
+
+    fn has_selection(&mut self) -> bool {
+        self.tool == Tool::Select && self.with_selection(|sel, d| sel.index(d).is_some())
+    }
+
     /// A colour; from a tool that has none (pixelate, blur), back to the
     /// last drawing tool, so the colour gets used.
     pub fn set_color(&mut self, index: usize) {
+        if self.has_selection() {
+            // (it changes the selected drawing)
+            self.color_index = index.min(CUSTOM);
+            let color = self.color();
+            self.with_selection(|sel, d| sel.restyle(d, Some(color), None));
+            return self.refresh_bar();
+        }
         if !self.tool.uses_color() {
             self.tool = self.colour_tool;
         }
@@ -432,6 +504,10 @@ impl Editor {
         self.size = size.min(SIZES.len() - 1);
         if let Some(s) = &mut self.text_edit {
             s.size = self.size;
+        }
+        if self.has_selection() {
+            let size = self.size;
+            self.with_selection(|sel, d| sel.restyle(d, None, Some(size)));
         }
         self.refresh_bar();
     }
@@ -490,7 +566,8 @@ impl Editor {
     // -- drawing ---------------------------------------------------------------------------
 
     fn next_number(&self) -> u32 {
-        1 + self.shapes.iter().filter(|(_, s)| s.is_counter() && !s.hidden).count() as u32
+        // (one more than the highest shown: a moved counter keeps its number)
+        shapes::next_number(self.shapes.iter().map(|(_, s)| s))
     }
 
     fn commit(&mut self, shape: Shape) {
@@ -510,10 +587,7 @@ impl Editor {
 
     fn begin_text(&mut self, shape: Shape) {
         self.commit_text();
-        if let Some(t) = shape.as_text()
-            && let Some((i, ..)) = &t.replaces
-            && let Some((_, orig)) = self.shapes.get_mut(*i)
-        {
+        if let Some((_, orig)) = shape.replaces.and_then(|i| self.shapes.get_mut(i)) {
             orig.hidden = true; // (the copy shows while it's edited)
             self.shapes_version += 1;
         }
@@ -524,10 +598,9 @@ impl Editor {
     /// Finish the text being typed; true if there was one.
     fn commit_text(&mut self) -> bool {
         let Some(mut shape) = self.text_edit.take() else { return false };
-        let mut replaces = None;
+        let replaces = shape.replaces;
         if let Some(t) = shape.as_text_mut() {
             t.editing = false;
-            replaces = t.replaces.as_ref().map(|r| r.0);
         }
         if shape.is_valid() && shape.text_changed() {
             self.commit(shape);
@@ -555,11 +628,10 @@ impl Editor {
 
     pub fn undo(&mut self) {
         self.commit_text();
+        self.with_selection(|sel, d| sel.clear(d));
         if let Some((id, shape)) = self.shapes.pop() {
-            if let Some(i) = shape.as_text().and_then(|t| t.replaces.as_ref().map(|r| r.0))
-                && let Some((_, orig)) = self.shapes.get_mut(i)
-            {
-                orig.hidden = false; // the text as it was before it was edited
+            if let Some((_, orig)) = shape.replaces.and_then(|i| self.shapes.get_mut(i)) {
+                orig.hidden = false; // the drawing as it was before it was changed
             }
             self.undone.push((id, shape));
             self.changed();
@@ -568,10 +640,9 @@ impl Editor {
 
     pub fn redo(&mut self) {
         self.commit_text();
+        self.with_selection(|sel, d| sel.clear(d));
         if let Some((id, shape)) = self.undone.pop() {
-            if let Some(i) = shape.as_text().and_then(|t| t.replaces.as_ref().map(|r| r.0))
-                && let Some((_, orig)) = self.shapes.get_mut(i)
-            {
+            if let Some((_, orig)) = shape.replaces.and_then(|i| self.shapes.get_mut(i)) {
                 orig.hidden = true;
             }
             self.shapes.push((id, shape));
@@ -641,6 +712,9 @@ impl Editor {
             CursorShape::Hand
         } else if self.tool == Tool::Text && !self.eyedropper {
             CursorShape::Text
+        } else if self.tool == Tool::Select && !self.eyedropper {
+            let pic = self.to_picture(at);
+            self.selection.cursor(&ShapesRef(&self.shapes), pic, self.zoom)
         } else {
             CursorShape::Crosshair
         }
@@ -684,6 +758,10 @@ impl Editor {
                 t.pos = origin + (pic - start);
                 self.damaged = true;
             }
+            return;
+        }
+        if self.selection.dragging() {
+            self.with_selection(|sel, d| sel.motion(d, pic, mods));
             return;
         }
         if let Some(s) = &mut self.active {
@@ -786,6 +864,10 @@ impl Editor {
                 let n = self.next_number();
                 self.commit(Shape::counter(pic, self.color(), self.size, n));
             }
+            Tool::Select => {
+                let zoom = self.zoom;
+                self.with_selection(|sel, d| sel.press(d, pic, mods, zoom));
+            }
             tool => self.active = Shape::create(tool, pic, self.color(), self.size),
         }
         self.damaged = true;
@@ -815,6 +897,10 @@ impl Editor {
         }
         if self.text_drag.take().is_some() {
             return;
+        }
+        if self.selection.dragging() {
+            self.with_selection(|sel, d| sel.release(d));
+            return self.refresh_bar();
         }
         if let Some(shape) = self.active.take() {
             if shape.is_valid() {
@@ -912,6 +998,9 @@ impl Editor {
                 return;
             }
         }
+        if self.has_selection() && self.with_selection(|sel, d| sel.key(d, k)) {
+            return self.refresh_bar(); // (Delete, or an arrow key nudging it)
+        }
         match k.key {
             key::SPACE if !k.repeat => self.space = true,
             key::ESCAPE => {
@@ -921,6 +1010,8 @@ impl Editor {
                     self.close_picker();
                     if self.active.take().is_some() {
                         self.damaged = true;
+                    } else if self.with_selection(|sel, d| sel.clear(d)) {
+                        // (deselected first)
                     } else if !self.commit_text() {
                         self.close();
                     }
@@ -1162,6 +1253,10 @@ impl Editor {
                     SHAPE_HINT
                 } else if self.tool == Tool::Text {
                     TEXT_HINT
+                } else if self.tool == Tool::Select && self.selection.current(&ShapesRef(&self.shapes)).is_some() {
+                    crate::ui::overlay::HINT_SELECTED
+                } else if self.tool == Tool::Select {
+                    crate::ui::overlay::HINT_SELECT
                 } else {
                     HINT
                 };
@@ -1211,16 +1306,24 @@ impl Editor {
         }
         let _ = region;
         // What's being drawn now.
-        if self.active.is_some() || self.text_edit.is_some() {
+        if self.active.is_some() || self.text_edit.is_some() || self.selection.moving().is_some() {
             let mut p = Painter::for_region(target.pixmap_mut(), s, origin);
             p.clip_rect(area);
             p.translate(area.x + self.offset.x, area.y + self.offset.y);
             p.scale_by(self.zoom, self.zoom);
             let (pw, ph) = picture_size(&self.image, self.dpr);
             p.clip_rect(Rect::new(0.0, 0.0, pw, ph));
-            for shape in self.active.iter().chain(self.text_edit.iter()) {
+            for shape in self.active.iter().chain(self.selection.moving()).chain(self.text_edit.iter()) {
                 shape.paint(&mut p, &self.image, self.dpr);
             }
+        }
+        if self.tool == Tool::Select {
+            // The selected drawing's frame and handles (past the picture's edges too).
+            let mut p = Painter::for_region(target.pixmap_mut(), s, origin);
+            p.clip_rect(area);
+            p.translate(area.x + self.offset.x, area.y + self.offset.y);
+            p.scale_by(self.zoom, self.zoom);
+            self.selection.paint_frame(&ShapesRef(&self.shapes), &mut p, self.zoom);
         }
         if self.shapes.is_empty() && self.active.is_none() && self.text_edit.is_none() {
             // Until something is drawn: what to do, quietly, at the bottom.
@@ -1453,6 +1556,38 @@ mod tests {
         let img = ed.render().unwrap();
         assert_eq!(img.size(), (400, 300));
         assert_ne!(img.pixel(10, 40), 0xFF20_4060, "the rectangle's edge is drawn");
+    }
+
+    #[test]
+    fn select_tool() {
+        let mut ed = editor();
+        ed.set_tool(Tool::Rect);
+        let (a, b) = (at(&ed, 50.0, 50.0), at(&ed, 150.0, 100.0));
+        ed.button(Button::Left, true, a, 0);
+        ed.pointer_motion(b, 0);
+        ed.button(Button::Left, false, b, 0);
+        ed.set_tool(Tool::Select);
+        // On its line: selected, then dragged (a copy in its place).
+        let (grab, to) = (at(&ed, 50.0, 60.0), at(&ed, 70.0, 80.0));
+        ed.button(Button::Left, true, grab, 0);
+        ed.pointer_motion(to, 0);
+        ed.button(Button::Left, false, to, 0);
+        assert_eq!(ed.shapes.len(), 2);
+        assert!(ed.shapes[0].1.hidden);
+        assert_eq!(ed.shapes[1].1.geometry(), Rect::new(70.0, 70.0, 100.0, 50.0));
+        // The size buttons restyle it; Delete removes it; undo brings it back.
+        ed.set_size(0);
+        assert_eq!(ed.shapes.len(), 3);
+        assert_eq!(ed.shapes[2].1.size, 0);
+        ed.key(&KeyPress { key: key::DELETE, ..Default::default() });
+        assert!(ed.shapes[3].1.is_removed() && ed.shapes[2].1.hidden);
+        ed.undo();
+        assert!(!ed.shapes[2].1.hidden);
+        // Esc deselects before it would close.
+        ed.button(Button::Left, true, at(&ed, 70.0, 90.0), 0);
+        ed.button(Button::Left, false, at(&ed, 70.0, 90.0), 0);
+        ed.key(&KeyPress { key: key::ESCAPE, ..Default::default() });
+        assert!(!ed.closing && ed.selection.current(&ShapesRef(&ed.shapes)).is_none());
     }
 
     #[test]

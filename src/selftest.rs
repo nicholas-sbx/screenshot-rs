@@ -216,6 +216,7 @@ fn all(tmp: &Path, out: &Option<PathBuf>) -> R {
     let desktop = Arc::new(fake_desktop(1600, 1000)?);
     overlay_basics(tmp, out, desktop.clone())?;
     codes_on_demand(tmp, desktop.clone())?;
+    select_tool(tmp, out, desktop.clone())?;
     keys_and_text(tmp, out, desktop.clone())?;
     pointer_and_panels(tmp, out, desktop.clone())?;
     snapping(tmp, desktop.clone())?;
@@ -383,7 +384,7 @@ fn keys_and_text(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     // Editing a text again: a click on it edits a copy; undo brings the original back.
     tap(&mut s, 0, 0x54, "t", 0);
     click(&mut s, 0, Point::new(1005.0, 770.0), 0);
-    check!(s.st.text_edit.as_ref().is_some_and(|(_, t)| t.as_text().is_some_and(|t| t.replaces.is_some())), "not editing the text again");
+    check!(s.st.text_edit.as_ref().is_some_and(|(_, t)| t.replaces.is_some()), "not editing the text again");
     check!(s.overlays[0].annotations[0].hidden, "the original shows under its copy");
     tap(&mut s, 0, 0x41, "y", 0);
     tap(&mut s, 0, key::ESCAPE, "", 0);
@@ -592,6 +593,79 @@ fn snapping(tmp: &Path, desktop: Arc<Image>) -> R {
     let mut cfg = config::load();
     cfg.snap_edges = false;
     cfg.save().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The select tool: pick a drawing up again, move, resize, nudge, restyle
+/// and delete it, each an undo step.
+fn select_tool(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
+    let mut s = session(
+        test_config(tmp),
+        Request { image: true, ..Default::default() },
+        vec![image_screen(desktop, (1600, 1000))],
+        FakeRecorder { problem: None, span: false },
+    );
+    s.pointer_enter(0, Point::new(800.0, 500.0));
+    tap(&mut s, 0, 0x42, "b", 0);
+    drag(&mut s, 0, Point::new(300.0, 300.0), Point::new(500.0, 400.0), 0);
+    tap(&mut s, 0, 0x4C, "l", 0);
+    drag(&mut s, 0, Point::new(700.0, 300.0), Point::new(900.0, 300.0), 0);
+    let ov = |s: &Session| s.overlays[0].annotations.len();
+    check!(ov(&s) == 2);
+    tap(&mut s, 0, 0x53, "s", 0);
+    check!(s.st.tool == Tool::Select, "{:?}", s.st.tool);
+    // Inside an outline is nothing; on its line, the box.
+    click(&mut s, 0, Point::new(400.0, 350.0), 0);
+    check!(s.overlays[0].selection.current(&s.overlays[0].annotations).is_none());
+    click(&mut s, 0, Point::new(300.0, 350.0), 0);
+    check!(s.overlays[0].selection.current(&s.overlays[0].annotations) == Some(0), "the box isn't selected");
+    check!(s.cursor(0) == CursorShape::Move || s.cursor(0) == CursorShape::ResizeEW, "{:?}", s.cursor(0));
+    save_png(&frame(&mut s, 0)?, out, "overlay-selected.png")?;
+    // Moved: a copy in its place, one undo step.
+    drag(&mut s, 0, Point::new(300.0, 330.0), Point::new(340.0, 350.0), 0); // (off the middle handle)
+    check!(ov(&s) == 3 && s.overlays[0].annotations[0].hidden, "{} drawings", ov(&s));
+    check!(s.overlays[0].annotations[2].geometry() == Rect::new(340.0, 320.0, 200.0, 100.0), "{:?}", s.overlays[0].annotations[2].geometry());
+    check!(s.can_undo());
+    // Shift+Right nudges it 10 px; [ makes it thinner; 3 recolours it.
+    tap(&mut s, 0, key::RIGHT, "", SHIFT);
+    check!(s.overlays[0].annotations[3].geometry().x == 350.0);
+    let size = s.overlays[0].annotations[3].size;
+    tap(&mut s, 0, 0x5B, "[", 0);
+    check!(s.overlays[0].annotations.last().is_some_and(|a| a.size == size.saturating_sub(1)) || size == 0);
+    tap(&mut s, 0, 0x33, "3", 0);
+    check!(s.st.tool == Tool::Select && s.overlays[0].annotations.last().is_some_and(|a| a.color == s.st.color()), "not recoloured");
+    // The line by its end, with Shift in 45° steps.
+    click(&mut s, 0, Point::new(800.0, 301.0), 0);
+    let line = s.overlays[0].selection.current(&s.overlays[0].annotations);
+    check!(line == Some(1), "{line:?}");
+    drag(&mut s, 0, Point::new(900.0, 300.0), Point::new(800.0, 380.0), SHIFT);
+    let end = s.overlays[0].annotations.last().and_then(|a| a.drag()).map(|d| d.end).ok_or("no line")?;
+    check!((end.x - 700.0 - (end.y - 300.0)).abs() < 0.5, "{end:?}");
+    // Delete: gone (a "removed" in its place); undo brings it back.
+    let n = ov(&s);
+    tap(&mut s, 0, key::DELETE, "", 0);
+    check!(ov(&s) == n + 1 && s.overlays[0].annotations[n - 1].hidden);
+    tap(&mut s, 0, key::Z, "", CTRL);
+    check!(ov(&s) == n && !s.overlays[0].annotations[n - 1].hidden, "undo didn't bring it back");
+    // Esc deselects first, then cancels.
+    click(&mut s, 0, Point::new(350.0, 340.0), 0);
+    check!(s.overlays[0].selection.current(&s.overlays[0].annotations).is_some(), "the box isn't selected");
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    check!(!s.done && s.overlays[0].selection.current(&s.overlays[0].annotations).is_none(), "Esc didn't deselect");
+    // A counter after the first is moved keeps counting up.
+    tap(&mut s, 0, 0x4E, "n", 0);
+    click(&mut s, 0, Point::new(100.0, 100.0), 0);
+    tap(&mut s, 0, 0x53, "s", 0);
+    drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(150.0, 100.0), 0);
+    tap(&mut s, 0, 0x4E, "n", 0);
+    click(&mut s, 0, Point::new(100.0, 200.0), 0);
+    let number = match s.overlays[0].annotations.last().map(|a| &a.kind) {
+        Some(crate::ui::shapes::Kind::Counter { number, .. }) => *number,
+        _ => 0,
+    };
+    check!(number == 2, "the next counter is {number}");
+    s.cancel();
+    println!("self-test: select, move, resize, nudge, restyle and delete drawings");
     Ok(())
 }
 

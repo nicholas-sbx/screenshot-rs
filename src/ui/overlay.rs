@@ -19,6 +19,7 @@ use crate::render::paint::{Align, Pen};
 use crate::render::text::{self, BOLD, DEMIBOLD, MEDIUM};
 use crate::render::theme::{self, Color};
 use crate::ui::panels::{CodeChip, ColorPicker, RecordPanel};
+use crate::ui::selection::Selection;
 use crate::ui::shapes::{Shape, Tool};
 use crate::ui::snapping::{EdgeMaps, py_round};
 use crate::ui::state::State;
@@ -104,6 +105,8 @@ pub struct Overlay {
     pub annotations: Vec<Shape>,
     pub undone: Vec<Shape>,
     pub active: Option<Shape>,
+    /// the select tool's drawing, on this monitor
+    pub selection: Selection,
     pub sel_origin: Option<Point>,
     pub sel_rect: Option<Rect>,
     pub cursor_pos: Option<Point>,
@@ -153,6 +156,7 @@ impl Overlay {
             annotations: Vec::new(),
             undone: Vec::new(),
             active: None,
+            selection: Selection::default(),
             sel_origin: None,
             sel_rect: None,
             cursor_pos: None,
@@ -238,11 +242,8 @@ impl Overlay {
 
     pub fn undo(&mut self) -> bool {
         let Some(shape) = self.annotations.pop() else { return false };
-        if let Some(t) = shape.as_text()
-            && let Some((i, ..)) = &t.replaces
-            && let Some(orig) = self.annotations.get_mut(*i)
-        {
-            orig.hidden = false; // the text as it was before it was edited
+        if let Some(orig) = shape.replaces.and_then(|i| self.annotations.get_mut(i)) {
+            orig.hidden = false; // the drawing as it was before it was changed
         }
         self.undone.push(shape);
         true
@@ -250,10 +251,7 @@ impl Overlay {
 
     pub fn redo(&mut self) -> bool {
         let Some(shape) = self.undone.pop() else { return false };
-        if let Some(t) = shape.as_text()
-            && let Some((i, ..)) = &t.replaces
-            && let Some(orig) = self.annotations.get_mut(*i)
-        {
+        if let Some(orig) = shape.replaces.and_then(|i| self.annotations.get_mut(i)) {
             orig.hidden = true;
         }
         self.annotations.push(shape);
@@ -441,6 +439,15 @@ impl Overlay {
         }
         if let Some(s) = &self.active {
             elements.push(Element { id: Id::Active, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX) });
+        }
+        if let Some(s) = self.selection.moving() {
+            elements.push(Element { id: Id::Moving, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX - 2) });
+        }
+        if st.tool == Tool::Select
+            && let Some(r) = self.selection.frame_bounds(&self.annotations, 1.0)
+        {
+            let key = hash(&(rect_key(r), self.selection.current(&self.annotations), st.theme_key));
+            elements.push(Element { id: Id::SelectionFrame, bounds: self.dev(r, 2), key });
         }
         if let Some((o, s)) = &st.text_edit
             && *o == self.index
@@ -672,6 +679,7 @@ impl Overlay {
             .iter()
             .filter(|s| !s.hidden)
             .chain(self.active.iter())
+            .chain(self.selection.moving())
             .chain(st.text_edit.iter().filter(|(o, _)| *o == self.index).map(|(_, s)| s))
             .filter(|s| self.dev(s.bounds(), 2).intersects(&region))
             .collect();
@@ -689,6 +697,9 @@ impl Overlay {
             }
         }
         let mut p = Painter::for_region(target.pixmap_mut(), self.dpr, origin);
+        if st.tool == Tool::Select {
+            self.selection.paint_frame(&self.annotations, &mut p, 1.0);
+        }
         let picking = rtool && self.rec_rect.is_none();
         if rtool {
             if selection.is_none()
@@ -1162,6 +1173,8 @@ pub const HINT_CODES: &str = "Drag to capture  ·  {codes} hides detected codes 
 pub const HINT_WINDOWS: &str = "Drag to capture  ·  Click a window to capture it  ·  Esc to cancel";
 pub const HINT_TEXT: &str = "Click to place text, or on text to change it  ·  Drag text to move it  ·  Enter to finish";
 pub const HINT_SHAPE: &str = "Shift: square  ·  Ctrl: from the middle  ·  Alt: move it";
+pub const HINT_SELECT: &str = "Click a drawing to select it  ·  Drag to move  ·  Handles resize  ·  Delete removes it";
+pub const HINT_SELECTED: &str = "Drag to move (Shift: straight)  ·  Handles: Shift keeps its shape, Ctrl from the middle  ·  Arrows nudge  ·  Delete";
 pub const PIN_HINT: &str = "Drag to pin a region  ·  Click a window to pin it  ·  {pin} to save instead";
 pub const EYEDROPPER_HINT: &str = "Click a pixel to make it your colour  ·  Esc to stop";
 pub const DRAW_HINT: &str = "Draw on the screen  ·  {tool.region} then drag to capture  ·  Enter for whole screen";
@@ -1223,6 +1236,8 @@ fn hint_text(st: &State, o: &Overlay) -> String {
             Tool::Region if !o.windows.is_empty() => HINT_WINDOWS,
             Tool::Region => HINT_REGION,
             Tool::Text => HINT_TEXT,
+            Tool::Select if o.selection.current(&o.annotations).is_some() => HINT_SELECTED,
+            Tool::Select => HINT_SELECT,
             _ => DRAW_HINT,
         }
     };
@@ -1336,6 +1351,8 @@ fn shade_row(row: &mut [u8], x0: i32, y: i32, dim: Color, hole: Option<IRect>) {
 enum Id {
     Annotation(usize),
     Active,
+    Moving,
+    SelectionFrame,
     TextEdit,
     Window,
     Codes,
