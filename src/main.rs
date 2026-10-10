@@ -21,6 +21,10 @@ fn main() -> std::process::ExitCode {
                 println!("{}", flatshot::config::load().dump());
                 return std::process::ExitCode::SUCCESS;
             }
+            if args.diagnose {
+                print!("{}", flatshot::diagnose::report());
+                return std::process::ExitCode::SUCCESS;
+            }
             if args.tray {
                 flatshot::app::replace_older_tray();
             }

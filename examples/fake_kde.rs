@@ -153,7 +153,8 @@ fn main() {
                     "globalShortcutPressed",
                     &("flatshot", action.as_str(), 0i64),
                 );
-                println!("kglobalaccel: pressed {action}: {}", r.is_ok());
+                let t = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+                println!("kglobalaccel: pressed {action}: {} at {:.3}", r.is_ok(), t.tv_sec as f64 * 1000.0 + t.tv_nsec as f64 / 1e6);
             });
         }
     }

@@ -46,6 +46,8 @@ pub struct SettingsWin {
     pub s: Settings,
     dialog: Option<mpsc::Receiver<DialogAnswer>>,
     paste: Option<mpsc::Receiver<Option<String>>>,
+    /// what recording lacks here, being found out
+    recorder: Option<mpsc::Receiver<Option<String>>>,
     kde: mpsc::Sender<KdeJob>,
     answers: mpsc::Receiver<KdeAnswer>,
 }
@@ -160,7 +162,9 @@ impl App {
             Some(false) => s.set_global(None),
             None => {} // (when it's done: shortcuts_ready)
         }
-        self.settings = Some(SettingsWin { s, dialog: None, paste: None, kde, answers });
+        let format = crate::config::load().record_format;
+        let recorder = Some(check_recorder(format, self.waker.clone()));
+        self.settings = Some(SettingsWin { s, dialog: None, paste: None, recorder, kde, answers });
         let _ = self.wl.conn.flush();
     }
 
@@ -266,6 +270,7 @@ impl App {
                     self.wl.clipboard.offer(mimes, Slot::ready(Arc::new(text.into_bytes())), self.wl.serial, &self.wl.qh);
                 }
                 Request::Paste => w.paste = Some(self.wl.clipboard.paste_text(self.waker.clone())),
+                Request::CheckRecorder(format) => w.recorder = Some(check_recorder(format, self.waker.clone())),
                 Request::Close => {
                     self.wl.remove(Owner::Settings);
                     self.settings = None; // (the worker ends with its last job)
@@ -286,6 +291,12 @@ impl App {
             if let Some(t) = text {
                 w.s.paste(&t);
             }
+        }
+        if let Some(rx) = &w.recorder
+            && let Ok(problem) = rx.try_recv()
+        {
+            w.recorder = None;
+            w.s.set_recorder_problem(problem);
         }
         if let Some(rx) = &w.dialog
             && let Ok((id, answer)) = rx.try_recv()
@@ -321,6 +332,17 @@ impl App {
         w.s.set_scale(scale);
         self.wl.redraw(i, 0, &mut SettingsPaint(&mut w.s));
     }
+}
+
+/// What recording in `format` lacks here, found out on a thread of its own
+/// (it may ask GStreamer about its plugins).
+fn check_recorder(format: String, waker: Waker) -> mpsc::Receiver<Option<String>> {
+    let (tx, rx) = mpsc::channel();
+    let _ = std::thread::Builder::new().name("flatshot-recorder".into()).spawn(move || {
+        let _ = tx.send(crate::record::problem(crate::record::method(), &format));
+        waker();
+    });
+    rx
 }
 
 /// Run a file dialog on a thread of its own; its answer comes for row `id`.

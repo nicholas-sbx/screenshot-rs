@@ -9,6 +9,7 @@ pub mod config;
 pub mod dbus;
 pub mod deliver;
 pub mod desktop;
+pub mod diagnose;
 pub mod geom;
 pub mod image;
 pub mod ipc;

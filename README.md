@@ -10,6 +10,20 @@ Flatshot lives in your system tray. Press your shortcut and the screen freezes. 
 - **Less memory.** No interpreter or GUI toolkit: an idle tray app is a few megabytes, and every capture gives its memory back when it closes. Pictures are shared with the compositor, not copied; drawing repaints only what changed.
 - **Safer.** Memory-safe code throughout, including the QR and barcode decoders, which read whatever is on screen. Files are written without following links or replacing anything that exists; the IPC socket, scripts and temporary files are private to you; text from the screen (code contents, window titles) is shown as plain text, never as markup; only KDE's own services are listened to for shortcuts and notification clicks. See [Security](#security).
 
+### Measured
+
+Both versions on the same machine and desktop (a headless Sway, 1600 × 1000, software rendering), from the moment of the key press, or of starting the program, to the overlay's first frame on screen (taken from the Wayland protocol trace), and the tray app's memory:
+
+| | Flatshot (Python) | Flatshot (Rust) |
+|---|---|---|
+| Shortcut → overlay on screen, tray app running | 100 ms (87–124) | **19 ms** (18–20) |
+| `flatshot` → overlay on screen, no tray app | 324 ms (303–350) | **24 ms** (22–30) |
+| Tray app, idle | 65 MB | **12 MB** |
+| Tray app, after six captures | 93 MB | **16 MB** |
+| Peak during a capture | 124 MB | **40 MB** |
+
+Most of the Rust version's 19 ms is the compositor copying the screen. (Memory is resident set size; times are means of 6–7 runs, ranges in brackets.)
+
 ## Install
 
 Each release has packages for Debian/Ubuntu (`.deb`), Fedora/openSUSE (`.rpm`) and Arch (`.pkg.tar.zst`):

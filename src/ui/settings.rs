@@ -48,6 +48,8 @@ pub enum Request {
     Paste,
     /// Esc or Ctrl+W: done with the window
     Close,
+    /// find out (in the background) what recording in this format needs
+    CheckRecorder(String),
 }
 
 #[derive(Clone, Debug)]
@@ -466,6 +468,7 @@ impl Settings {
             Block::Card {
                 heading: String::new(),
                 rows: vec![
+                    Row::new("recorder", "Recorder", crate::record::method().label(), Control::None),
                     Row::new("record_dir", "Folder", CODES_HINT, Control::None).below(line(&c.record_dir, "", vec!["Choose…"])),
                     Row::new("record_filename", "File name", "The same codes. The extension is added for you.", Control::None).below(line(&c.record_filename, "", vec![])),
                     Row::new("record_preview", "", "", Control::None).below(Control::Text(String::new())),
@@ -1023,8 +1026,11 @@ impl Settings {
                     theme::use_theme(&v);
                     self.requests.push(Request::ThemeChanged);
                 }
-                let json = if id == "record_fps" { Value::from(v.parse::<i64>().unwrap_or(30)) } else { Value::from(v) };
+                let json = if id == "record_fps" { Value::from(v.parse::<i64>().unwrap_or(30)) } else { Value::from(v.clone()) };
                 self.set(id, json);
+                if id == "record_format" {
+                    self.requests.push(Request::CheckRecorder(v));
+                }
             }
             (Part::Control, Control::Button(_), _) if id == "config_folder" => {
                 if let Some(dir) = config::config_path().parent() {
@@ -1160,6 +1166,14 @@ impl Settings {
             row.error = None;
         }
         self.set(id, Value::from(path.to_string()));
+    }
+
+    /// What recording here lacks (None: nothing), under the recorder's name.
+    pub fn set_recorder_problem(&mut self, problem: Option<String>) {
+        if let Some(row) = self.find_mut("recorder") {
+            row.error = problem.map(|p| format!("Not usable: {p}"));
+        }
+        self.damaged = true;
     }
 
     /// No dialog to choose with: why, under row `id`.

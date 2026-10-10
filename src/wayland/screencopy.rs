@@ -115,7 +115,7 @@ impl Wayland {
                 if let WEnum::Value(f) = format
                     && g.format.is_none()
                     && matches!(f, wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888 | wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888)
-                    && stride == width * 4
+                    && width.checked_mul(4) == Some(stride)
                 {
                     g.format = Some((f, width, height, stride));
                 }

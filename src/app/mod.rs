@@ -368,7 +368,7 @@ fn names_window(cfg: &Config) -> bool {
 
 /// The layer-shell namespace: KWin makes it a window type and animates
 /// every one it doesn't know but "utility" (which every Plasma 6 knows).
-fn layer_namespace() -> String {
+pub fn layer_namespace() -> String {
     if let Ok(s) = std::env::var("FLATSHOT_LAYER_SCOPE")
         && !s.is_empty()
     {

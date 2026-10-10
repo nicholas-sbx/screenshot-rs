@@ -1,4 +1,5 @@
-# Tests every push and pull request. A push to main whose Cargo.toml
+# Tests every push and pull request (and weekly, with the dependency
+# audit, so new security advisories show up). A push to main whose Cargo.toml
 # version has no v<version> tag yet also builds the packages, installs
 # them on Debian, Ubuntu, Fedora and Arch, publishes them as a GitHub
 # release, and updates the pacman repository (the "pacman" release).
@@ -10,6 +11,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -49,6 +52,21 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release=$release" >> "$GITHUB_OUTPUT"
           echo "version $version, release: $release" >> "$GITHUB_STEP_SUMMARY"
+
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Known vulnerabilities, unsound or unmaintained crates in Cargo.lock (RustSec)
+        run: cargo audit --deny warnings
 
   test:
     runs-on: ubuntu-24.04
@@ -162,7 +180,7 @@ jobs:
           flatshot --self-test
 
   release:
-    needs: [version, test, packages, install]
+    needs: [version, audit, test, packages, install]
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
