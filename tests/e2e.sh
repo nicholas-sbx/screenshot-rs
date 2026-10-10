@@ -30,6 +30,28 @@ pass() { echo "ok: $*"; }
 # The size of a PNG: "W H".
 png_size() { python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(24); print(*struct.unpack(">II", d[16:24]))' "$1"; }
 newest() { ls -t "$shots"/*.png 2>/dev/null | head -n1; }
+# Wait (up to 15 s) until the program logging to $1 (run with -v) has drawn
+# its first frame: input sent sooner has nowhere to go (a cold start, on a
+# fresh machine, can take seconds to load its fonts).
+up() {
+    for _ in $(seq 150); do
+        grep -qE "first frame|painted" "$1" 2>/dev/null && return 0
+        sleep 0.1
+    done
+    echo "  (nothing drawn after 15 s: $1)"
+    tail -n 20 "$1" 2>/dev/null | sed 's/^/    /'
+    return 1
+}
+# Wait (up to $2 s, default 10) for process $1 to end, killing it if it
+# doesn't; its exit code in $code.
+finish() {
+    for _ in $(seq $(( ${2:-10} * 10 ))); do kill -0 "$1" 2>/dev/null || break; sleep 0.1; done
+    kill -0 "$1" 2>/dev/null && kill "$1" 2>/dev/null
+    set +e
+    wait "$1"
+    code=$?
+    set -e
+}
 expect_size() { # what, file, "W H"
     local got
     got=$(png_size "$2" 2>/dev/null || echo none)
@@ -55,30 +77,27 @@ sleep 0.3
 # 1. The overlay: drag a region.
 $BIN -v > "$work/region.log" 2>&1 &
 pid=$!
-sleep 1
+up "$work/region.log" || true
 $EX/inject move 500 400 drag 100 100 300 200
-for _ in $(seq 50); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
-if wait $pid; then pass "region capture exited 0"; else fail "region capture exited $?"; cat "$work/region.log"; fi
+finish $pid
+if [ $code = 0 ]; then pass "region capture exited 0"; else fail "region capture exited $code"; cat "$work/region.log"; fi
 expect_size "region capture" "$(newest)" "200 100"
 grep -q "first frame" "$work/region.log" && pass "overlay drew its first frame" || fail "no first frame"
 if [ "$(wl-paste --list-types 2>/dev/null | head -n1)" = "image/png" ]; then pass "region copied"; else fail "region not on the clipboard"; fi
 
 # 2. Escape cancels (exit code 1).
-$BIN > /dev/null 2>&1 &
+$BIN -v > "$work/escape.log" 2>&1 &
 pid=$!
-sleep 1
+up "$work/escape.log" || true
 $EX/inject move 300 300 key Escape
-set +e
-wait $pid
-code=$?
-set -e
+finish $pid
 [ $code = 1 ] && pass "escape cancels" || fail "escape: exit $code"
 
 # 3. A pin: on top of the windows where the region was, dragged by the
 # pointer, closed with Esc (the one-off run ends with its last pin).
-$BIN --pin > /dev/null 2>&1 &
+$BIN --pin -v > "$work/pin.log" 2>&1 &
 pid=$!
-sleep 1
+up "$work/pin.log" || true
 (
     $EX/inject move 500 400 drag 100 100 300 200 sleep 500 drag 150 150 450 350 sleep 1500 click 500 400 sleep 200 key Escape sleep 300
 ) &
@@ -86,8 +105,8 @@ injector=$!
 sleep 1.6
 grim "$work/pin.png" 2>/dev/null || true
 wait $injector
-for _ in $(seq 30); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
-if kill -0 $pid 2>/dev/null; then fail "the pin didn't close"; kill $pid; else pass "pin closed with Esc"; fi
+finish $pid 3
+[ $code = 0 ] && pass "pin closed with Esc" || fail "the pin didn't close (exit $code)"
 if [ -f "$work/pin.png" ]; then
     edge=$(python3 - "$work/pin.png" <<'PY'
 import struct, sys, zlib
@@ -126,23 +145,23 @@ fi
 # 4. The annotation editor: draw a box, save it in place, close.
 cp assets/flatshot.png "$work/edit.png"
 before=$(md5sum < "$work/edit.png")
-$BIN -i "$work/edit.png" > "$work/editor.log" 2>&1 &
+$BIN -i "$work/edit.png" -v > "$work/editor.log" 2>&1 &
 pid=$!
-sleep 1.2
+up "$work/editor.log" || true
 $EX/inject move 700 500 key b drag 700 450 850 580 sleep 200 key ctrl+s sleep 400 key ctrl+w sleep 300
-for _ in $(seq 30); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
-if kill -0 $pid 2>/dev/null; then fail "the editor didn't close"; kill $pid; else pass "editor closed"; fi
+finish $pid 3
+[ $code = 0 ] && pass "editor closed" || fail "the editor didn't close (exit $code)"
 [ "$(md5sum < "$work/edit.png")" != "$before" ] && pass "editor saved the drawing" || fail "editor didn't save"
 expect_size "edited picture" "$work/edit.png" "256 256"
 
 # 5. The settings window: a change is saved at once; Esc closes it.
-$BIN --settings > "$work/settings.log" 2>&1 &
+$BIN --settings -v > "$work/settings.log" 2>&1 &
 pid=$!
-sleep 1.2
+up "$work/settings.log" || true
 # The Capture page, then its first row's slider (screen shading) near its left end.
 $EX/inject click 57 93 sleep 300 click 1360 105 sleep 300 key Escape sleep 300
-for _ in $(seq 30); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
-if kill -0 $pid 2>/dev/null; then fail "the settings window didn't close"; kill $pid; else pass "settings closed with Esc"; fi
+finish $pid 3
+[ $code = 0 ] && pass "settings closed with Esc" || fail "the settings window didn't close (exit $code)"
 grep -q '"dim_opacity": 15,' "$XDG_CONFIG_HOME/flatshot/config.json" && pass "setting saved" || fail "setting not saved"
 
 # 6. Screen recording: an area chosen on the overlay, recorded by
@@ -155,8 +174,9 @@ video_check() { # what, file, "WxH"
     if [ "$got" = "$3" ] && python3 -c "import sys; sys.exit(0 if float('$len' or 0) > 0.5 else 1)"; then pass "$1 ($got, ${len}s)"; else fail "$1: $2 is '$got', ${len}s"; fi
 }
 record() { # extra environment, then what to do once it records
-    (code=0; env "$@" $BIN --record > "$work/record.log" 2>&1 || code=$?; echo $code > "$work/record.code") &
-    sleep 1.2
+    rm -f "$work/record.log"
+    (code=0; env "$@" $BIN --record -v > "$work/record.log" 2>&1 || code=$?; echo $code > "$work/record.code") &
+    up "$work/record.log" || true
     $EX/inject move 400 300 drag 300 200 900 600 sleep 400 key Return sleep 2000
 }
 newest_video() { ls -t "$work"/videos/* 2>/dev/null | head -n1; }
