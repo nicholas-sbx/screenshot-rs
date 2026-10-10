@@ -106,11 +106,33 @@ Both come with the same default keys. KDE gives a key to whichever registered it
 | <kbd>Esc</kbd> / right-click | cancel the current drag, or quit |
 | <kbd>R</kbd> | region tool (back to capture mode) |
 | <kbd>M</kbd> | show or hide the mouse pointer in the picture |
+| <kbd>V</kbd>, then <kbd>Ctrl</kbd> while resizing the area | record tool; resize the area about its centre |
+| <kbd>S</kbd> | select tool: click a drawing to move, resize, restyle or delete it (<kbd>Delete</kbd>, arrow keys to nudge) |
+| <kbd>Ctrl</kbd>+<kbd>B</kbd> | Beautify: put this and later captures on a background |
 | <kbd>P</kbd> <kbd>L</kbd> <kbd>A</kbd> <kbd>B</kbd> <kbd>F</kbd> <kbd>E</kbd> <kbd>H</kbd> <kbd>T</kbd> <kbd>X</kbd> <kbd>U</kbd> <kbd>N</kbd> | pen, line, arrow, box, filled box, ellipse, highlighter, text, pixelate, blur, counter |
 | <kbd>Shift</kbd> / <kbd>Ctrl</kbd> / <kbd>Alt</kbd> while drawing | square / from the middle / move without resizing |
 | <kbd>1</kbd>–<kbd>7</kbd>, <kbd>8</kbd> | colour, your own colour |
 | <kbd>[</kbd> <kbd>]</kbd> | stroke size |
 | <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> | undo / redo |
+
+The keys can be changed in Settings → Shortcuts → Keys in Flatshot RS (so can the editor's: crop <kbd>C</kbd>, background <kbd>Ctrl</kbd>+<kbd>B</kbd>, fit <kbd>Ctrl</kbd>+<kbd>0</kbd>, zoom <kbd>Ctrl</kbd>+<kbd>=</kbd> / <kbd>-</kbd>, ...).
+
+### Drawing and editing
+
+- **Select, move and resize drawings** (<kbd>S</kbd>, on the toolbar and in the editor): click a drawing to select it (<kbd>Alt</kbd>+click for the one under it), drag it to move it (<kbd>Shift</kbd>: straight across or down), drag a handle to resize it (<kbd>Shift</kbd> keeps its shape, <kbd>Ctrl</kbd> from the middle; lines and arrows by their ends), nudge it with the arrow keys (<kbd>Shift</kbd>: 10 px), or press <kbd>Delete</kbd>. The colour and size buttons restyle it. Every change can be undone.
+- **Text**: click to type; <kbd>Enter</kbd> starts a new line; <kbd>Esc</kbd>, <kbd>Ctrl</kbd>+<kbd>Enter</kbd> or a click elsewhere finishes. Drag across the text to select some of it. Click text you've placed to change it; the select tool moves it.
+- **Across monitors**: drawings can run from one monitor onto another with every tool: they show on each, the select tool picks them up from either, and text can be changed from either.
+- **The annotation editor** (**Annotate** on a notification, in the tray menu, or `flatshot-rs -i picture.png`) has the same tools, and:
+  - **Crop, cut out, rotate and resize** (<kbd>C</kbd>): drag the frame's edges in to crop, or out past the picture for a margin (clear, or your colour), then <kbd>Enter</kbd>. The crop can be free, 1:1, 4:3, 16:9 or the original's shape, and snaps to edges in the picture like the magnet. Under the toolbar: cut out rows or columns (drag across them and the rest is joined), rotate, flip, and resize to a size in pixels or a percentage. Your drawings move with the picture and stay drawings, and each step can be undone.
+  - **Beautify** (<kbd>Ctrl</kbd>+<kbd>B</kbd>): the picture on a background (a colour, its own edge colour, a gradient, a blurred copy of itself or an image), with padding, rounded corners, a soft shadow and a fixed shape (1:1, 4:3, 16:9) if you like, shown as you work and saved at full resolution. Save styles as presets. The capture toolbar's Beautify button (<kbd>Ctrl</kbd>+<kbd>B</kbd> there too), or Settings → After capture → Beautify, puts every capture on the style you used last.
+  - The zoom is at the bottom right: out and in, a slider, the zoom itself (click it for a list) and fit. **Save** is highlighted while there are unsaved changes, greyed out when there are none. The window can't be made so small that its bars overlap.
+
+### Captures and the tray
+
+- **The active window on KDE** is KWin's picture of the window itself: nothing covering it shows up, parts off screen are kept, and its rounded corners and shadow come out transparent (JPEG fills them in white). Settings → Capture → Window capture turns the title bar and borders, and the shadow, on or off. Clicking a window in the overlay still takes it from the frozen screen, as you see it.
+- **Window capture** includes panels, docks, notifications, menus and tooltips (Settings → Capture → Include panels and popups), on KDE and X11.
+- **QR codes** are looked for while they're shown (<kbd>Q</kbd>); hidden at the start, the capture isn't looked through until you show them.
+- **Tray icon styles** (Settings → General → Tray icon): the app's colours, your theme's, a plain white or black outline for panels with symbolic icons, or Auto (white or black, following the desktop's light or dark scheme). The tray menu has every capture with its key, **Restart Flatshot RS** (after an upgrade) and **Quit Flatshot RS**.
 
 ### Recording the screen
 
@@ -175,6 +197,7 @@ On X11 any program can read the screen and the keyboard: that's X11's design, wh
 cargo test                                 # unit tests
 cargo run -- --self-test                   # the overlay, headless
 cargo build --examples && tests/e2e.sh     # end to end on a headless sway
+cargo build --examples && tests/e2e-x11.sh # ... and on a headless X server
 ```
 
 The examples include stand-ins for KWin's screenshot API, KDE's shortcut service and tray, and a notification server, so the KDE paths can be tested without Plasma.
