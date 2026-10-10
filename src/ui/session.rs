@@ -25,7 +25,7 @@ use crate::ui::shapes::{Mods, Shape, Tool, copy_for_editing};
 use crate::ui::snapping::{self, EdgeMaps, py_round};
 use crate::ui::state::{CUSTOM, Desktop, State};
 use crate::ui::textedit::KeyResult;
-use crate::ui::toolbar::{Toolbar, View};
+use crate::ui::toolbar::{CodeScan, Toolbar, View};
 use crate::ui::widgets::Look;
 
 /// The recording formats, as the panel offers them.
@@ -211,6 +211,10 @@ pub struct Session {
     problems: Vec<(String, Option<String>)>,
     desktop: Option<Desktop>,
     codes: Vec<Code>,
+    /// codes are to be looked for, once shown (hidden at the start: not yet)
+    scan_pending: bool,
+    /// pictures still being looked through for codes
+    scans_left: usize,
     /// overlays in the order things were drawn on them, for undo
     history: Vec<usize>,
     redo_stack: Vec<usize>,
@@ -297,6 +301,8 @@ impl Session {
             rx,
             waker,
             cancelled: Arc::new(AtomicBool::new(false)),
+            scan_pending: false,
+            scans_left: 0,
             pointer: vec![None; n],
             hover: vec![Hover::default(); n],
             paste_target: None,
@@ -307,7 +313,7 @@ impl Session {
         }
         s.update_spans();
         for o in 0..n {
-            let tb = Toolbar::new(&toolbar_view(&s.st, 0, false, false));
+            let tb = Toolbar::new(&toolbar_view(&s.st, CodeScan::Found(0), false, false));
             s.overlays[o].toolbar = Some(tb);
             s.place_floating(o);
         }
@@ -321,9 +327,14 @@ impl Session {
         if let Some(c) = cursor {
             s.point_at(c);
         }
-        if s.st.cfg.scan_codes && s.request.scan {
-            // (once the overlay is on screen, so scanning doesn't hold it up)
-            s.schedule(Timer::Scan, SCAN_AFTER);
+        if s.request.scan {
+            // Codes are looked for while shown: now (once the overlay is on
+            // screen, so scanning doesn't hold it up), else once they are.
+            s.scan_pending = true;
+            if s.st.codes_visible {
+                s.schedule(Timer::Scan, SCAN_AFTER);
+            }
+            s.refresh_toolbars();
         }
         if s.st.snap_edges {
             for o in 0..n {
@@ -499,6 +510,7 @@ impl Session {
         if self.done || o >= self.overlays.len() {
             return;
         }
+        self.scans_left = self.scans_left.saturating_sub(1);
         let dpr = self.overlays[o].dpr;
         for code in codes {
             let local: Vec<Point> = code.corners.iter().map(|p| *p / dpr).collect();
@@ -1016,9 +1028,8 @@ impl Session {
     }
 
     fn refresh_toolbars(&mut self) {
-        let code_count = self.code_count();
         let (can_undo, can_redo) = (self.can_undo(), self.can_redo());
-        let view = toolbar_view(&self.st, code_count, can_undo, can_redo);
+        let view = toolbar_view(&self.st, self.code_scan(), can_undo, can_redo);
         for ov in &mut self.overlays {
             if let Some(tb) = &mut ov.toolbar {
                 tb.refresh(&view);
@@ -1155,9 +1166,23 @@ impl Session {
     fn toggle_codes(&mut self) {
         self.st.codes_visible = !self.st.codes_visible;
         let on = self.st.codes_visible;
+        if on {
+            self.start_scan(); // (hidden at the start, so not looked for yet)
+        }
         self.st.cfg.show_codes = on;
         config::update(move |c| c.show_codes = on);
         self.refresh();
+    }
+
+    /// How the search for codes stands.
+    pub fn code_scan(&self) -> CodeScan {
+        if self.scans_left > 0 {
+            CodeScan::Scanning
+        } else if self.scan_pending {
+            CodeScan::NotYet
+        } else {
+            CodeScan::Found(self.code_count())
+        }
     }
 
     pub fn code_count(&self) -> usize {
@@ -1539,8 +1564,14 @@ impl Session {
     }
 
     /// Look for codes on each monitor's picture, one after another, in the
-    /// background.
+    /// background; once a capture (later calls do nothing).
     fn start_scan(&mut self) {
+        if !std::mem::take(&mut self.scan_pending) || self.done {
+            return;
+        }
+        self.timers.retain(|x| x.1 != Timer::Scan);
+        self.scans_left = self.overlays.len();
+        self.refresh_toolbars();
         let pictures: Vec<(usize, Arc<Image>)> = self.overlays.iter().map(|o| (o.index, o.plain.clone().unwrap_or_else(|| o.base.clone()))).collect();
         let (tx, waker, cancelled) = (self.tx.clone(), self.waker.clone(), self.cancelled.clone());
         let started = std::thread::Builder::new().name("flatshot-scan".into()).spawn(move || {
@@ -1559,6 +1590,7 @@ impl Session {
             }
         });
         if let Err(e) = started {
+            self.scans_left = 0;
             eprintln!("flatshot-rs: could not start looking for codes: {e}");
         }
     }
@@ -1785,8 +1817,9 @@ impl Session {
     }
 
     /// Move or resize the recording area; a resized edge goes to `snapped`
-    /// when snapping found an edge there.
-    fn drag_area(&mut self, o: usize, pos: Point, snapped: Option<Point>) {
+    /// when snapping found an edge there. `center` (Ctrl): the opposite edge
+    /// moves the other way, so the area stays centred.
+    fn drag_area(&mut self, o: usize, pos: Point, snapped: Option<Point>, center: bool) {
         let Some((handle, start, r0)) = self.overlays[o].rec_drag else { return };
         let d = pos - start;
         let bounds = self.drag_bounds(o);
@@ -1795,6 +1828,24 @@ impl Session {
                 let mut r = r0.translated(d);
                 r.x = r.x.min(bounds.right() - r.w).max(bounds.left());
                 r.y = r.y.min(bounds.bottom() - r.h).max(bounds.top());
+                r
+            }
+            Handle::Edges { left, right, top, bottom } if center => {
+                // The dragged edge follows the pointer as without Ctrl; the other mirrors it.
+                let c = r0.center();
+                let mut r = r0;
+                if left || right {
+                    let edge = if left { r0.left() } else { r0.right() } + d.x;
+                    let half = (edge - c.x).abs().min(c.x - bounds.left()).min(bounds.right() - c.x);
+                    r.x = c.x - half;
+                    r.w = 2.0 * half;
+                }
+                if top || bottom {
+                    let edge = if top { r0.top() } else { r0.bottom() } + d.y;
+                    let half = (edge - c.y).abs().min(c.y - bounds.top()).min(bounds.bottom() - c.y);
+                    r.y = c.y - half;
+                    r.h = 2.0 * half;
+                }
                 r
             }
             Handle::Edges { left, right, top, bottom } => {
@@ -2223,7 +2274,7 @@ impl Session {
                 self.selection_moved(o, Some(pos));
             }
         } else if ov.rec_drag.is_some() {
-            self.drag_area(o, pos, snap);
+            self.drag_area(o, pos, snap, mods & keyseq::CTRL != 0);
         } else if let Some((start, origin)) = ov.text_drag
             && editing_here
         {
@@ -2310,7 +2361,7 @@ impl Drop for Session {
 }
 
 /// The toolbar's view of the state.
-fn toolbar_view(st: &State, code_count: usize, can_undo: bool, can_redo: bool) -> View<'_> {
+fn toolbar_view(st: &State, codes: CodeScan, can_undo: bool, can_redo: bool) -> View<'_> {
     View {
         tool: st.tool,
         can_record: st.can_record,
@@ -2318,7 +2369,7 @@ fn toolbar_view(st: &State, code_count: usize, can_undo: bool, can_redo: bool) -
         custom_color: st.custom_color,
         size: st.size,
         codes_visible: st.codes_visible,
-        code_count,
+        codes,
         snap: st.snap_edges,
         pointer_available: st.pointer_available,
         show_pointer: st.show_pointer,

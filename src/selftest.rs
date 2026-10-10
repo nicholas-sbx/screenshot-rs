@@ -22,6 +22,7 @@ use crate::ui::overlay::{Output, Window};
 use crate::ui::session::{Button, CursorShape, Effect, Outcome, RecordSupport, Request, Screen, Session, Setup, Waker};
 use crate::ui::shapes::Tool;
 use crate::ui::state::{CUSTOM, Desktop};
+use crate::ui::toolbar::CodeScan;
 
 pub const TEST_URL: &str = "https://github.com/nicholas-sbx/screenshot";
 pub const TEST_EAN: &str = "4006381333931";
@@ -214,6 +215,7 @@ pub fn run() -> i32 {
 fn all(tmp: &Path, out: &Option<PathBuf>) -> R {
     let desktop = Arc::new(fake_desktop(1600, 1000)?);
     overlay_basics(tmp, out, desktop.clone())?;
+    codes_on_demand(tmp, desktop.clone())?;
     keys_and_text(tmp, out, desktop.clone())?;
     pointer_and_panels(tmp, out, desktop.clone())?;
     snapping(tmp, desktop.clone())?;
@@ -593,6 +595,35 @@ fn snapping(tmp: &Path, desktop: Arc<Image>) -> R {
     Ok(())
 }
 
+/// Codes hidden at the start: nothing is looked for until they're shown.
+fn codes_on_demand(tmp: &Path, desktop: Arc<Image>) -> R {
+    let cfg = Config { show_codes: false, ..test_config(tmp) };
+    let mut s = session(
+        cfg,
+        Request { image: true, scan: true, ..Default::default() },
+        vec![image_screen(desktop, (1600, 1000))],
+        FakeRecorder { problem: None, span: false },
+    );
+    check!(s.code_scan() == CodeScan::NotYet, "{:?}", s.code_scan());
+    let codes = s.overlays[0].toolbar.as_ref().and_then(|t| t.items.iter().find(|i| i.id == "codes")).map(|i| i.hint.clone()).unwrap_or_default();
+    check!(codes.ends_with("Not looked for yet"), "{codes}");
+    tap(&mut s, 0, 0x51, "q", 0);
+    check!(s.st.codes_visible && s.code_scan() == CodeScan::Scanning, "{:?}", s.code_scan());
+    let deadline = Instant::now() + std::time::Duration::from_secs(20);
+    while s.code_scan() == CodeScan::Scanning && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        s.poll();
+    }
+    check!(s.code_scan() == CodeScan::Found(2), "{:?}", s.code_scan());
+    // Hidden and shown again: not looked for twice.
+    tap(&mut s, 0, 0x51, "q", 0);
+    tap(&mut s, 0, 0x51, "q", 0);
+    check!(s.code_scan() == CodeScan::Found(2), "{:?}", s.code_scan());
+    s.cancel();
+    println!("self-test: hidden codes are looked for once shown");
+    Ok(())
+}
+
 /// Recording: choose an area, the panel's options, the countdown, the job.
 fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     let mut cfg = test_config(tmp);
@@ -618,6 +649,12 @@ fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     // Resize by the bottom right handle.
     drag(&mut s, 0, Point::new(700.0, 500.0), Point::new(800.0, 560.0), 0);
     check!(s.overlays[0].rec_rect == Some(Rect::new(200.0, 200.0, 600.0, 360.0)), "{:?}", s.overlays[0].rec_rect);
+    // Ctrl resizes about the centre (500, 380): grabbed 2 px inside the right
+    // edge, the edge keeps that offset and the left one mirrors it.
+    drag(&mut s, 0, Point::new(798.0, 380.0), Point::new(818.0, 380.0), CTRL);
+    check!(s.overlays[0].rec_rect == Some(Rect::new(180.0, 200.0, 640.0, 360.0)), "{:?}", s.overlays[0].rec_rect);
+    drag(&mut s, 0, Point::new(500.0, 560.0), Point::new(500.0, 540.0), CTRL);
+    check!(s.overlays[0].rec_rect == Some(Rect::new(180.0, 220.0, 640.0, 320.0)), "{:?}", s.overlays[0].rec_rect);
     // Esc goes back to choosing; Enter on the whole screen otherwise.
     tap(&mut s, 0, key::ESCAPE, "", 0);
     check!(!s.done && s.overlays[0].rec_rect.is_none() && !s.st.any_armed);

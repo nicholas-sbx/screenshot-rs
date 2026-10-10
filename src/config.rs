@@ -60,7 +60,7 @@ pub struct Config {
     pub snap_sensitivity: i64,
     pub span_monitors: bool,
     pub detect_windows: bool,
-    pub scan_codes: bool,
+    /// QR codes and barcodes are looked for while shown (Q)
     pub show_codes: bool,
     pub toolbar_follows_mouse: bool,
     pub backend: String,
@@ -194,7 +194,6 @@ impl Config {
             snap_sensitivity: i("snap_sensitivity", 5).clamp(1, 10),
             span_monitors: b("span_monitors", true),
             detect_windows: b("detect_windows", true),
-            scan_codes: b("scan_codes", true),
             show_codes: b("show_codes", true),
             toolbar_follows_mouse: b("toolbar_follows_mouse", true),
             backend: one_of(get_str(data, "backend"), BACKENDS, "auto"),
@@ -246,7 +245,6 @@ impl Config {
         put("snap_sensitivity", self.snap_sensitivity.into());
         put("span_monitors", self.span_monitors.into());
         put("detect_windows", self.detect_windows.into());
-        put("scan_codes", self.scan_codes.into());
         put("show_codes", self.show_codes.into());
         put("toolbar_follows_mouse", self.toolbar_follows_mouse.into());
         put("backend", self.backend.clone().into());
@@ -527,7 +525,7 @@ mod tests {
     #[test]
     fn defaults_match_the_python_version() {
         let c = Config::from_map(&Map::new());
-        assert!(c.save_to_disk && c.notify && c.show_loupe && c.scan_codes);
+        assert!(c.save_to_disk && c.notify && c.show_loupe && c.show_codes);
         assert_eq!(c.filename, "Screenshot_%Y-%m-%d_%H-%M-%S");
         assert_eq!((c.quality, c.dim_opacity, c.loupe_size), (90, 60, 120));
         assert_eq!((c.clipboard.as_str(), c.open_after.as_str(), c.backend.as_str()), ("image", "none", "auto"));

@@ -17,7 +17,7 @@ pub struct View<'a> {
     pub custom_color: Color,
     pub size: usize,
     pub codes_visible: bool,
-    pub code_count: usize,
+    pub codes: CodeScan,
     pub snap: bool,
     pub pointer_available: bool,
     pub show_pointer: bool,
@@ -25,6 +25,15 @@ pub struct View<'a> {
     pub can_redo: bool,
     pub pin_mode: bool,
     pub keymap: &'a Keymap,
+}
+
+/// How the search for codes stands, for the codes button's tooltip.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CodeScan {
+    /// hidden at the start, so the capture hasn't been looked through
+    NotYet,
+    Scanning,
+    Found(usize),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -130,7 +139,12 @@ fn build(v: &View<'_>) -> Vec<Item> {
     items.push(size);
     items.push(Item::new("divider.colors", Look::Divider, ""));
 
-    let found = if v.code_count > 0 { format!("{} code{} found", v.code_count, if v.code_count != 1 { "s" } else { "" }) } else { "No codes found".into() };
+    let found = match v.codes {
+        CodeScan::NotYet => "Not looked for yet".to_string(),
+        CodeScan::Scanning => "Looking for codes…".to_string(),
+        CodeScan::Found(0) => "No codes found".to_string(),
+        CodeScan::Found(n) => format!("{n} code{} found", if n != 1 { "s" } else { "" }),
+    };
     let mut codes = if v.codes_visible {
         Item::new("codes", Look::Icon { icon: "codes", size: 36.0 }, km.hint("Hide QR / barcodes", "codes") + &format!("  ·  {found}"))
     } else {
@@ -194,7 +208,7 @@ mod tests {
             custom_color: Color::rgb(0xFF4FA3),
             size: 1,
             codes_visible: true,
-            code_count: 2,
+            codes: CodeScan::Found(2),
             snap: false,
             pointer_available: false,
             show_pointer: false,

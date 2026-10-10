@@ -404,10 +404,7 @@ impl Settings {
             },
             Block::Card {
                 heading: "QR codes and barcodes".into(),
-                rows: vec![
-                    Row::new("scan_codes", "Scan the screen", "", Control::Toggle(c.scan_codes)),
-                    Row::new("show_codes", "Show results", "Q or the toolbar's code button changes this too.", Control::Toggle(c.show_codes)),
-                ],
+                rows: vec![Row::new("show_codes", "Show results", "Q or the toolbar's code button changes this too.", Control::Toggle(c.show_codes))],
             },
             Block::Card {
                 heading: "Advanced".into(),
