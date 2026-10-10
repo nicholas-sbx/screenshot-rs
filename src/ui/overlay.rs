@@ -227,12 +227,10 @@ impl Overlay {
         self.picker.is_some() && self.picker_visible
     }
 
-    /// The text drawn at `at` (topmost), if any.
+    /// The text drawn at `at`, if it's the topmost drawing there (not one
+    /// behind something else).
     pub fn text_at(&self, at: Point) -> Option<usize> {
-        self.annotations.iter().enumerate().rev().find_map(|(i, s)| {
-            let t = s.as_text()?;
-            (!s.hidden && t.contains(at, s.size)).then_some(i)
-        })
+        topmost_text(&self.annotations, at)
     }
 
     pub fn commit(&mut self, shape: Shape) {
@@ -1171,7 +1169,7 @@ pub fn pill(p: &mut Painter<'_>, label: &str, at: Point, s: PillStyle) {
 pub const HINT_REGION: &str = "Drag to capture  ·  Click for whole screen  ·  Esc to cancel";
 pub const HINT_CODES: &str = "Drag to capture  ·  {codes} hides detected codes  ·  Esc to cancel";
 pub const HINT_WINDOWS: &str = "Drag to capture  ·  Click a window to capture it  ·  Esc to cancel";
-pub const HINT_TEXT: &str = "Click to place text, or on text to change it  ·  Drag text to move it  ·  Enter to finish";
+pub const HINT_TEXT: &str = "Click to place text, or on text to change it  ·  Enter for a new line  ·  Esc or Ctrl+Enter to finish";
 pub const HINT_SHAPE: &str = "Shift: square  ·  Ctrl: from the middle  ·  Alt: move it";
 pub const HINT_SELECT: &str = "Click a drawing to select it  ·  Drag to move  ·  Handles resize  ·  Delete removes it";
 pub const HINT_SELECTED: &str = "Drag to move (Shift: straight)  ·  Handles: Shift keeps its shape, Ctrl from the middle  ·  Arrows nudge  ·  Delete";
@@ -1449,6 +1447,17 @@ fn panel_key(p: &RecordPanel) -> u64 {
     }
     p.choice_hover.hash(&mut h);
     h.finish()
+}
+
+/// The text at `at` among `drawings`, if it's the topmost drawing there.
+pub fn topmost_text(drawings: &dyn crate::ui::selection::Drawings, at: Point) -> Option<usize> {
+    let top = Selection::hits(drawings, at, 1.0).first().copied().or_else(|| {
+        (0..drawings.count()).rev().find(|&i| {
+            let s = drawings.get(i);
+            !s.hidden && s.as_text().is_some_and(|t| t.contains(at, s.size))
+        })
+    })?;
+    drawings.get(top).as_text().is_some().then_some(top)
 }
 
 #[cfg(test)]

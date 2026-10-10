@@ -58,7 +58,8 @@ const CUT_HINT: &str = "Drag across the {what} to cut out; the rest is joined  �
 const SELECT_HINT: &str = "Click a drawing to select it (Alt: the one under it)  ·  Drag to move  ·  Handles resize  ·  Delete removes it";
 const SELECTED_HINT: &str =
     "Drag to move (Shift: straight)  ·  Handles: Shift keeps its shape, Ctrl from the middle  ·  Arrows nudge  ·  Colours and sizes change it";
-const TEXT_HINT: &str = "Click to place text, or on text to change it  ·  Drag text to move it  ·  Shift+Enter for a new line";
+const TEXT_HINT: &str =
+    "Click to place text, or on text to change it  ·  Drag to select  ·  Enter for a new line  ·  Esc or Ctrl+Enter to finish  ·  The select tool moves it";
 const HINT: &str = "Scroll to move around  ·  Ctrl+scroll to zoom  ·  Space+drag or middle-drag to pan";
 
 /// What the editor needs done outside itself.
@@ -1084,8 +1085,10 @@ impl Editor {
         true
     }
 
+    /// The text drawn at `at`, if it's the topmost drawing there (not one
+    /// behind something else).
     fn text_at(&self, at: Point) -> Option<usize> {
-        self.shapes.iter().enumerate().rev().find_map(|(i, (_, s))| (!s.hidden && s.as_text()?.contains(at, s.size)).then_some(i))
+        crate::ui::overlay::topmost_text(&ShapesRef(&self.shapes), at)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -1205,7 +1208,9 @@ impl Editor {
         if self.asking.is_some() || at.y < self.top_h() || at.y > self.view.1 - STATUS_H || self.picker.as_ref().is_some_and(|p| p.rect().contains(at)) {
             return CursorShape::Arrow;
         }
-        if self.pan.is_some() || self.text_drag.is_some_and(|_| self.text_edit.is_some()) {
+        if self.text_drag.is_some() && self.text_edit.is_some() {
+            CursorShape::Text
+        } else if self.pan.is_some() {
             CursorShape::Move
         } else if self.space {
             CursorShape::Hand
@@ -1278,11 +1283,14 @@ impl Editor {
             return;
         }
         let pic = self.to_picture(at);
-        if let Some((start, origin)) = self.text_drag
-            && let Some(t) = self.text_edit.as_mut().and_then(|s| s.as_text_mut())
+        if self.text_drag.is_some()
+            && let Some(s) = self.text_edit.as_mut()
         {
-            if (pic - start).manhattan() * self.zoom > 3.0 || t.pos != origin {
-                t.pos = origin + (pic - start);
+            // Dragging in the text selects (only the select tool moves text).
+            let size = s.size;
+            if let Some(t) = s.as_text_mut() {
+                let i = t.index_at(pic, size);
+                t.edit.place(i, true);
                 self.damaged = true;
             }
             return;

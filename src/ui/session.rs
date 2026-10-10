@@ -386,9 +386,9 @@ impl Session {
             if let Some((h, ..)) = ov.rec_drag {
                 return handle_cursor(h);
             }
-            // (a text being dragged to a new place)
-            if ov.text_drag.is_some_and(|(_, origin)| self.st.text_edit.as_ref().and_then(|(_, s)| s.as_text()).is_some_and(|t| t.pos != origin)) {
-                return CursorShape::Move;
+            // (text being selected by dragging)
+            if ov.text_drag.is_some() && self.st.text_edit.is_some() {
+                return CursorShape::Text;
             }
             if self.st.tool == Tool::Record
                 && ov.sel_origin.is_none()
@@ -2364,14 +2364,14 @@ impl Session {
         } else if ov.rec_drag.is_some() {
             self.drag_area(o, pos, snap, mods & keyseq::CTRL != 0);
         } else if ov.selection.motion(&mut ov.annotations, pos, mods) {
-        } else if let Some((start, origin)) = ov.text_drag
-            && editing_here
-        {
-            if let Some((_, shape)) = &mut self.st.text_edit
-                && let Some(t) = shape.as_text_mut()
-                && ((pos - start).manhattan() > 3.0 || t.pos != origin)
-            {
-                t.pos = origin + (pos - start);
+        } else if ov.text_drag.is_some() && editing_here {
+            // Dragging in the text selects (only the select tool moves text).
+            if let Some((_, shape)) = &mut self.st.text_edit {
+                let size = shape.size;
+                if let Some(t) = shape.as_text_mut() {
+                    let i = t.index_at(pos, size);
+                    t.edit.place(i, true);
+                }
             }
         } else if let Some(active) = &mut ov.active {
             active.extend(pos, Mods::from_keys(mods));

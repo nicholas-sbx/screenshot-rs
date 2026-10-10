@@ -266,7 +266,8 @@ impl TextEdit {
             return KeyResult::Commit;
         }
         if k == key::RETURN || k == key::ENTER {
-            if shift && !self.single_line {
+            // Enter starts a new line; Ctrl+Enter finishes (as Esc or a click elsewhere does).
+            if !ctrl && !self.single_line {
                 self.insert("\n");
                 return KeyResult::Used;
             }
@@ -400,7 +401,8 @@ mod tests {
         assert_eq!(t.text, "hi!");
         t.key(&press(key::BACKSPACE, 0, ""), &w);
         assert_eq!(t.text, "hi");
-        assert_eq!(t.key(&press(key::RETURN, 0, ""), &w), KeyResult::Commit);
+        assert_eq!(t.key(&press(key::RETURN, CTRL, ""), &w), KeyResult::Commit);
+        assert_eq!(t.key(&press(key::ESCAPE, 0, ""), &w), KeyResult::Commit);
         // Typing is undone a word at a time.
         assert!(t.undo_edit(false));
         assert_eq!(t.text, "hi!");
@@ -418,7 +420,7 @@ mod tests {
         t.key(&press(key::LEFT, CTRL | SHIFT, ""), &w);
         assert_eq!(t.selected(), "big ");
         assert_eq!(t.key(&press(key::C, CTRL, ""), &w), KeyResult::Copy("big ".into()));
-        t.key(&press(key::RETURN, SHIFT, ""), &w);
+        t.key(&press(key::RETURN, 0, ""), &w);
         assert_eq!(t.text, "hello \nworld");
         t.place(t.text.len(), false);
         t.key(&press(key::UP, 0, ""), &w);

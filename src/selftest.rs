@@ -316,7 +316,7 @@ fn overlay_basics(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     for ch in "flatshot".chars() {
         tap(&mut s, 0, 0x41, &ch.to_string(), 0);
     }
-    tap(&mut s, 0, key::RETURN, "", 0);
+    tap(&mut s, 0, key::RETURN, "", CTRL);
     check!(s.st.text_edit.is_none() && s.overlays[0].annotations.len() == 8, "{}", s.overlays[0].annotations.len());
     s.undo();
     check!(s.overlays[0].annotations.len() == 7);
@@ -360,10 +360,10 @@ fn keys_and_text(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
         tap(&mut s, 0, 0x41, &ch.to_string(), 0); // (the key code doesn't matter while typing)
     }
     tap(&mut s, 0, key::BACKSPACE, "", 0);
-    // Shift+Enter: a new line; Enter: done.
-    tap(&mut s, 0, key::RETURN, "", SHIFT);
-    tap(&mut s, 0, 0x41, "x", 0);
+    // Enter: a new line; Ctrl+Enter: done.
     tap(&mut s, 0, key::RETURN, "", 0);
+    tap(&mut s, 0, 0x41, "x", 0);
+    tap(&mut s, 0, key::RETURN, "", CTRL);
     let typed = s.overlays[0].annotations.last().and_then(|a| a.as_text()).map(|t| t.edit.text.clone());
     check!(s.st.text_edit.is_none() && typed.as_deref() == Some("hi\nx"), "{typed:?}");
     tap(&mut s, 0, key::Z, "", CTRL);
@@ -409,7 +409,7 @@ fn keys_and_text(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     let t = s.st.text_edit.as_ref().and_then(|(_, t)| t.as_text()).map(|t| t.edit.text.clone());
     check!(t.as_deref() == Some("big hello "), "{t:?}");
     save_png(&frame(&mut s, 0)?, out, "overlay-typing.png")?;
-    tap(&mut s, 0, key::RETURN, "", 0);
+    tap(&mut s, 0, key::RETURN, "", CTRL);
 
     // Esc acts when released, not pressed (the release would go to the
     // window underneath); a release without a press here does nothing.
