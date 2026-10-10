@@ -294,7 +294,7 @@ impl Settings {
             rows: vec![
                 Row::new("theme", "Theme", "For the toolbar, the settings and the other panels. Your drawing colours stay the same.", Control::None)
                     .below(Control::Segmented { options: theme_options, dots, value: theme_value }),
-                Row::new("autostart", "Start at login", "Keeps Flatshot in the system tray so shortcuts work.", Control::Toggle(autostart::enabled())),
+                Row::new("autostart", "Start at login", "Keeps Flatshot RS in the system tray so shortcuts work.", Control::Toggle(autostart::enabled())),
                 Row::new(
                     "config_folder",
                     "Configuration folder",
@@ -493,7 +493,7 @@ impl Settings {
             .map(|(action, label, _)| Row::new(sc_id(action), label, "", Control::Shortcut { seq: String::new(), enabled: false }))
             .collect();
         let mut shortcuts_page =
-            vec![Block::Card { heading: String::new(), rows: global_rows }, Block::Note(global_note(None)), Block::Title("Keys in Flatshot".into())];
+            vec![Block::Card { heading: String::new(), rows: global_rows }, Block::Note(global_note(None)), Block::Title("Keys in Flatshot RS".into())];
         shortcuts_page.push(Block::Note(
             "While capturing and in the annotation editor. Click one and press a new key; Backspace clears it. Esc, Enter, and Ctrl+S / Ctrl+C to capture, stay as they are.".into(),
         ));
@@ -1343,7 +1343,13 @@ impl Settings {
             }
             p.draw_text(r.adjusted(12.0, 0.0, 0.0, 0.0), Align::Left, page.name, control_font(), if selected { c.text } else { c.muted });
         }
-        p.draw_text(Rect::new(24.0, self.view.1 - 34.0, NAV_W - 36.0, 20.0), Align::Left, &format!("Flatshot {}", crate::cli::VERSION), hint_font(), c.muted);
+        p.draw_text(
+            Rect::new(24.0, self.view.1 - 34.0, NAV_W - 36.0, 20.0),
+            Align::Left,
+            &format!("{} {}", crate::APP_NAME, crate::cli::VERSION),
+            hint_font(),
+            c.muted,
+        );
         // The open dropdown, over everything.
         if let Some((b, r)) = self.combo
             && let Some(Control::Combo { options, value }) = self.row(b, r).map(|row| &row.control)
@@ -1544,8 +1550,8 @@ fn line_parts(rect: Rect, buttons: &[&str]) -> (Rect, Vec<Rect>) {
 fn global_note(enabled: Option<bool>) -> String {
     match enabled {
         None => "Looking for KDE's shortcut service…".into(),
-        Some(true) => "These are KDE global shortcuts; they also appear in System Settings → Shortcuts → Flatshot.".into(),
-        Some(false) => "Global shortcuts need KDE Plasma. Elsewhere, bind the command  flatshot  in your desktop's keyboard settings.".into(),
+        Some(true) => "These are KDE global shortcuts; they also appear in System Settings → Shortcuts → Flatshot RS.".into(),
+        Some(false) => "Global shortcuts need KDE Plasma. Elsewhere, bind the command  flatshot-rs  in your desktop's keyboard settings.".into(),
     }
 }
 

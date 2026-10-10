@@ -1,7 +1,7 @@
 # One description, three native formats: nfpm package -p deb|rpm|archlinux
 # Paths are relative to the repository root; VERSION and ARCH come from
 # the environment (packaging/build-packages.sh sets them).
-name: flatshot
+name: flatshot-rs
 arch: ${ARCH}
 platform: linux
 version: ${VERSION}
@@ -22,28 +22,28 @@ archlinux:
   packager: nicholas-sbx <nicholas-sbx@users.noreply.github.com>
 
 contents:
-  - src: ./target/release/flatshot
-    dst: /usr/bin/flatshot
+  - src: ./target/release/flatshot-rs
+    dst: /usr/bin/flatshot-rs
     file_info:
       mode: 0755
-  - src: ./packaging/flatshot.desktop
-    dst: /usr/share/applications/flatshot.desktop
-  # KWin's screenshot API for /usr/bin/flatshot (see the file)
-  - src: ./packaging/flatshot-kwin.desktop
-    dst: /usr/share/applications/flatshot-kwin.desktop
+  - src: ./packaging/flatshot-rs.desktop
+    dst: /usr/share/applications/flatshot-rs.desktop
+  # KWin's screenshot API for /usr/bin/flatshot-rs (see the file)
+  - src: ./packaging/flatshot-rs-kwin.desktop
+    dst: /usr/share/applications/flatshot-rs-kwin.desktop
   # Flatshot's notification events, for KDE's per-event notification settings
-  - src: ./assets/flatshot.notifyrc
-    dst: /usr/share/knotifications6/flatshot.notifyrc
-  - src: ./assets/flatshot.notifyrc
-    dst: /usr/share/knotifications5/flatshot.notifyrc
-  - src: ./assets/flatshot.svg
-    dst: /usr/share/icons/hicolor/scalable/apps/flatshot.svg
-  - src: ./assets/flatshot.png
-    dst: /usr/share/icons/hicolor/256x256/apps/flatshot.png
+  - src: ./assets/flatshot-rs.notifyrc
+    dst: /usr/share/knotifications6/flatshot-rs.notifyrc
+  - src: ./assets/flatshot-rs.notifyrc
+    dst: /usr/share/knotifications5/flatshot-rs.notifyrc
+  - src: ./assets/flatshot-rs.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/flatshot-rs.svg
+  - src: ./assets/flatshot-rs.png
+    dst: /usr/share/icons/hicolor/256x256/apps/flatshot-rs.png
   - src: ./LICENSE
-    dst: /usr/share/licenses/flatshot/LICENSE
+    dst: /usr/share/licenses/flatshot-rs/LICENSE
   - src: ./README.md
-    dst: /usr/share/doc/flatshot/README.md
+    dst: /usr/share/doc/flatshot-rs/README.md
 
 overrides:
   deb:

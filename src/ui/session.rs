@@ -1559,7 +1559,7 @@ impl Session {
             }
         });
         if let Err(e) = started {
-            eprintln!("flatshot: could not start looking for codes: {e}");
+            eprintln!("flatshot-rs: could not start looking for codes: {e}");
         }
     }
 

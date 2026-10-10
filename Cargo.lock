@@ -467,7 +467,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flatshot"
+name = "flatshot-rs"
 version = "1.0.0"
 dependencies = [
  "calloop",

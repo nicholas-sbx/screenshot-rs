@@ -1,8 +1,8 @@
 //! Single-instance plumbing: the tray app listens on a Unix socket and
-//! other invocations (`flatshot`, `flatshot --full`, ...) hand it commands.
+//! other invocations (`flatshot-rs`, `flatshot-rs --full`, ...) hand it commands.
 //!
 //! The socket lives in a folder only this user can enter
-//! (`$XDG_RUNTIME_DIR/flatshot`), and both ends check that the other runs
+//! (`$XDG_RUNTIME_DIR/flatshot-rs`), and both ends check that the other runs
 //! as the same user (SO_PEERCRED), so no other account can talk to the tray
 //! or pose as it. A lock file makes sure only one tray app serves.
 
@@ -27,12 +27,12 @@ pub fn runtime_dir() -> io::Result<PathBuf> {
     let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p| p.is_absolute());
     let mut candidates = Vec::new();
     if let Some(b) = base.filter(|b| secure_dir(b).is_ok()) {
-        candidates.push(b.join("flatshot"));
+        candidates.push(b.join(crate::APP_ID));
     }
     // Without one: the temp folder, unless someone else took the name
     // there first; then (as every Flatshot of ours concludes alike) the cache.
-    candidates.push(std::env::temp_dir().join(format!("flatshot-{}.run", uid())));
-    candidates.push(crate::config::cache_home().join("flatshot").join("run"));
+    candidates.push(std::env::temp_dir().join(format!("{}-{}.run", crate::APP_ID, uid())));
+    candidates.push(crate::config::cache_home().join(crate::APP_ID).join("run"));
     let mut last = io::Error::other("no runtime folder");
     for dir in candidates {
         match fs::DirBuilder::new().mode(0o700).recursive(true).create(&dir).and_then(|()| secure_dir(&dir)) {
@@ -110,24 +110,10 @@ pub fn query(command: &str, timeout: Duration) -> Option<String> {
     exchange(&socket_path().ok()?, command, timeout)
 }
 
-/// The Python Flatshot's tray socket (QLocalServer in the temp folder).
+/// The Python Flatshot's tray socket (QLocalServer in the temp folder):
+/// it runs alongside, on its own.
 pub fn legacy_socket() -> PathBuf {
     std::env::temp_dir().join(format!("flatshot-{}", uid()))
-}
-
-/// Ask a running Python Flatshot tray app (from before the Rust version)
-/// to quit, so this one takes over its shortcuts. True if one was there.
-pub fn quit_legacy_tray() -> bool {
-    let path = legacy_socket();
-    if exchange(&path, "status", Duration::from_millis(500)).is_none() {
-        return false;
-    }
-    let _ = exchange(&path, "quit", Duration::from_millis(1500));
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline && exchange(&path, "ping", Duration::from_millis(300)).is_some() {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    true
 }
 
 pub struct Server {

@@ -132,7 +132,7 @@ fn capture_one(conn: &zbus::blocking::Connection, want: &Want, started: Instant)
 fn describe(e: &zbus::Error) -> String {
     let s = e.to_string();
     if s.contains("NoAuthorized") || s.contains("NotAuthorized") || s.contains("AccessDenied") {
-        format!("KWin refused the screenshot ({s}): is flatshot's desktop file installed with X-KDE-DBUS-Restricted-Interfaces?")
+        format!("KWin refused the screenshot ({s}): is flatshot-rs's desktop file installed with X-KDE-DBUS-Restricted-Interfaces?")
     } else if s.contains("ServiceUnknown") || s.contains("UnknownObject") || s.contains("UnknownMethod") {
         format!("KWin's screenshot API isn't there: {s}")
     } else {

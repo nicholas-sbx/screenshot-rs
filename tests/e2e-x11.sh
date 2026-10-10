@@ -8,18 +8,18 @@
 # Needs Xvfb, ffmpeg (with x11grab) and dbus (dbus-run-session).
 #
 # Run from the repository root after `cargo build --bins --examples`. BIN
-# picks the flatshot binary (default target/debug/flatshot).
+# picks the flatshot binary (default target/debug/flatshot-rs).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-BIN=${BIN:-target/debug/flatshot}
+BIN=${BIN:-target/debug/flatshot-rs}
 EX=target/debug/examples
 work=$(mktemp -d)
 export XDG_RUNTIME_DIR=$work/run XDG_CONFIG_HOME=$work/config XDG_STATE_HOME=$work/state XDG_DATA_HOME=$work/data HOME=$work/home
-mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/flatshot" "$HOME"
+mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/flatshot-rs" "$HOME"
 chmod 700 "$XDG_RUNTIME_DIR"
 unset WAYLAND_DISPLAY SWAYSOCK HYPRLAND_INSTANCE_SIGNATURE
 shots=$work/shots
-cat > "$XDG_CONFIG_HOME/flatshot/config.json" <<JSON
+cat > "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<JSON
 {"save_dir": "$shots", "notify": true, "clipboard": "image", "scan_codes": true,
  "record_dir": "$work/videos", "record_countdown": 0}
 JSON
@@ -156,7 +156,7 @@ PY
 [ "$edge" = "400 300 599 399" ] && pass "pin dragged to its place ($edge)" || fail "pin's edge at $edge, wanted 400 300 599 399"
 
 # 5. The annotation editor: draw a box, save it in place, close.
-cp assets/flatshot.png "$work/edit.png"
+cp assets/flatshot-rs.png "$work/edit.png"
 before=$(md5sum < "$work/edit.png")
 $BIN -i "$work/edit.png" -v > "$work/editor.log" 2>&1 &
 pid=$!
@@ -176,7 +176,7 @@ up "$work/settings.log" || true
 $EX/xinject click 57 68 sleep 300 click 505 80 sleep 300 key Escape sleep 300
 finish $pid 3
 [ $code = 0 ] && pass "settings closed with Esc" || fail "the settings window didn't close (exit $code)"
-grep -qE '"dim_opacity": [0-9],' "$XDG_CONFIG_HOME/flatshot/config.json" && pass "setting saved" || fail "setting not saved: $(grep -o '"dim_opacity": [0-9]*' "$XDG_CONFIG_HOME/flatshot/config.json")"
+grep -qE '"dim_opacity": [0-9],' "$XDG_CONFIG_HOME/flatshot-rs/config.json" && pass "setting saved" || fail "setting not saved: $(grep -o '"dim_opacity": [0-9]*' "$XDG_CONFIG_HOME/flatshot-rs/config.json")"
 
 # 7. Screen recording with ffmpeg's x11grab: an area chosen on the
 # overlay, stopped from the bar under it (outside the area), saved.

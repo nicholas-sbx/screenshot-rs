@@ -1,6 +1,7 @@
 //! KDE global shortcuts through KGlobalAccel (org.kde.kglobalaccel).
 //!
-//! Flatshot registers as the component "flatshot", so its shortcuts also
+//! Flatshot registers as the component "flatshot-rs" (the Python Flatshot's
+//! is "flatshot": each has its own), so its shortcuts also
 //! show up (and can be changed) in System Settings > Shortcuts. Presses
 //! arrive as the component's `globalShortcutPressed` signal, which a thread
 //! of ours hears and hands to the event loop at once.
@@ -13,8 +14,8 @@ const SERVICE: &str = "org.kde.kglobalaccel";
 const PATH: &str = "/kglobalaccel";
 const IFACE: &str = "org.kde.KGlobalAccel";
 const COMPONENT_IFACE: &str = "org.kde.kglobalaccel.Component";
-const COMPONENT: &str = "flatshot";
-const FRIENDLY: &str = "Flatshot";
+const COMPONENT: &str = crate::APP_ID;
+const FRIENDLY: &str = crate::APP_NAME;
 
 /// (action, label, default keys)
 pub const ACTIONS: &[(&str, &str, &str)] = &[

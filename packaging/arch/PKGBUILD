@@ -1,9 +1,9 @@
 # Maintainer: nicholas-sbx <nicholas-sbx@users.noreply.github.com>
 #
-# Builds Flatshot from a release's source. The ready-made package (and a
+# Builds Flatshot RS from a release's source. The ready-made package (and a
 # pacman repository with it) comes with each GitHub release; see README.md.
 # To build the code you have checked out instead: FLATSHOT_SRC=$PWD/../.. makepkg
-pkgname=flatshot
+pkgname=flatshot-rs
 pkgver=1.0.0
 pkgrel=1
 pkgdesc="Region screenshots for Wayland and X11 (KDE first) with a floating draw toolbar and QR code scanning"
@@ -53,18 +53,18 @@ build() {
 
 check() {
     cd "$(_src)"
-    "$srcdir/target/release/flatshot" --self-test
+    "$srcdir/target/release/flatshot-rs" --self-test
 }
 
 package() {
     cd "$(_src)"
-    install -Dm755 "$srcdir/target/release/flatshot" "$pkgdir/usr/bin/flatshot"
-    install -Dm644 packaging/flatshot.desktop "$pkgdir/usr/share/applications/flatshot.desktop"
-    install -Dm644 packaging/flatshot-kwin.desktop "$pkgdir/usr/share/applications/flatshot-kwin.desktop"
-    install -Dm644 assets/flatshot.notifyrc "$pkgdir/usr/share/knotifications6/flatshot.notifyrc"
-    install -Dm644 assets/flatshot.notifyrc "$pkgdir/usr/share/knotifications5/flatshot.notifyrc"
-    install -Dm644 assets/flatshot.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/flatshot.svg"
-    install -Dm644 assets/flatshot.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/flatshot.png"
+    install -Dm755 "$srcdir/target/release/flatshot-rs" "$pkgdir/usr/bin/flatshot-rs"
+    install -Dm644 packaging/flatshot-rs.desktop "$pkgdir/usr/share/applications/flatshot-rs.desktop"
+    install -Dm644 packaging/flatshot-rs-kwin.desktop "$pkgdir/usr/share/applications/flatshot-rs-kwin.desktop"
+    install -Dm644 assets/flatshot-rs.notifyrc "$pkgdir/usr/share/knotifications6/flatshot-rs.notifyrc"
+    install -Dm644 assets/flatshot-rs.notifyrc "$pkgdir/usr/share/knotifications5/flatshot-rs.notifyrc"
+    install -Dm644 assets/flatshot-rs.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/flatshot-rs.svg"
+    install -Dm644 assets/flatshot-rs.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/flatshot-rs.png"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

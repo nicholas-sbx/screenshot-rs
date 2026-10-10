@@ -143,7 +143,7 @@ fn menu_items(keys: &HashMap<String, String>, recording: bool) -> Vec<MenuItem> 
         MenuItem::new("folder", "Open screenshots folder", ""),
         MenuItem::new("settings", "Settings…", ""),
         MenuItem::separator(),
-        MenuItem::new("quit", "Quit Flatshot", ""),
+        MenuItem::new("quit", &format!("Quit {}", crate::APP_NAME), ""),
     ]);
     items
 }
@@ -161,11 +161,9 @@ fn status() -> String {
 
 /// After an upgrade the old tray app keeps running (and handling every
 /// capture): if the running one isn't this version from this place, ask
-/// it to quit so this one takes over. The Python Flatshot's too.
+/// it to quit so this one takes over. (Not the Python Flatshot's: that's
+/// another program, which can run alongside.)
 pub fn replace_older_tray() {
-    if ipc::quit_legacy_tray() {
-        crate::warn!("replaced the running Flatshot (Python) tray app");
-    }
     let Some(reply) = ipc::query("status", Duration::from_millis(500)) else { return };
     let info: serde_json::Value = serde_json::from_str(&reply).unwrap_or_default();
     let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();

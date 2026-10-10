@@ -27,7 +27,9 @@ use crate::util;
 const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 /// Flatshot's events and what they do unless the user changes it.
-pub const NOTIFYRC: &str = include_str!("../../assets/flatshot.notifyrc");
+pub const NOTIFYRC: &str = include_str!("../../assets/flatshot-rs.notifyrc");
+/// Its file name, in knotifications6 (and the user's changes in ~/.config).
+const NOTIFYRC_NAME: &str = "flatshot-rs.notifyrc";
 /// The most text a notification's body shows.
 const MAX_BODY: usize = 1000;
 /// The most notifications whose buttons are remembered.
@@ -60,7 +62,7 @@ pub struct EventSettings {
 
 /// `event`'s settings: Flatshot's defaults, with the user's changes over them.
 pub fn event_settings(event: &str) -> EventSettings {
-    let user = util::read_limited(&crate::config::config_home().join("flatshot.notifyrc"), 256 << 10).unwrap_or_default();
+    let user = util::read_limited(&crate::config::config_home().join(NOTIFYRC_NAME), 256 << 10).unwrap_or_default();
     settings_from(&[NOTIFYRC, &String::from_utf8_lossy(&user)], event)
 }
 
@@ -98,17 +100,17 @@ fn ini_section(text: &str, section: &str) -> Vec<(String, String)> {
 }
 
 /// Make the events known to KDE's notification settings: the packages
-/// install flatshot.notifyrc; anywhere else (cargo install, a copied
+/// install flatshot-rs.notifyrc; anywhere else (cargo install, a copied
 /// binary), a copy goes in ~/.local/share.
 pub fn install_events() {
     for version in ["knotifications6", "knotifications5"] {
         let present = crate::config::data_dirs()
             .iter()
-            .any(|d| util::read_limited(&d.join(version).join("flatshot.notifyrc"), 64 << 10).is_ok_and(|t| t == NOTIFYRC.as_bytes()));
+            .any(|d| util::read_limited(&d.join(version).join(NOTIFYRC_NAME), 64 << 10).is_ok_and(|t| t == NOTIFYRC.as_bytes()));
         if present {
             continue;
         }
-        let target = crate::config::data_home().join(version).join("flatshot.notifyrc");
+        let target = crate::config::data_home().join(version).join(NOTIFYRC_NAME);
         let written = target.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&target, NOTIFYRC));
         if let Err(e) = written {
             crate::warn!("could not install the notification events: {e}");
@@ -174,7 +176,7 @@ fn notify(note: &Note, with_actions: bool) -> Result<u32, String> {
     let body = util::elide(&note.body, MAX_BODY);
     let body = if reads_markup(conn) { escape_markup(&body) } else { body };
     let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
-    hints.insert("desktop-entry", Value::from("flatshot"));
+    hints.insert("desktop-entry", Value::from(crate::APP_ID));
     hints.insert("x-kde-eventId", Value::from(note.event));
     if note.urgent {
         hints.insert("urgency", Value::U8(2));
@@ -188,7 +190,13 @@ fn notify(note: &Note, with_actions: bool) -> Result<u32, String> {
     }
     let actions: Vec<&str> = if with_actions { note.actions.iter().flat_map(|(k, l)| [k.as_str(), l.as_str()]).collect() } else { Vec::new() };
     let reply = conn
-        .call_method(Some(SERVICE), PATH, Some(SERVICE), "Notify", &("Flatshot", 0u32, "flatshot", note.summary.as_str(), body.as_str(), actions, hints, -1i32))
+        .call_method(
+            Some(SERVICE),
+            PATH,
+            Some(SERVICE),
+            "Notify",
+            &(crate::APP_NAME, 0u32, crate::APP_ID, note.summary.as_str(), body.as_str(), actions, hints, -1i32),
+        )
         .map_err(|e| e.to_string())?;
     reply.body().deserialize::<u32>().map_err(|e| e.to_string())
 }
@@ -199,7 +207,7 @@ fn notify_send(note: &Note) {
     }
     // (notify-send's body is markup too, wherever the desktop reads it)
     let body = escape_markup(&util::elide(&note.body, MAX_BODY));
-    let mut argv: Vec<String> = vec!["notify-send".into(), "-a".into(), "Flatshot".into(), "-i".into(), "flatshot".into()];
+    let mut argv: Vec<String> = vec!["notify-send".into(), "-a".into(), crate::APP_NAME.into(), "-i".into(), crate::APP_ID.into()];
     if note.urgent {
         argv.extend(["-u".into(), "critical".into()]);
     }

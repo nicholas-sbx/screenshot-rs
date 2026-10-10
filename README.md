@@ -1,8 +1,8 @@
-# Flatshot (Rust)
+# Flatshot RS
 
-A ShareX-style screenshot tool for Linux, on Wayland and X11, built mainly for KDE Plasma: a rewrite of [Flatshot](https://github.com/nicholas-sbx/screenshot) as a single native binary, with no Python, Qt or helper programs.
+A ShareX-style screenshot tool for Linux, on Wayland and X11, built mainly for KDE Plasma: a rewrite of [Flatshot](https://github.com/nicholas-sbx/screenshot) as a single native binary, with no Python, Qt or helper programs. It installs and runs as `flatshot-rs`, so it can sit alongside the Python Flatshot (see [Alongside the Python Flatshot](#alongside-the-python-flatshot)).
 
-Flatshot lives in your system tray. Press your shortcut and the screen freezes. **Drag a region, or click a window, and it's saved and copied straight away.** To mark it up first, draw on the frozen screen with the floating toolbar, then drag. **QR codes and barcodes** on screen are found automatically, each with a card to copy or open it.
+Flatshot RS lives in your system tray. Press your shortcut and the screen freezes. **Drag a region, or click a window, and it's saved and copied straight away.** To mark it up first, draw on the frozen screen with the floating toolbar, then drag. **QR codes and barcodes** on screen are found automatically, each with a card to copy or open it.
 
 ## Why the rewrite
 
@@ -17,7 +17,7 @@ Both versions on the same machine and desktop, 1600 × 1000, software rendering,
 | | Flatshot (Python) | Flatshot (Rust) |
 |---|---|---|
 | Shortcut → overlay on screen, tray app running | 100 ms (87–124) | **19 ms** (18–20) |
-| `flatshot` → overlay on screen, no tray app | 324 ms (303–350) | **24 ms** (22–30) |
+| `flatshot-rs` → overlay on screen, no tray app | 324 ms (303–350) | **24 ms** (22–30) |
 | Tray app, idle | 65 MB | **12 MB** |
 | Tray app, after six captures | 93 MB | **16 MB** |
 | Peak during a capture | 124 MB | **40 MB** |
@@ -27,7 +27,7 @@ On X11 (Xvfb with Openbox; times from the X server's own damage reports):
 | | Flatshot (Python) | Flatshot (Rust) |
 |---|---|---|
 | Shortcut → overlay on screen, tray app running | 74 ms (66–88) | **17 ms** (16–18) |
-| `flatshot` → overlay on screen, no tray app | 296 ms (282–310) | **21 ms** (18–23) |
+| `flatshot-rs` → overlay on screen, no tray app | 296 ms (282–310) | **21 ms** (18–23) |
 | Tray app, idle | 61 MB | **10 MB** |
 | Tray app, after six captures | 79 MB | **14 MB** |
 | Peak during a capture | 107 MB | **38 MB** |
@@ -40,25 +40,25 @@ Each release has packages for Debian/Ubuntu (`.deb`), Fedora/openSUSE (`.rpm`) a
 
 | Distro | Install |
 |---|---|
-| Debian 12+, Ubuntu 22.04+, KDE neon | `sudo apt install ./flatshot_*_amd64.deb` |
-| Fedora / openSUSE | `sudo dnf install ./flatshot-*.x86_64.rpm` |
-| Arch / Manjaro / EndeavourOS | `sudo pacman -U flatshot-*-x86_64.pkg.tar.zst`, or the pacman repository below |
+| Debian 12+, Ubuntu 22.04+, KDE neon | `sudo apt install ./flatshot-rs_*_amd64.deb` |
+| Fedora / openSUSE | `sudo dnf install ./flatshot-rs-*.x86_64.rpm` |
+| Arch / Manjaro / EndeavourOS | `sudo pacman -U flatshot-rs-*-x86_64.pkg.tar.zst`, or the pacman repository below |
 
 ### Arch: pacman repository
 
-Each release also updates a pacman repository, so Flatshot updates with the rest of your system:
+Each release also updates a pacman repository, so Flatshot RS updates with the rest of your system:
 
 ```sh
 sudo tee -a /etc/pacman.conf <<'EOF'
 
-[flatshot]
+[flatshot-rs]
 SigLevel = Optional TrustAll
 Server = https://github.com/nicholas-sbx/screenshot-rs/releases/download/pacman
 EOF
-sudo pacman -Sy flatshot
+sudo pacman -Sy flatshot-rs
 ```
 
-`sudo pacman -Syu` then picks up new versions. To remove it, delete the `[flatshot]` block and `sudo pacman -R flatshot`.
+`sudo pacman -Syu` then picks up new versions. To remove it, delete the `[flatshot-rs]` block and `sudo pacman -R flatshot-rs`.
 
 - **The repository has to be public** for pacman to download from it: GitHub only serves a private repository's releases to people signed in.
 - The packages are signed when the release workflow has a `PACMAN_GPG_KEY` secret; until then `SigLevel = Optional TrustAll` accepts them unsigned.
@@ -69,24 +69,28 @@ Rust 1.88 or newer and libxkbcommon (with its headers):
 
 ```sh
 cargo build --release
-sudo install -Dm755 target/release/flatshot /usr/bin/flatshot
-sudo install -Dm644 packaging/flatshot.desktop /usr/share/applications/flatshot.desktop
-sudo install -Dm644 packaging/flatshot-kwin.desktop /usr/share/applications/flatshot-kwin.desktop
-sudo install -Dm644 assets/flatshot.notifyrc /usr/share/knotifications6/flatshot.notifyrc
-sudo install -Dm644 assets/flatshot.svg /usr/share/icons/hicolor/scalable/apps/flatshot.svg
+sudo install -Dm755 target/release/flatshot-rs /usr/bin/flatshot-rs
+sudo install -Dm644 packaging/flatshot-rs.desktop /usr/share/applications/flatshot-rs.desktop
+sudo install -Dm644 packaging/flatshot-rs-kwin.desktop /usr/share/applications/flatshot-rs-kwin.desktop
+sudo install -Dm644 assets/flatshot-rs.notifyrc /usr/share/knotifications6/flatshot-rs.notifyrc
+sudo install -Dm644 assets/flatshot-rs.svg /usr/share/icons/hicolor/scalable/apps/flatshot-rs.svg
 ```
 
 Or `packaging/arch/PKGBUILD` with `makepkg`, or `packaging/build-packages.sh` (with [nfpm](https://nfpm.goreleaser.com)) for all three package formats.
 
-**On KDE, the binary must be at `/usr/bin/flatshot`** with `flatshot-kwin.desktop` installed: KWin only lets programs named (by their full path) in such a desktop file use its screenshot API. Anywhere else Flatshot falls back to the screenshot portal or Spectacle, which are slower.
+**On KDE, the binary must be at `/usr/bin/flatshot-rs`** with `flatshot-rs-kwin.desktop` installed: KWin only lets programs named (by their full path) in such a desktop file use its screenshot API. Anywhere else Flatshot RS falls back to the screenshot portal or Spectacle, which are slower.
 
 ## Getting started
 
-1. Start **Flatshot** from the app menu. This runs `flatshot --tray`, and the icon appears in the system tray.
-2. On KDE the shortcuts are registered for you: <kbd>Ctrl</kbd>+<kbd>Print</kbd> (region), <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Print</kbd> (active window) and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Print</kbd> (all screens). Change them, or set keys for current monitor, last region, pin and record, on the Shortcuts page of Flatshot's settings (or in **System Settings → Shortcuts → Flatshot**).
-3. On other desktops, bind the command `flatshot` (or `flatshot --full`, ...) in your desktop's keyboard settings: it hands the capture to the running tray app at once, or captures by itself when there is none. The same goes for X11 sessions; KDE's X11 session registers the shortcuts like its Wayland one.
+1. Start **Flatshot RS** from the app menu. This runs `flatshot-rs --tray`, and the icon appears in the system tray.
+2. On KDE the shortcuts are registered for you: <kbd>Ctrl</kbd>+<kbd>Print</kbd> (region), <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Print</kbd> (active window) and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Print</kbd> (all screens). Change them, or set keys for current monitor, last region, pin and record, on the Shortcuts page of its settings (or in **System Settings → Shortcuts → Flatshot RS**).
+3. On other desktops, bind the command `flatshot-rs` (or `flatshot-rs --full`, ...) in your desktop's keyboard settings: it hands the capture to the running tray app at once, or captures by itself when there is none. The same goes for X11 sessions; KDE's X11 session registers the shortcuts like its Wayland one.
 
-Replacing the Python Flatshot: starting this one's tray app asks the old one to quit, and takes over its shortcuts and settings (`~/.config/flatshot/config.json` is shared).
+### Alongside the Python Flatshot
+
+Both can be installed and running at once: nothing is shared. This one is `flatshot-rs` everywhere the Python one is `flatshot`: the program, the packages, the desktop files and icon, the settings (`~/.config/flatshot-rs/`), the tray app's socket, and KDE's shortcut and notification components (**Flatshot RS** in System Settings). The first time it runs, it starts from a copy of the Python Flatshot's settings, if there are any; from then on each keeps its own.
+
+Both come with the same default keys. KDE gives a key to whichever registered it first: change one of them in System Settings → Shortcuts.
 
 ## Using it
 
@@ -110,30 +114,30 @@ Replacing the Python Flatshot: starting this one's tray app asks the old one to 
 
 ### Recording the screen
 
-Choose **Record screen** in the tray menu (or its shortcut, or <kbd>V</kbd> on the overlay, or `flatshot --record`), pick an area or a window or a whole monitor, set MP4, WebM or GIF, sound and frame rate in the panel under it, and press <kbd>Enter</kbd>. A small bar under the area (outside it, so it's never in the video) shows the time and has pause, stop and discard; red marks show the area's corners. Stop with the bar, the tray icon, the shortcut again, or <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal: the video is saved to `~/Videos/Screencasts` (settings: Recording), copied as a file, and announced.
+Choose **Record screen** in the tray menu (or its shortcut, or <kbd>V</kbd> on the overlay, or `flatshot-rs --record`), pick an area or a window or a whole monitor, set MP4, WebM or GIF, sound and frame rate in the panel under it, and press <kbd>Enter</kbd>. A small bar under the area (outside it, so it's never in the video) shows the time and has pause, stop and discard; red marks show the area's corners. Stop with the bar, the tray icon, the shortcut again, or <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal: the video is saved to `~/Videos/Screencasts` (settings: Recording), copied as a file, and announced.
 
 | | KDE Plasma, GNOME | Sway, Hyprland, wlroots | X11 |
 |---|---|---|---|
 | Records with | the screen-cast portal and GStreamer (the first time, the desktop asks which screen to share) | wf-recorder | ffmpeg (x11grab) |
 | Needs | `gst-launch-1.0` with the PipeWire plugin, and x264enc (MP4) or vp8enc (WebM) | `wf-recorder` | `ffmpeg` |
 
-Pausing and GIFs also need `ffmpeg`. The recorders are programs of their own: no frame passes through Flatshot.
+Pausing and GIFs also need `ffmpeg`. The recorders are programs of their own: no frame passes through Flatshot RS.
 
 ### Command line
 
 ```
-flatshot                      region capture (handed to the tray app if it runs)
-flatshot -f | -m | -w | -l    all screens, current monitor, active window, last region
-flatshot -r 800x600+100+50    an exact area (logical pixels)
-flatshot -d 3                 after 3 seconds
-flatshot -o file.png          save there ("-" writes PNG to stdout)
-flatshot --no-copy --no-save  just print the path / don't keep a file
-flatshot --record             record an area (stops the recording in progress)
-flatshot -i picture.png       annotate a picture
-flatshot --settings           the settings window
-flatshot --tray               the tray app
-flatshot --quit               stop the tray app
-flatshot -v                   how long each step takes, on stderr
+flatshot-rs                      region capture (handed to the tray app if it runs)
+flatshot-rs -f | -m | -w | -l    all screens, current monitor, active window, last region
+flatshot-rs -r 800x600+100+50    an exact area (logical pixels)
+flatshot-rs -d 3                 after 3 seconds
+flatshot-rs -o file.png          save there ("-" writes PNG to stdout)
+flatshot-rs --no-copy --no-save  just print the path / don't keep a file
+flatshot-rs --record             record an area (stops the recording in progress)
+flatshot-rs -i picture.png       annotate a picture
+flatshot-rs --settings           the settings window
+flatshot-rs --tray               the tray app
+flatshot-rs --quit               stop the tray app
+flatshot-rs -v                   how long each step takes, on stderr
 ```
 
 Exit codes: 0 captured, 1 cancelled, 2 failed.
@@ -151,7 +155,7 @@ Exit codes: 0 captured, 1 cancelled, 2 failed.
 
 On X11 the scale is Xft.dpi's, in whole steps. A one-off capture that copies hands the copy to the desktop's clipboard manager, or to `xclip`; with neither it stays in the background (up to 10 minutes, until something else is copied) to serve it, as the Python version does.
 
-Change settings in the settings window (the tray menu's **Settings…**, or `flatshot --settings`): they apply from the next capture. They live in `~/.config/flatshot/config.json` (the same file and keys as the Python Flatshot); `flatshot --print-config` shows them all.
+Change settings in the settings window (the tray menu's **Settings…**, or `flatshot-rs --settings`): they apply from the next capture. They live in `~/.config/flatshot-rs/config.json` (the same keys as the Python Flatshot's, whose settings are copied the first time); `flatshot-rs --print-config` shows them all.
 
 ## Security
 

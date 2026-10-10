@@ -40,7 +40,7 @@ pub enum Parsed {
 
 fn usage() -> String {
     format!(
-        "usage: flatshot [-h] [-d SEC] [-f | -m | -w | -l | -r WxH+X+Y] [--pin] [--record] [-o FILE]\n\
+        "usage: flatshot-rs [-h] [-d SEC] [-f | -m | -w | -l | -r WxH+X+Y] [--pin] [--record] [-o FILE]\n\
          \x20               [-i FILE] [--backend {{{}}}]\n\
          \x20               [--no-copy] [--no-save] [--no-scan] [--tray] [--settings] [--quit]\n\
          \x20               [--print-config] [--diagnose] [-v] [--version]",
@@ -90,7 +90,7 @@ instant captures (no UI):
 }
 
 fn error(msg: impl AsRef<str>) -> Parsed {
-    Parsed::Error(format!("{}\nflatshot: error: {}", usage(), msg.as_ref()))
+    Parsed::Error(format!("{}\nflatshot-rs: error: {}", usage(), msg.as_ref()))
 }
 
 /// 'WxH+X+Y' (as in Flameshot and X11 geometry): an area in global logical pixels.
@@ -156,7 +156,7 @@ pub fn parse(argv: &[String]) -> Parsed {
             return Parsed::Exit(help());
         }
         if arg == "--version" {
-            return Parsed::Exit(format!("flatshot {VERSION}\n"));
+            return Parsed::Exit(format!("flatshot-rs {VERSION}\n"));
         }
         // An option with a value: "--delay 3", "--delay=3", "-d3", "-d 3".
         let mut matched = false;

@@ -166,7 +166,7 @@ pub struct Recording {
 /// not in memory as /tmp can be), named after this process so a crashed
 /// run's leftovers can be told apart and cleared.
 fn segment_folder() -> Result<PathBuf, String> {
-    let base = config::cache_home().join("flatshot");
+    let base = config::cache_home().join(crate::APP_ID);
     fs::DirBuilder::new().recursive(true).mode(0o700).create(&base).map_err(|e| format!("{}: {e}", base.display()))?;
     clear_leftovers(&base);
     let dir = base.join(format!("recording-{}-{}", std::process::id(), util::random_hex(4)));
@@ -334,7 +334,7 @@ impl Recording {
             Err(e) => return self.fail(e),
         };
         if self.segments.is_empty() {
-            eprintln!("flatshot: recording {}", launch.about);
+            eprintln!("flatshot-rs: recording {}", launch.about);
         }
         let log =
             fs::OpenOptions::new().create(true).append(true).mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(self.dir.join("recorder.log"));
@@ -777,7 +777,7 @@ impl App {
                     State::Saving | State::Done => "Saving the recording",
                     State::Recording => "Recording",
                 };
-                t.set_tooltip(&format!("Flatshot: {state}  {clock}  ·  click to stop"));
+                t.set_tooltip(&format!("{}: {state}  {clock}  ·  click to stop", crate::APP_NAME));
             }
         }
     }
@@ -824,7 +824,7 @@ impl App {
             };
             if !placed {
                 // (no layer-shell: a small window the desktop places)
-                match self.dpy.add_window(Owner::RecBar, "Flatshot recording", size, false) {
+                match self.dpy.add_window(Owner::RecBar, &format!("{} recording", crate::APP_NAME), size, false) {
                     Ok(()) => self.dpy.set_transparent(Owner::RecBar),
                     Err(e) => crate::warn!("no room for the recording's controls: {e}"),
                 }
@@ -852,7 +852,7 @@ impl App {
         if no_bar {
             self.notify(notify::Note {
                 summary: "Recording the whole screen".into(),
-                body: "Click the Flatshot tray icon, or press the shortcut again, to stop.".into(),
+                body: "Click the Flatshot RS tray icon, or press the shortcut again, to stop.".into(),
                 event: "notice",
                 ..Default::default()
             });
@@ -1081,7 +1081,7 @@ fn small_thumbnail(thumb: Image) -> Option<Image> {
 /// The first frame (the frozen screen), for the notification; the newest
 /// few are kept.
 fn save_thumbnail(thumb: &Image, video: &Path) -> Option<PathBuf> {
-    let folder = config::cache_home().join("flatshot").join("thumbnails");
+    let folder = config::cache_home().join(crate::APP_ID).join("thumbnails");
     fs::DirBuilder::new().recursive(true).mode(0o700).create(&folder).ok()?;
     let mut old: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(&folder)
         .ok()?

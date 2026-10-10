@@ -12,10 +12,10 @@ fn main() {
     for _ in 0..count {
         let r = conn.emit_signal(
             Some(dest.as_str()),
-            "/component/flatshot",
+            "/component/flatshot_rs",
             "org.kde.kglobalaccel.Component",
             "globalShortcutPressed",
-            &("flatshot", "region", 0i64),
+            &("flatshot-rs", "region", 0i64),
         );
         if r.is_ok() {
             sent += 1;

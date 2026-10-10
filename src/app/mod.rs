@@ -376,7 +376,7 @@ pub fn layer_namespace() -> String {
         return s;
     }
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
-    if desktop.contains("kde") { "utility".into() } else { "flatshot".into() }
+    if desktop.contains("kde") { "utility".into() } else { crate::APP_ID.into() }
 }
 
 /// The connection to the compositor and the event loop around it.

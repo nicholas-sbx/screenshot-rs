@@ -276,7 +276,7 @@ impl App {
                 self.open_editor(&path, None);
             }
             Ok(None) => {}
-            Err(e) => self.report_failure("No file dialog", &format!("The desktop has no file dialog to offer ({e}). Use flatshot -i FILE instead.")),
+            Err(e) => self.report_failure("No file dialog", &format!("The desktop has no file dialog to offer ({e}). Use flatshot-rs -i FILE instead.")),
         }
     }
 }

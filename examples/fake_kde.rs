@@ -45,6 +45,8 @@ impl Accel {
 
     #[zbus(name = "getComponent")]
     fn get_component(&self, name: String) -> OwnedObjectPath {
+        // (as KGlobalAccel names it: anything but letters, digits and _ becomes _)
+        let name: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
         OwnedObjectPath::try_from(format!("/component/{name}")).unwrap()
     }
 
@@ -148,10 +150,10 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(ms));
                 let r = conn.emit_signal(
                     None::<()>,
-                    "/component/flatshot",
+                    "/component/flatshot_rs",
                     "org.kde.kglobalaccel.Component",
                     "globalShortcutPressed",
-                    &("flatshot", action.as_str(), 0i64),
+                    &("flatshot-rs", action.as_str(), 0i64),
                 );
                 let t = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
                 println!("kglobalaccel: pressed {action}: {} at {:.3}", r.is_ok(), t.tv_sec as f64 * 1000.0 + t.tv_nsec as f64 / 1e6);

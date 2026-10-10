@@ -63,7 +63,7 @@ pub fn decode_file(path: &Path) -> Result<Image, String> {
         Some(Kind::Bmp) => decode_bmp(&bytes),
         Some(Kind::Avif) => decode_with_tool(path, &[("avifdec", &[])]),
         Some(Kind::Jxl) => decode_with_tool(path, &[("djxl", &[])]),
-        None => Err(format!("{} is not a picture Flatshot can open", path.display())),
+        None => Err(format!("{} is not a picture Flatshot RS can open", path.display())),
     }
 }
 

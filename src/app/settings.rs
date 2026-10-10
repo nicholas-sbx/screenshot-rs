@@ -16,7 +16,7 @@ use crate::platform::{Owner, Painted};
 use crate::ui::session::{Button, Waker};
 use crate::ui::settings::{Request, Settings};
 
-const TITLE: &str = "Flatshot Settings";
+const TITLE: &str = "Flatshot RS Settings";
 const SIZE: (u32, u32) = (760, 560);
 const MIN_SIZE: (u32, u32) = (640, 440);
 

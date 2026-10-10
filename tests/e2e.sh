@@ -7,18 +7,18 @@
 #
 # Needs sway, wl-clipboard, dbus (dbus-run-session), ffmpeg and wf-recorder.
 #
-# Run from the repository root after `cargo build --examples`. BIN picks the flatshot
-# binary (default target/debug/flatshot).
+# Run from the repository root after `cargo build --examples`. BIN picks the flatshot-rs
+# binary (default target/debug/flatshot-rs).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-BIN=${BIN:-target/debug/flatshot}
+BIN=${BIN:-target/debug/flatshot-rs}
 EX=target/debug/examples
 work=$(mktemp -d)
 export XDG_RUNTIME_DIR=$work/run XDG_CONFIG_HOME=$work/config XDG_STATE_HOME=$work/state XDG_DATA_HOME=$work/data HOME=$work/home
-mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/flatshot" "$HOME"
+mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/flatshot-rs" "$HOME"
 chmod 700 "$XDG_RUNTIME_DIR"
 shots=$work/shots
-cat > "$XDG_CONFIG_HOME/flatshot/config.json" <<JSON
+cat > "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<JSON
 {"save_dir": "$shots", "notify": true, "clipboard": "image", "scan_codes": true,
  "record_dir": "$work/videos", "record_countdown": 0}
 JSON
@@ -143,7 +143,7 @@ PY
 fi
 
 # 4. The annotation editor: draw a box, save it in place, close.
-cp assets/flatshot.png "$work/edit.png"
+cp assets/flatshot-rs.png "$work/edit.png"
 before=$(md5sum < "$work/edit.png")
 $BIN -i "$work/edit.png" -v > "$work/editor.log" 2>&1 &
 pid=$!
@@ -162,7 +162,7 @@ up "$work/settings.log" || true
 $EX/inject click 57 93 sleep 300 click 1360 105 sleep 300 key Escape sleep 300
 finish $pid 3
 [ $code = 0 ] && pass "settings closed with Esc" || fail "the settings window didn't close (exit $code)"
-grep -q '"dim_opacity": 15,' "$XDG_CONFIG_HOME/flatshot/config.json" && pass "setting saved" || fail "setting not saved"
+grep -q '"dim_opacity": 15,' "$XDG_CONFIG_HOME/flatshot-rs/config.json" && pass "setting saved" || fail "setting not saved"
 
 # 6. Screen recording: an area chosen on the overlay, recorded by
 # wf-recorder, stopped from the bar under it (or by Ctrl+C), saved.
@@ -198,7 +198,7 @@ record FLATSHOT_RECORDER=test
 $EX/inject move 679 641 sleep 200 click 679 641
 for _ in $(seq 100); do [ -s "$work/record.code" ] && break; sleep 0.1; done
 [ "$(cat "$work/record.code" 2>/dev/null)" = 1 ] && [ "$(ls "$work/videos" | wc -l)" = "$before" ] && pass "a discarded recording leaves nothing" || { fail "discard: exit $(cat "$work/record.code" 2>/dev/null)"; cat "$work/record.log"; }
-python3 - "$XDG_CONFIG_HOME/flatshot/config.json" <<'PY'
+python3 - "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1])); c["record_format"] = "gif"; json.dump(c, open(sys.argv[1], "w"))
 PY
@@ -207,7 +207,7 @@ record FLATSHOT_RECORDER=test
 $EX/inject move 641 641 sleep 200 click 641 641
 for _ in $(seq 200); do [ -s "$work/record.code" ] && break; sleep 0.1; done
 case "$(newest_video)" in *.gif) video_check "GIF from the test pattern" "$(newest_video)" "600x400" ;; *) fail "no GIF made" ;; esac
-ls "$HOME/.cache/flatshot" 2>/dev/null | grep -q '^recording-' && fail "a recording's parts were left behind" || pass "no parts left behind"
+ls "$HOME/.cache/flatshot-rs" 2>/dev/null | grep -q '^recording-' && fail "a recording's parts were left behind" || pass "no parts left behind"
 
 # 7. Instant captures.
 $BIN -f > /dev/null && expect_size "all screens" "$(newest)" "1600 1000" || fail "--full failed"
@@ -231,7 +231,7 @@ sleep 3.5
 names() { dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.\$@; }
 item=\$(names ListNames | grep -o 'org.kde.StatusNotifierItem-[0-9-]*' | head -n1)
 me=\$(names GetNameOwner string:\$item | grep -o '":[0-9.]*"' | tr -d '"')
-forge() { dbus-send --session --type=signal "\$@" /component/flatshot org.kde.kglobalaccel.Component.globalShortcutPressed string:flatshot string:region int64:0; }
+forge() { dbus-send --session --type=signal "\$@" /component/flatshot_rs org.kde.kglobalaccel.Component.globalShortcutPressed string:flatshot-rs string:region int64:0; }
 $EX/dbus_flood "\$me" 3000 >> "$work/tray-test.log"
 forge --dest=\$me
 forge

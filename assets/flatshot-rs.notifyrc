@@ -1,8 +1,8 @@
 [Global]
-IconName=flatshot
-Name=Flatshot
-Comment=Flatshot
-DesktopEntry=flatshot
+IconName=flatshot-rs
+Name=Flatshot RS
+Comment=Flatshot RS
+DesktopEntry=flatshot-rs
 
 [Event/screenshot]
 Name=Screenshot taken

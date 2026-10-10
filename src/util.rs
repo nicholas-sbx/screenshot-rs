@@ -10,11 +10,11 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// A line on stderr (the journal, for the tray app): "flatshot: ...".
+/// A line on stderr (the journal, for the tray app): "flatshot-rs: ...".
 #[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => {
-        eprintln!("flatshot: {}", format_args!($($arg)*))
+        eprintln!("flatshot-rs: {}", format_args!($($arg)*))
     };
 }
 

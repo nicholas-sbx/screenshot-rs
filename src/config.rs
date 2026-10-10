@@ -1,8 +1,9 @@
-//! User settings, read from `$XDG_CONFIG_HOME/flatshot/config.json`, and the
-//! small bits remembered between runs in `$XDG_STATE_HOME/flatshot/state.json`.
+//! User settings, read from `$XDG_CONFIG_HOME/flatshot-rs/config.json`, and the
+//! small bits remembered between runs in `$XDG_STATE_HOME/flatshot-rs/state.json`.
 //!
 //! Every key is optional and missing keys take the defaults below. The file
-//! is the same as the Python Flatshot's, so settings carry over. A value of
+//! is laid out as the Python Flatshot's, whose settings are taken over the
+//! first time (they're then kept apart, as both can be installed). A value of
 //! the wrong type is ignored on its own (the default is used for that key),
 //! never the whole file.
 
@@ -289,6 +290,7 @@ pub fn is_hex_color(s: &str) -> bool {
 
 /// Load the settings. A missing or unreadable file gives the defaults.
 pub fn load() -> Config {
+    adopt_python_settings();
     Config::from_map(&read_json(&config_path()))
 }
 
@@ -374,11 +376,31 @@ pub fn data_dirs() -> Vec<PathBuf> {
 }
 
 pub fn config_path() -> PathBuf {
-    config_home().join("flatshot").join("config.json")
+    config_home().join(crate::APP_ID).join("config.json")
 }
 
 pub fn state_path() -> PathBuf {
-    state_home().join("flatshot").join("state.json")
+    state_home().join(crate::APP_ID).join("state.json")
+}
+
+/// With no settings of our own yet, a copy of the Python Flatshot's (and
+/// what it remembered), once.
+fn adopt_python_settings() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for (ours, theirs) in
+            [(config_path(), config_home().join("flatshot").join("config.json")), (state_path(), state_home().join("flatshot").join("state.json"))]
+        {
+            if fs::symlink_metadata(&ours).is_ok() {
+                continue;
+            }
+            let Ok(text) = crate::util::read_limited(&theirs, 4 << 20) else { continue };
+            let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&text) else { continue };
+            if write_json(&ours, &map).is_ok() {
+                crate::warn!("took the Python Flatshot's {} as a start", theirs.display());
+            }
+        }
+    });
 }
 
 /// "~" and "~/..." to the home folder, as `os.path.expanduser`.

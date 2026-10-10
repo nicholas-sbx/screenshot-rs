@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 pub fn entry_path() -> PathBuf {
-    crate::config::config_home().join("autostart").join("flatshot.desktop")
+    crate::config::config_home().join("autostart").join(format!("{}.desktop", crate::APP_ID))
 }
 
 pub fn enabled() -> bool {
@@ -15,7 +15,7 @@ fn launcher() -> String {
     let exe = std::env::current_exe().ok().and_then(|p| p.canonicalize().ok());
     let path = match exe {
         Some(p) => p.to_string_lossy().into_owned(),
-        None => "flatshot".into(),
+        None => crate::APP_ID.into(),
     };
     exec_quote(&path)
 }
@@ -50,8 +50,10 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let text = format!(
-        "[Desktop Entry]\nType=Application\nName=Flatshot\nComment=Screenshot tool in the system tray\nExec={} --tray\nIcon=flatshot\nTerminal=false\nX-GNOME-Autostart-enabled=true\nX-KDE-autostart-phase=2\n",
-        launcher()
+        "[Desktop Entry]\nType=Application\nName={}\nComment=Screenshot tool in the system tray\nExec={} --tray\nIcon={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\nX-KDE-autostart-phase=2\n",
+        crate::APP_NAME,
+        launcher(),
+        crate::APP_ID
     );
     std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
 }

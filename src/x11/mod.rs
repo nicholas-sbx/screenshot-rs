@@ -314,7 +314,7 @@ impl X11 {
             drag: None,
             held: None,
         };
-        x.name_window(helper, "Flatshot");
+        x.name_window(helper, crate::APP_NAME);
         let _ = x.conn.flush();
         Ok(x)
     }
@@ -393,7 +393,7 @@ impl X11 {
         let a = &self.atoms;
         let _ = c.change_property8(PropMode::REPLACE, w, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes());
         let _ = c.change_property8(PropMode::REPLACE, w, a._NET_WM_NAME, a.UTF8_STRING, title.as_bytes());
-        let _ = c.change_property8(PropMode::REPLACE, w, AtomEnum::WM_CLASS, AtomEnum::STRING, b"flatshot\0Flatshot\0");
+        let _ = c.change_property8(PropMode::REPLACE, w, AtomEnum::WM_CLASS, AtomEnum::STRING, b"flatshot-rs\0Flatshot RS\0");
         let _ = c.change_property32(PropMode::REPLACE, w, a._NET_WM_PID, AtomEnum::CARDINAL, &[std::process::id()]);
         if let Ok(host) = rustix::system::uname().nodename().to_str() {
             let _ = c.change_property8(PropMode::REPLACE, w, AtomEnum::WM_CLIENT_MACHINE, AtomEnum::STRING, host.as_bytes());
@@ -470,7 +470,7 @@ impl X11 {
             if let Some(s) = self.surfaces.iter_mut().find(|s| s.win == win) {
                 s.argb = s.argb && argb_ok;
             }
-            self.name_window(win, "Flatshot");
+            self.name_window(win, crate::APP_NAME);
             // (version 0, to be shown)
             let _ = self.conn.change_property32(PropMode::REPLACE, win, self.atoms._XEMBED_INFO, self.atoms._XEMBED_INFO, &[0, 1]);
         }
@@ -507,7 +507,7 @@ impl X11 {
         self.refresh_keymap();
         let at = (self.device(monitor.rect.x), self.device(monitor.rect.y));
         let win = self.create(owner, Kind::Overlay, at, (monitor.rect.w as u32, monitor.rect.h as u32), false)?;
-        self.name_window(win, "Flatshot");
+        self.name_window(win, crate::APP_NAME);
         let a = self.atoms;
         self.set_atoms(win, a._NET_WM_WINDOW_TYPE, &[a._NET_WM_WINDOW_TYPE_NOTIFICATION]);
         self.set_cursor_on(win, CursorShape::Crosshair);
@@ -518,7 +518,7 @@ impl X11 {
     pub fn add_layer(&mut self, owner: Owner, monitor: &Monitor, at: (i32, i32), size: (u32, u32), _namespace: &str) -> bool {
         let pos = (self.device(monitor.rect.x + at.0), self.device(monitor.rect.y + at.1));
         let Ok(win) = self.create(owner, Kind::Layer, pos, size, false) else { return false };
-        self.name_window(win, "Flatshot pin");
+        self.name_window(win, &format!("{} pin", crate::APP_NAME));
         let a = self.atoms;
         self.set_atoms(win, a._NET_WM_WINDOW_TYPE, &[a._NET_WM_WINDOW_TYPE_UTILITY]);
         self.set_atoms(win, a._NET_WM_STATE, &[a._NET_WM_STATE_ABOVE, a._NET_WM_STATE_SKIP_TASKBAR, a._NET_WM_STATE_SKIP_PAGER]);
@@ -539,7 +539,7 @@ impl X11 {
     pub fn add_control(&mut self, owner: Owner, monitor: &Monitor, at: (i32, i32), size: (u32, u32), _namespace: &str, click_through: bool) -> bool {
         let pos = (self.device(monitor.rect.x + at.0), self.device(monitor.rect.y + at.1));
         let Ok(win) = self.create(owner, Kind::Control, pos, size, true) else { return false };
-        self.name_window(win, "Flatshot recording");
+        self.name_window(win, &format!("{} recording", crate::APP_NAME));
         if click_through && let Ok(region) = self.conn.generate_id() {
             // (an empty input shape: the pointer goes to what's under it)
             let _ = self.conn.xfixes_create_region(region, &[]);
@@ -582,7 +582,7 @@ impl X11 {
         let x = if ax + w > area.x2() { (ax - w - self.device(anchor.w)).max(area.x) } else { ax };
         let y = if ay + h > area.y2() { (ay - h - self.device(anchor.h)).max(area.y) } else { ay };
         let win = self.create(owner, Kind::Popup, (x, y), size, true)?;
-        self.name_window(win, "Flatshot menu");
+        self.name_window(win, &format!("{} menu", crate::APP_NAME));
         let a = self.atoms;
         self.set_atoms(win, a._NET_WM_WINDOW_TYPE, &[a._NET_WM_WINDOW_TYPE_POPUP_MENU]);
         self.map(owner);

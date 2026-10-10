@@ -77,11 +77,11 @@ impl Item {
     }
     #[zbus(property)]
     fn id(&self) -> &str {
-        "flatshot"
+        crate::APP_ID
     }
     #[zbus(property)]
     fn title(&self) -> &str {
-        "Flatshot"
+        crate::APP_NAME
     }
     #[zbus(property)]
     fn status(&self) -> &str {
@@ -93,7 +93,7 @@ impl Item {
     }
     #[zbus(property)]
     fn icon_name(&self) -> &str {
-        if self.state.lock().is_ok_and(|s| s.recording) { "" } else { "flatshot" }
+        if self.state.lock().is_ok_and(|s| s.recording) { "" } else { crate::APP_ID }
     }
     #[zbus(property)]
     fn icon_pixmap(&self) -> Pixmaps {
@@ -319,7 +319,7 @@ impl Tray {
             items,
             revision: 1,
             recording: false,
-            tooltip: "Flatshot".into(),
+            tooltip: crate::APP_NAME.into(),
             icon: app_icon(),
             stop_icon: None,
             activation_token: None,
@@ -369,7 +369,7 @@ impl Tray {
             s.recording = recording;
             s.revision += 1;
             if !recording {
-                s.tooltip = "Flatshot".into();
+                s.tooltip = crate::APP_NAME.into();
             }
             s.revision
         };
@@ -438,11 +438,11 @@ pub fn icon_image(size: u32, recording: bool) -> Option<Image> {
         pm.fill_rect(square, &paint, tiny_skia::Transform::identity(), None);
         return Some(img);
     }
-    crate::codec::decode_png(include_bytes!("../../assets/flatshot.png")).ok()?.scaled_area(size, size).ok()
+    crate::codec::decode_png(include_bytes!("../../assets/flatshot-rs.png")).ok()?.scaled_area(size, size).ok()
 }
 
 fn app_icon() -> Pixmaps {
-    let Ok(full) = crate::codec::decode_png(include_bytes!("../../assets/flatshot.png")) else { return Vec::new() };
+    let Ok(full) = crate::codec::decode_png(include_bytes!("../../assets/flatshot-rs.png")) else { return Vec::new() };
     [16u32, 22, 32, 48, 64].iter().filter_map(|&s| full.scaled_area(s, s).ok()).map(|i| pixmap(&i)).collect()
 }
 

@@ -1,5 +1,5 @@
 [package]
-name = "flatshot"
+name = "flatshot-rs"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.88"
@@ -14,7 +14,7 @@ name = "flatshot"
 path = "src/lib.rs"
 
 [[bin]]
-name = "flatshot"
+name = "flatshot-rs"
 path = "src/main.rs"
 
 [dependencies]
