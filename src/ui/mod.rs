@@ -5,6 +5,7 @@ pub mod editor;
 pub mod menu;
 pub mod overlay;
 pub mod panels;
+pub mod recbar;
 pub mod session;
 pub mod settings;
 pub mod shapes;

@@ -28,6 +28,22 @@ pub enum Answer {
 pub fn request<B>(
     iface: &str,
     method: &str,
+    options: HashMap<&'static str, Value<'static>>,
+    body: impl FnOnce(HashMap<&'static str, Value<'static>>) -> B,
+    wait: Duration,
+) -> Result<Answer, String>
+where
+    B: serde::Serialize + zbus::zvariant::DynamicType,
+{
+    request_on(crate::dbus::session()?, iface, method, options, body, wait)
+}
+
+/// [`request`] on a connection of the caller's (a screen cast lives as
+/// long as the connection that asked for it).
+pub fn request_on<B>(
+    conn: &zbus::blocking::Connection,
+    iface: &str,
+    method: &str,
     mut options: HashMap<&'static str, Value<'static>>,
     body: impl FnOnce(HashMap<&'static str, Value<'static>>) -> B,
     wait: Duration,
@@ -35,7 +51,6 @@ pub fn request<B>(
 where
     B: serde::Serialize + zbus::zvariant::DynamicType,
 {
-    let conn = crate::dbus::session()?;
     let token = format!("flatshot{}", util::random_hex(6));
     // The request object is named after us and the token: listen on it
     // before asking, so the answer can't come first.

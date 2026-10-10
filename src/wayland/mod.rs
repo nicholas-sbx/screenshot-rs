@@ -63,6 +63,10 @@ pub enum Owner {
     Editor(u32),
     /// the settings window
     Settings,
+    /// the bar with a recording's controls
+    RecBar,
+    /// a corner mark round the area being recorded (0-3)
+    RecMark(u8),
 }
 
 /// Something drawn on surfaces: what changed, and how to draw a part of it.
@@ -355,6 +359,35 @@ impl Wayland {
         surf.viewport = viewport;
         surf.fractional = fractional;
         surf.int_scale = monitor.scale;
+        self.surfaces.push(surf);
+        true
+    }
+
+    /// A small see-through surface above everything on `monitor` that
+    /// never takes the keyboard, its top left at `at` (logical, from the
+    /// monitor's): a recording's controls. `click_through`: the pointer
+    /// goes to what's under it. False without layer-shell.
+    pub fn add_control(&mut self, owner: Owner, monitor: &Monitor, at: (i32, i32), size: (u32, u32), namespace: &str, click_through: bool) -> bool {
+        let Some(ls) = &self.layer_shell else { return false };
+        let qh = &self.qh;
+        let surface = self.compositor.create_surface(qh);
+        if click_through && let Ok(region) = smithay_client_toolkit::compositor::Region::new(&self.compositor) {
+            surface.set_input_region(Some(region.wl_region()));
+        }
+        let l = ls.create_layer_surface(qh, surface.clone(), Layer::Overlay, Some(namespace), Some(&monitor.output));
+        l.set_anchor(Anchor::TOP | Anchor::LEFT);
+        l.set_margin(at.1, 0, 0, at.0);
+        l.set_size(size.0.max(1), size.1.max(1));
+        l.set_exclusive_zone(-1);
+        l.set_keyboard_interactivity(KeyboardInteractivity::None);
+        let (viewport, fractional) = self.scaling(&surface);
+        l.commit();
+        let mut surf = Surf::new(owner, surface, size);
+        surf.layer = Some(l);
+        surf.viewport = viewport;
+        surf.fractional = fractional;
+        surf.int_scale = monitor.scale;
+        surf.transparent = true;
         self.surfaces.push(surf);
         true
     }

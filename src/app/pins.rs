@@ -289,6 +289,9 @@ impl App {
 
     /// The pointer moved by (`dx`, `dy`): a pin being dragged follows.
     pub fn relative_motion(&mut self, dx: f64, dy: f64) {
+        if self.drag_recbar(dx, dy) {
+            return;
+        }
         let Some(i) = self.pins.iter().position(|p| p.drag.is_some()) else { return };
         if let Some(d) = &mut self.pins[i].drag {
             d.moved = (d.moved.0 + dx, d.moved.1 + dy);

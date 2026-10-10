@@ -65,7 +65,13 @@ impl App {
                 }
                 0
             }
-            Outcome::Record(_) => 0,
+            Outcome::Record(job) => {
+                if self.start_recording(*job) {
+                    0
+                } else {
+                    2
+                }
+            }
             Outcome::Cancelled => 1,
             Outcome::Failed(e) => {
                 self.report_failure("Screenshot failed", &e);
@@ -90,7 +96,7 @@ impl App {
     /// long enough, no pins left)?
     pub(super) fn may_exit(&self) -> bool {
         let holding = self.wl.clipboard.holds() && self.hold_until.is_some_and(|t| Instant::now() < t);
-        !holding && !self.has_pins() && !self.has_editors() && !self.has_settings()
+        !holding && !self.has_pins() && !self.has_editors() && !self.has_settings() && !self.is_recording()
     }
 
     /// Will a one-off capture hand what it copies to wl-copy (so it can
@@ -225,7 +231,7 @@ impl App {
     }
 
     /// ... with buttons acting on `target`, in the tray app.
-    fn notify_with(&mut self, note: notify::Note, target: Option<NoteTarget>) {
+    pub(super) fn notify_with(&mut self, note: notify::Note, target: Option<NoteTarget>) {
         let Some(n) = self.tray.notifier.as_mut() else {
             notify::send_now(&note, false);
             return;

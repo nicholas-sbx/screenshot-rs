@@ -4,7 +4,8 @@
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use super::{App, NoRecorder, layer_namespace, names_window};
+use super::recording::Recorder;
+use super::{App, layer_namespace, names_window};
 use crate::capture::{self, Grabbed, Plan};
 use crate::geom::{IPoint, IRect};
 use crate::image::Image;
@@ -304,8 +305,9 @@ impl App {
             })
             .collect();
         let request = Request { pin: p.job.pin, scan: p.job.scan, record: p.job.record, image: false };
-        let setup = Setup { cfg: self.cfg.clone(), request, screens, pointer_taken: both, cursor: None, primary: 0, can_record: true };
-        let mut session = Session::new(setup, Box::new(NoRecorder), self.waker.clone());
+        let can_record = !self.is_recording();
+        let setup = Setup { cfg: self.cfg.clone(), request, screens, pointer_taken: both, cursor: None, primary: 0, can_record };
+        let mut session = Session::new(setup, Box::new(Recorder { how: crate::record::method() }), self.waker.clone());
         session.clock = self.clock.clone();
         if let Some(d) = &self.desktop {
             session.desktop_found(d.clone());

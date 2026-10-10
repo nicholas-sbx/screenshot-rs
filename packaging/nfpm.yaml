@@ -55,9 +55,16 @@ overrides:
       - fonts-dejavu-core | fonts-noto-core
       - wl-clipboard
       - xdg-utils
+      # screen recording on KDE and GNOME: the portal's stream, the encoders
+      - gstreamer1.0-tools
+      - gstreamer1.0-pipewire
+      - gstreamer1.0-plugins-good
+      - gstreamer1.0-plugins-ugly
     suggests:
       - kde-spectacle | grim
       - libnotify-bin
+      - ffmpeg  # pausing a recording, and GIFs
+      - wf-recorder  # screen recording on wlroots compositors
   rpm:
     depends:
       - glibc >= 2.35
@@ -67,6 +74,12 @@ overrides:
       - dejavu-sans-fonts
       - wl-clipboard
       - xdg-utils
+      # screen recording: the portal's stream, encoders, pausing and GIFs
+      - gstreamer1
+      - pipewire-gstreamer
+      - gstreamer1-plugins-good
+      - gstreamer1-plugin-openh264
+      - ffmpeg-free
   archlinux:
     depends:
       - glibc
@@ -76,6 +89,11 @@ overrides:
     recommends:
       - wl-clipboard
       - xdg-utils
+      - gst-plugin-pipewire
+      - gst-plugins-good
+      - gst-plugins-ugly
+      - ffmpeg
     suggests:
       - spectacle
+      - wf-recorder
       - grim

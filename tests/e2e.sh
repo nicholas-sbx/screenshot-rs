@@ -2,10 +2,12 @@
 # End-to-end checks on a headless sway: captures driven by a virtual
 # pointer and keyboard, instant captures, the clipboard, and the tray app
 # against stand-ins for KDE's shortcut service, tray and notifications,
-# and the editor and settings windows.
+# the editor and settings windows, and screen recording (wf-recorder, and
+# ffmpeg's test pattern).
 #
-# Needs sway, wl-clipboard and dbus (dbus-run-session); run from the
-# repository root after `cargo build --examples`. BIN picks the flatshot
+# Needs sway, wl-clipboard, dbus (dbus-run-session), ffmpeg and wf-recorder.
+#
+# Run from the repository root after `cargo build --examples`. BIN picks the flatshot
 # binary (default target/debug/flatshot).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -17,7 +19,8 @@ mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/flatshot" "$HOME"
 chmod 700 "$XDG_RUNTIME_DIR"
 shots=$work/shots
 cat > "$XDG_CONFIG_HOME/flatshot/config.json" <<JSON
-{"save_dir": "$shots", "notify": true, "clipboard": "image", "scan_codes": true}
+{"save_dir": "$shots", "notify": true, "clipboard": "image", "scan_codes": true,
+ "record_dir": "$work/videos", "record_countdown": 0}
 JSON
 printf 'output HEADLESS-1 resolution 1600x1000 scale 1\nseat seat0 fallback true\n' > "$work/sway.conf"
 
@@ -142,7 +145,51 @@ for _ in $(seq 30); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
 if kill -0 $pid 2>/dev/null; then fail "the settings window didn't close"; kill $pid; else pass "settings closed with Esc"; fi
 grep -q '"dim_opacity": 15,' "$XDG_CONFIG_HOME/flatshot/config.json" && pass "setting saved" || fail "setting not saved"
 
-# 6. Instant captures.
+# 6. Screen recording: an area chosen on the overlay, recorded by
+# wf-recorder, stopped from the bar under it (or by Ctrl+C), saved.
+video_check() { # what, file, "WxH"
+    local got
+    got=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$2" 2>/dev/null || echo none)
+    local len
+    len=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$2" 2>/dev/null || echo 0)
+    if [ "$got" = "$3" ] && python3 -c "import sys; sys.exit(0 if float('$len' or 0) > 0.5 else 1)"; then pass "$1 ($got, ${len}s)"; else fail "$1: $2 is '$got', ${len}s"; fi
+}
+record() { # extra environment, then what to do once it records
+    (code=0; env "$@" $BIN --record > "$work/record.log" 2>&1 || code=$?; echo $code > "$work/record.code") &
+    sleep 1.2
+    $EX/inject move 400 300 drag 300 200 900 600 sleep 400 key Return sleep 2000
+}
+newest_video() { ls -t "$work"/videos/* 2>/dev/null | head -n1; }
+rm -f "$work/record.code"
+record FLATSHOT_RECORDER=wf-recorder
+# The bar is centred under the area: pause, stop, discard.
+$EX/inject move 641 641 sleep 200 click 641 641
+for _ in $(seq 100); do [ -s "$work/record.code" ] && break; sleep 0.1; done
+[ "$(cat "$work/record.code" 2>/dev/null)" = 0 ] && pass "recording stopped from the bar" || { fail "recording didn't end well"; cat "$work/record.log"; }
+video_check "wf-recorder video" "$(newest_video)" "600x400"
+rm -f "$work/record.code"
+record FLATSHOT_RECORDER=wf-recorder
+pkill -INT -f -- "$BIN --record" || true
+for _ in $(seq 100); do [ -s "$work/record.code" ] && break; sleep 0.1; done
+[ "$(cat "$work/record.code" 2>/dev/null)" = 0 ] && pass "Ctrl+C saves the recording" || { fail "Ctrl+C: exit $(cat "$work/record.code" 2>/dev/null)"; cat "$work/record.log"; }
+before=$(ls "$work/videos" | wc -l)
+rm -f "$work/record.code"
+record FLATSHOT_RECORDER=test
+$EX/inject move 679 641 sleep 200 click 679 641
+for _ in $(seq 100); do [ -s "$work/record.code" ] && break; sleep 0.1; done
+[ "$(cat "$work/record.code" 2>/dev/null)" = 1 ] && [ "$(ls "$work/videos" | wc -l)" = "$before" ] && pass "a discarded recording leaves nothing" || { fail "discard: exit $(cat "$work/record.code" 2>/dev/null)"; cat "$work/record.log"; }
+python3 - "$XDG_CONFIG_HOME/flatshot/config.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["record_format"] = "gif"; json.dump(c, open(sys.argv[1], "w"))
+PY
+rm -f "$work/record.code"
+record FLATSHOT_RECORDER=test
+$EX/inject move 641 641 sleep 200 click 641 641
+for _ in $(seq 200); do [ -s "$work/record.code" ] && break; sleep 0.1; done
+case "$(newest_video)" in *.gif) video_check "GIF from the test pattern" "$(newest_video)" "600x400" ;; *) fail "no GIF made" ;; esac
+ls "$HOME/.cache/flatshot" 2>/dev/null | grep -q '^recording-' && fail "a recording's parts were left behind" || pass "no parts left behind"
+
+# 7. Instant captures.
 $BIN -f > /dev/null && expect_size "all screens" "$(newest)" "1600 1000" || fail "--full failed"
 $BIN -r 320x240+10+20 > /dev/null && expect_size "exact region" "$(newest)" "320 240" || fail "--region failed"
 $BIN -l > /dev/null && expect_size "last region" "$(newest)" "320 240" || fail "--last-region failed"
@@ -150,7 +197,7 @@ $BIN -m > /dev/null && expect_size "current monitor" "$(newest)" "1600 1000" || 
 $BIN -r 64x48+0+0 -o "$work/out.png" > /dev/null && expect_size "--output" "$work/out.png" "64 48" || fail "--output failed"
 $BIN -r 64x48+0+0 -o - --no-copy > "$work/stdout.png" && expect_size "PNG to stdout" "$work/stdout.png" "64 48" || fail "-o - failed"
 
-# 7. The tray app, with stand-ins for KDE's services.
+# 8. The tray app, with stand-ins for KDE's services.
 cat > "$work/tray.sh" <<SH
 #!/usr/bin/env bash
 set -u

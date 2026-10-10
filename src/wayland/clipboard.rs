@@ -103,6 +103,8 @@ impl Slot {
 pub struct Offered {
     pub mimes: Vec<String>,
     pub slot: Arc<Slot>,
+    /// other data for some of the types (a file is a URI list, and more)
+    extra: Vec<(String, Arc<Vec<u8>>)>,
     source: Source,
 }
 
@@ -178,6 +180,23 @@ impl Clipboard {
         self.ext_device.is_some() || self.wlr_device.is_some()
     }
 
+    /// Own the clipboard with each type's own data (the first's is the
+    /// default).
+    pub fn offer_each(&mut self, mut parts: Vec<(String, Arc<Vec<u8>>)>, serial: u32, qh: &QueueHandle<App>) -> bool {
+        if parts.is_empty() {
+            return false;
+        }
+        let mimes = parts.iter().map(|p| p.0.clone()).collect();
+        let first = parts.remove(0);
+        if !self.offer(mimes, Slot::ready(first.1), serial, qh) {
+            return false;
+        }
+        if let Some(o) = &mut self.offered {
+            o.extra = parts;
+        }
+        true
+    }
+
     /// Own the clipboard with what comes in `slot`, as each of `mimes`.
     /// `serial`: a recent input event's (needed without data-control).
     pub fn offer(&mut self, mimes: Vec<String>, slot: Arc<Slot>, serial: u32, qh: &QueueHandle<App>) -> bool {
@@ -202,7 +221,7 @@ impl Clipboard {
         } else {
             return false;
         };
-        self.offered = Some(Offered { mimes, slot, source });
+        self.offered = Some(Offered { mimes, slot, extra: Vec::new(), source });
         true
     }
 
@@ -212,7 +231,10 @@ impl Clipboard {
         if !o.mimes.iter().any(|m| m == mime) {
             return;
         }
-        let slot = o.slot.clone();
+        let slot = match o.extra.iter().find(|e| e.0 == mime) {
+            Some((_, data)) => Slot::ready(data.clone()),
+            None => o.slot.clone(),
+        };
         // (big pictures fill the pipe, and may still be being made: written
         // by a thread of their own)
         let _ = std::thread::Builder::new().name("flatshot-clipboard".into()).spawn(move || {

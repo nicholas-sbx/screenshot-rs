@@ -33,8 +33,8 @@ pub enum Event {
     Tray(TrayEvent),
     /// the tray icon is up
     TrayShown(Tray),
-    /// the menu's entries, with their shortcuts
-    Menu(Vec<MenuItem>),
+    /// the shortcuts' keys, for the menu
+    Keys(HashMap<String, String>),
     /// KDE's shortcuts are registered, or can't be
     ShortcutsReady(bool),
 }
@@ -58,13 +58,15 @@ pub struct TrayState {
     ipc: Option<ipc::Server>,
     /// KDE's shortcuts are registered (None: still at it)
     pub shortcuts: Option<bool>,
+    /// their keys, for the menu
+    keys: HashMap<String, String>,
 }
 
 /// The menu: (key, label); shortcuts' keys are filled in when known.
-fn menu_items(keys: &HashMap<String, String>) -> Vec<MenuItem> {
+fn menu_items(keys: &HashMap<String, String>, recording: bool) -> Vec<MenuItem> {
     let k = |a: &str| keys.get(a).cloned().unwrap_or_default();
-    let mut items: Vec<MenuItem> =
-        ["region", "monitor", "screen", "last", "pin", "record"].iter().map(|a| MenuItem::new(a, shortcuts::label(a), &k(a))).collect();
+    let label = |a: &str| if a == "record" && recording { "Stop recording" } else { shortcuts::label(a) };
+    let mut items: Vec<MenuItem> = ["region", "monitor", "screen", "last", "pin", "record"].iter().map(|a| MenuItem::new(a, label(a), &k(a))).collect();
     items.extend([
         MenuItem::separator(),
         MenuItem::new("region-delayed", "Capture region in 3 seconds", ""),
@@ -160,7 +162,7 @@ impl App {
         let _ = std::thread::Builder::new().name("flatshot-start".into()).spawn(move || {
             let shown = {
                 let tx = tx.clone();
-                Tray::show(menu_items(&HashMap::new()), move |e| {
+                Tray::show(menu_items(&HashMap::new(), false), move |e| {
                     let _ = tx.send(Event::Tray(e));
                 })
             };
@@ -176,7 +178,7 @@ impl App {
             }) {
                 Ok(()) => {
                     let _ = tx.send(Event::ShortcutsReady(true));
-                    let _ = tx.send(Event::Menu(menu_items(&shortcut_keys())));
+                    let _ = tx.send(Event::Keys(shortcut_keys()));
                 }
                 Err(e) => {
                     crate::warn!("global shortcuts unavailable ({e})");
@@ -184,6 +186,7 @@ impl App {
                 }
             }
             notify::install_events();
+            super::recording::warm_up();
         });
         true
     }
@@ -200,7 +203,7 @@ impl App {
                     let tx = self.events.clone();
                     let _ = std::thread::Builder::new().name("flatshot-keys".into()).spawn(move || {
                         if let Some(tx) = tx {
-                            let _ = tx.send(Event::Menu(menu_items(&shortcut_keys())));
+                            let _ = tx.send(Event::Keys(shortcut_keys()));
                         }
                     });
                 }
@@ -210,11 +213,11 @@ impl App {
                 self.tray.shortcuts = Some(ok);
                 self.shortcuts_ready(ok);
             }
-            Event::Menu(items) => {
-                if let Some(t) = &self.tray.tray {
-                    t.set_items(items);
-                }
+            Event::Keys(keys) => {
+                self.tray.keys = keys;
+                self.refresh_tray_menu();
             }
+            Event::Tray(TrayEvent::Activate) if self.is_recording() => self.stop_recording(),
             Event::Tray(TrayEvent::Activate) => self.capture_later(Job::new(Mode::Region), MENU_DELAY),
             Event::Tray(TrayEvent::SecondaryActivate) => self.capture_later(Job::new(Mode::Screens), MENU_DELAY),
             Event::Tray(TrayEvent::Menu(key)) => match key.as_str() {
@@ -251,7 +254,17 @@ impl App {
 
     /// Choose an area to record (or stop the recording in progress).
     fn record(&mut self, delay: Duration) {
+        if self.is_recording() {
+            return self.stop_recording();
+        }
         self.capture_later(Job { record: true, ..Job::new(Mode::Region) }, delay);
+    }
+
+    /// The menu as it is now (its keys, "Stop recording" while recording).
+    pub(super) fn refresh_tray_menu(&mut self) {
+        if let Some(t) = &self.tray.tray {
+            t.set_items(menu_items(&self.tray.keys, self.recording.is_some()));
+        }
     }
 
     /// Capture after `delay` (now, without one).
@@ -363,6 +376,11 @@ impl App {
     }
 
     fn quit(&mut self) {
+        if self.is_recording() {
+            // Save what was recorded first.
+            self.quit_after_recording = true;
+            return self.stop_recording();
+        }
         self.exit = Some(0);
     }
 }
@@ -392,6 +410,10 @@ pub fn run_tray(_args: &Args) -> i32 {
             return 2;
         }
         app.after_dispatch();
+    }
+    // (what was just announced still gets to the desktop)
+    if let Some(n) = &app.tray.notifier {
+        n.flush(Duration::from_secs(2));
     }
     app.exit.unwrap_or(0)
 }

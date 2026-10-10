@@ -33,6 +33,8 @@ fn main() -> std::process::ExitCode {
             if args.quit {
                 return std::process::ExitCode::SUCCESS;
             }
+            // Ctrl+C and logging out as events: a recording is saved first.
+            flatshot::signals::take();
             let code = if args.tray {
                 flatshot::app::run_tray(&args)
             } else if args.image.is_some() {

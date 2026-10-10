@@ -84,6 +84,17 @@ Replacing the Python Flatshot: starting this one's tray app asks the old one to 
 | <kbd>[</kbd> <kbd>]</kbd> | stroke size |
 | <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> | undo / redo |
 
+### Recording the screen
+
+Choose **Record screen** in the tray menu (or its shortcut, or <kbd>V</kbd> on the overlay, or `flatshot --record`), pick an area or a window or a whole monitor, set MP4, WebM or GIF, sound and frame rate in the panel under it, and press <kbd>Enter</kbd>. A small bar under the area (outside it, so it's never in the video) shows the time and has pause, stop and discard; red marks show the area's corners. Stop with the bar, the tray icon, the shortcut again, or <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal: the video is saved to `~/Videos/Screencasts` (settings: Recording), copied as a file, and announced.
+
+| | KDE Plasma, GNOME | Sway, Hyprland, wlroots |
+|---|---|---|
+| Records with | the screen-cast portal and GStreamer (the first time, the desktop asks which screen to share) | wf-recorder |
+| Needs | `gst-launch-1.0` with the PipeWire plugin, and x264enc (MP4) or vp8enc (WebM) | `wf-recorder` |
+
+Pausing and GIFs also need `ffmpeg`. The recorders are programs of their own: no frame passes through Flatshot.
+
 ### Command line
 
 ```
@@ -93,6 +104,7 @@ flatshot -r 800x600+100+50    an exact area (logical pixels)
 flatshot -d 3                 after 3 seconds
 flatshot -o file.png          save there ("-" writes PNG to stdout)
 flatshot --no-copy --no-save  just print the path / don't keep a file
+flatshot --record             record an area (stops the recording in progress)
 flatshot -i picture.png       annotate a picture
 flatshot --settings           the settings window
 flatshot --tray               the tray app

@@ -6,6 +6,7 @@ mod capture;
 mod editor;
 mod finish;
 mod pins;
+mod recording;
 mod settings;
 mod tray;
 
@@ -29,7 +30,7 @@ use crate::image::Canvas;
 use crate::keys::KeyPress;
 use crate::render::theme;
 use crate::timing::{self, Clock};
-use crate::ui::session::{Button, CursorShape, Effect, RecordSupport, Session, Waker};
+use crate::ui::session::{Button, CursorShape, Effect, Session, Waker};
 use crate::ui::state::Desktop;
 use crate::wayland::{Monitor, Owner, Painted, Wayland};
 
@@ -88,6 +89,10 @@ pub struct App {
     open_dialog: Option<mpsc::Receiver<Result<Option<std::path::PathBuf>, String>>>,
     /// the settings window
     settings: Option<settings::SettingsWin>,
+    /// the screen recording in progress
+    recording: Option<recording::RecordingRun>,
+    /// the tray app quits once the recording is saved
+    quit_after_recording: bool,
 }
 
 impl Painted for Session {
@@ -102,18 +107,6 @@ impl Painted for Session {
     }
 }
 
-/// Until recording is in: why it can't be used.
-struct NoRecorder;
-
-impl RecordSupport for NoRecorder {
-    fn problem(&mut self, _: &str) -> Option<String> {
-        Some("Recording isn't available in this build yet.".into())
-    }
-    fn can_span(&self) -> bool {
-        false
-    }
-}
-
 impl App {
     /// Input for `surface` (the focused one for keys).
     pub fn input(&mut self, surface: Option<ObjectId>, ev: Input) {
@@ -123,6 +116,8 @@ impl App {
             Some(Owner::Menu(id)) => return self.menu_input(id, ev),
             Some(Owner::Editor(id)) => return self.editor_input(id, ev),
             Some(Owner::Settings) => return self.settings_input(ev),
+            Some(Owner::RecBar) => return self.recbar_input(ev),
+            Some(Owner::RecMark(_)) => return,
             _ => {}
         }
         let Some(s) = &mut self.session else { return };
@@ -157,6 +152,18 @@ impl App {
         }
     }
 
+    /// Ctrl+C, a logout or `kill`: a recording is saved first; anything
+    /// else ends now.
+    fn signal(&mut self, signal: i32) {
+        timing::log(format!("signal {signal}"));
+        if self.is_recording() && !self.quit_after_recording {
+            self.quit_after_recording = true;
+            self.stop_recording();
+            return;
+        }
+        self.exit = Some(crate::signals::exit_code(signal));
+    }
+
     /// Text from an input method.
     pub fn commit_string(&mut self, text: &str) {
         let focus = self.wl.text_focus.as_ref().or(self.wl.keyboard_on.as_ref()).and_then(|id| self.wl.owner_of(id));
@@ -182,7 +189,9 @@ impl App {
             Some(Owner::Menu(p)) => self.close_menu(p),
             Some(Owner::Editor(e)) => self.editor_close_requested(e),
             Some(Owner::Settings) => self.close_settings(),
-            None => {}
+            // (the bar's window closed by the desktop: done recording)
+            Some(Owner::RecBar) => self.stop_recording(),
+            Some(Owner::RecMark(_)) | None => {}
         }
     }
 
@@ -216,7 +225,7 @@ impl App {
     fn timeout(&self) -> Option<Duration> {
         let session = self.session.as_ref().and_then(|s| s.next_deadline());
         let taken = self.taken.as_ref().map(|t| t.wait_until);
-        let deadline = [session, self.hold_until, taken, self.editors_deadline()].into_iter().flatten().min()?;
+        let deadline = [session, self.hold_until, taken, self.editors_deadline(), self.recording_deadline()].into_iter().flatten().min()?;
         Some(deadline.saturating_duration_since(Instant::now()))
     }
 
@@ -243,6 +252,7 @@ impl App {
         self.poll_editors();
         self.poll_open_dialog();
         self.poll_settings();
+        self.poll_recording();
         if let Some(rx) = &self.paste_rx
             && let Ok(text) = rx.try_recv()
         {
@@ -282,6 +292,7 @@ impl App {
         self.redraw_pins();
         self.redraw_editors();
         self.redraw_settings();
+        self.redraw_recording();
         let Some(s) = &mut self.session else { return };
         let mut drawn = false;
         for i in 0..self.wl.surfaces.len() {
@@ -310,6 +321,7 @@ impl App {
                 Some(w) => w.s.cursor(),
                 None => return,
             },
+            (Owner::RecBar, _) => CursorShape::Arrow,
             _ => return,
         };
         let icon = match shape {
@@ -383,6 +395,15 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         2
     })?;
     let _ = event_loop.handle().insert_source(ping_source, |_, _, _| {});
+    if let Some(fd) = crate::signals::fd() {
+        let source = calloop::generic::Generic::new(fd, calloop::Interest::READ, calloop::Mode::Level);
+        let _ = event_loop.handle().insert_source(source, |_, fd, app: &mut App| {
+            for s in crate::signals::read(std::os::fd::AsFd::as_fd(&**fd)) {
+                app.signal(s);
+            }
+            Ok(calloop::PostAction::Continue)
+        });
+    }
     let mut app = App {
         wl,
         loop_handle: event_loop.handle(),
@@ -410,6 +431,8 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         next_editor: 0,
         open_dialog: None,
         settings: None,
+        recording: None,
+        quit_after_recording: false,
     };
     // The monitors (and xdg-output's logical layout) arrive in two rounds.
     for _ in 0..2 {
@@ -455,7 +478,9 @@ pub fn run_once(args: &Args) -> i32 {
     };
     let mut asked = started;
     if args.delay > 0.0 {
-        std::thread::sleep(Duration::from_secs_f64(args.delay.min(3600.0)));
+        if let Some(s) = crate::signals::wait(Duration::from_secs_f64(args.delay.min(3600.0))) {
+            return crate::signals::exit_code(s);
+        }
         asked = Instant::now();
     }
     let job = Job { mode, pin: args.pin, record: args.record, scan: !args.no_scan, asked };

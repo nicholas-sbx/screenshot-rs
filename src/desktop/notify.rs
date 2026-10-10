@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::Duration;
 
 use zbus::zvariant::Value;
 
@@ -219,11 +220,18 @@ pub enum NoteEvent {
     Closed(u64),
 }
 
+/// What the notifications' thread is asked.
+enum Job {
+    Send(Note, Option<u64>),
+    /// say when everything before this is sent
+    Flush(mpsc::Sender<()>),
+}
+
 /// Notifications from the tray app: sent from a thread of their own (a
 /// busy desktop never holds up the next capture), with clicks on their
 /// buttons reported back.
 pub struct Notifier {
-    jobs: mpsc::Sender<(Note, Option<u64>)>,
+    jobs: mpsc::Sender<Job>,
     /// notification id → token of the notifications with buttons
     ids: Arc<Mutex<HashMap<u32, u64>>>,
     listening: bool,
@@ -236,10 +244,17 @@ impl Notifier {
         let (events_tx, events) = mpsc::channel();
         let ids: Arc<Mutex<HashMap<u32, u64>>> = Arc::default();
         let listening = listen(ids.clone(), events_tx, wake);
-        let (jobs, rx) = mpsc::channel::<(Note, Option<u64>)>();
+        let (jobs, rx) = mpsc::channel::<Job>();
         let worker_ids = ids.clone();
         let _ = std::thread::Builder::new().name("flatshot-notify".into()).spawn(move || {
-            for (note, token) in rx {
+            for job in rx {
+                let (note, token) = match job {
+                    Job::Send(note, token) => (note, token),
+                    Job::Flush(done) => {
+                        let _ = done.send(());
+                        continue;
+                    }
+                };
                 let id = send_now(&note, token.is_some());
                 if let (Some(id), Some(token)) = (id, token)
                     && let Ok(mut ids) = worker_ids.lock()
@@ -271,8 +286,17 @@ impl Notifier {
         if token.is_none() {
             note.actions.clear();
         }
-        let _ = self.jobs.send((note, token));
+        let _ = self.jobs.send(Job::Send(note, token));
         token
+    }
+
+    /// Wait (up to `limit`) for the notifications sent so far to be shown:
+    /// before the tray app quits.
+    pub fn flush(&self, limit: Duration) {
+        let (tx, rx) = mpsc::channel();
+        if self.jobs.send(Job::Flush(tx)).is_ok() {
+            let _ = rx.recv_timeout(limit);
+        }
     }
 
     /// The tokens still remembered (the others' buttons do nothing now).
