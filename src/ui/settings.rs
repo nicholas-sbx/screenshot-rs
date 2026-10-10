@@ -455,7 +455,7 @@ impl Settings {
                         "The desktop's screenshot sound",
                         vec!["Choose…", "Play"],
                     )),
-                    Row::new("run_command", "Run a command", "{path} is replaced with the image file.", Control::None).below(line(
+                    Row::new("run_command", "Run a command", "{path} stands for the image file (also $FLATSHOT_PATH).", Control::None).below(line(
                         &c.run_command,
                         "curl -F file=@{path} https://example.com/upload",
                         vec![],

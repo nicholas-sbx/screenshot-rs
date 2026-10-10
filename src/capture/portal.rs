@@ -27,7 +27,9 @@ pub fn screenshot() -> Result<Image, String> {
     // somewhere the user keeps pictures.
     let temp = std::env::temp_dir();
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from);
-    if path.starts_with(&temp) || runtime.is_some_and(|r| path.starts_with(r)) {
+    // (a plain path: "/tmp/../home/x" is not in the temp folder)
+    let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
+    if plain && (path.starts_with(&temp) || runtime.is_some_and(|r| path.starts_with(r))) {
         let _ = std::fs::remove_file(&path);
     }
     Ok(img)

@@ -247,7 +247,8 @@ pub fn gst_has(element: &str) -> bool {
 
 /// Run a program and say whether it succeeded (killed after `limit`).
 fn run_quietly(argv: &[&str], limit: Duration) -> bool {
-    let child = Command::new(argv[0]).args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn();
+    let Some(mut cmd) = util::command(argv[0]) else { return false };
+    let child = cmd.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn();
     let Ok(mut child) = child else { return false };
     matches!(wait_for(&mut child, limit), Some(0))
 }
@@ -599,15 +600,23 @@ fn geometry(r: IRect) -> String {
 /// without stopping it, it's told to finish (SIGINT) rather than recording
 /// on with no one to save the file.
 pub fn spawn(argv: &[String], stream: Option<&OwnedFd>, stdout: Stdio, stderr: Stdio) -> std::io::Result<Child> {
-    let mut cmd = Command::new(&argv[0]);
+    let exe = util::which(&argv[0]).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{} is not installed", argv[0])))?;
+    let mut cmd = Command::new(exe);
     cmd.args(&argv[1..]).stdin(Stdio::null()).stdout(stdout).stderr(stderr).process_group(0);
     let raw = stream.map(|fd| fd.as_raw_fd());
-    // SAFETY: only async-signal-safe calls (prctl, fcntl, dup2) between fork
-    // and exec. dup2 puts the stream at the number the recorder is told
-    // (without close-on-exec, which dup2 clears); nothing else is inherited.
+    let parent = rustix::process::getpid().as_raw_nonzero().get();
+    // SAFETY: only async-signal-safe calls (prctl, getppid, close_range,
+    // fcntl, dup2) between fork and exec. Everything is marked
+    // close-on-exec, then dup2 puts the stream at the number the recorder
+    // is told (dup2 clears the mark): nothing else is inherited.
     unsafe {
         cmd.pre_exec(move || {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGINT as libc::c_ulong);
+            // (Flatshot gone already, before that took: no one would stop it)
+            if libc::getppid() != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            util::cloexec_from(STREAM_FD as u32);
             match raw {
                 Some(fd) if fd == STREAM_FD => {
                     // (already there: just kept open across exec)

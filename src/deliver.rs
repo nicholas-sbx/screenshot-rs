@@ -173,13 +173,8 @@ fn human_size(n: usize) -> String {
 /// Hand clipboard data to wl-copy, which stays in the background to serve
 /// it: a one-off capture can then end at once.
 pub fn hand_to_wl_copy(mime: &str, data: &[u8]) -> bool {
-    let Some(program) = util::which("wl-copy") else { return false };
-    let child = std::process::Command::new(program)
-        .args(["--type", mime])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let Some(mut cmd) = util::command("wl-copy") else { return false };
+    let child = cmd.args(["--type", mime]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
     let Ok(mut child) = child else { return false };
     let written = child.stdin.take().is_some_and(|mut s| s.write_all(data).is_ok());
     // It reads everything, takes the clipboard, then forks: the one we
@@ -222,17 +217,106 @@ pub fn show_in_folder(path: &Path) -> bool {
     path.parent().is_some_and(open_file)
 }
 
-/// The user's after-capture command, `{path}` replaced by the quoted path
-/// (and in $FLATSHOT_PATH).
+/// Run the user's after-capture command for `path` (in $FLATSHOT_PATH).
 pub fn run_command(template: &str, path: &Path) -> bool {
-    let quoted = util::shell_quote(&path.to_string_lossy());
-    let command = template.replace("{path}", &quoted);
+    let command = command_line(template);
     util::spawn_detached(&["/bin/sh".as_ref(), "-c".as_ref(), command.as_ref()], &[("FLATSHOT_PATH", path.as_os_str())])
+}
+
+/// The user's command with each `{path}` standing for the file as a
+/// reference to $FLATSHOT_PATH, quoted for where it stands: bare, in
+/// double quotes, in single quotes, in `$(...)` or backticks. The path is
+/// never part of the command's text, so nothing in it (a window title in
+/// the file name, say) is read by the shell; quoting the command doesn't
+/// foresee can at worst break it.
+pub fn command_line(template: &str) -> String {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Q {
+        Bare,
+        Single,
+        Double,
+        /// inside `$(...)`
+        Sub,
+        /// inside backticks
+        Tick,
+    }
+    let mut out = String::with_capacity(template.len() + 32);
+    let mut stack = vec![Q::Bare];
+    let mut rest = template;
+    while let Some(c) = rest.chars().next() {
+        let q = stack.last().copied().unwrap_or(Q::Bare);
+        if let Some(after) = rest.strip_prefix("{path}") {
+            out.push_str(match q {
+                Q::Single => r#"'"$FLATSHOT_PATH"'"#,
+                Q::Double => "${FLATSHOT_PATH}",
+                Q::Bare | Q::Sub | Q::Tick => r#""$FLATSHOT_PATH""#,
+            });
+            rest = after;
+            continue;
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+        match (q, c) {
+            (Q::Single, '\'') | (Q::Double, '"') | (Q::Sub, ')') | (Q::Tick, '`') => {
+                stack.pop();
+            }
+            (Q::Single, _) => {}
+            (_, '\\') => {
+                // (the next character is taken as it is)
+                if let Some(n) = rest.chars().next() {
+                    out.push(n);
+                    rest = &rest[n.len_utf8()..];
+                }
+            }
+            (Q::Double, '$') | (Q::Bare | Q::Sub | Q::Tick, '$') if rest.starts_with('(') => {
+                out.push('(');
+                rest = &rest[1..];
+                stack.push(Q::Sub);
+            }
+            (Q::Double, '`') | (Q::Bare | Q::Sub, '`') => stack.push(Q::Tick),
+            (Q::Bare | Q::Sub | Q::Tick, '\'') => stack.push(Q::Single),
+            (Q::Bare | Q::Sub | Q::Tick, '"') => stack.push(Q::Double),
+            _ => {}
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_path_stays_out_of_the_command() {
+        assert_eq!(command_line("cmd {path}"), r#"cmd "$FLATSHOT_PATH""#);
+        assert_eq!(command_line(r#"cmd "{path}""#), r#"cmd "${FLATSHOT_PATH}""#);
+        assert_eq!(command_line("cmd '{path}'"), r#"cmd ''"$FLATSHOT_PATH"''"#);
+        assert_eq!(command_line("curl -F file=@{path} https://x"), r#"curl -F file=@"$FLATSHOT_PATH" https://x"#);
+        assert_eq!(command_line(r#"n "$(basename {path})""#), r#"n "$(basename "$FLATSHOT_PATH")""#);
+        assert_eq!(command_line(r#"echo \"{path}"#), r#"echo \""$FLATSHOT_PATH""#);
+        assert_eq!(command_line("no path"), "no path");
+        // Whatever the file is called, and however the command quotes it,
+        // the shell gets the name and runs nothing in it.
+        let dir = std::env::temp_dir().join(format!("flatshot-cmd-{}", util::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let evil = format!("{}/a $(touch pwned1) `touch pwned2` '; touch pwned3; ' \" ; touch pwned4 ; \" \\ $HOME.png", dir.display());
+        for template in [
+            "printf %s {path}",
+            r#"printf %s "{path}""#,
+            "printf %s '{path}'",
+            r#"printf %s "x$(printf %s {path})y""#,
+            r#"x=`printf %s {path}`; printf %s "$x""#,
+        ] {
+            let out =
+                std::process::Command::new("/bin/sh").args(["-c", &command_line(template)]).env("FLATSHOT_PATH", &evil).current_dir(&dir).output().unwrap();
+            let got = String::from_utf8_lossy(&out.stdout);
+            let want = if template.contains("x$(") { format!("x{evil}y") } else { evil.clone() };
+            assert_eq!(got, want, "{template}");
+        }
+        let made: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert!(made.is_empty(), "the shell ran something: {made:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn unique_names_never_overwrite() {

@@ -223,7 +223,7 @@ impl Menu {
         if id == 0 {
             return Some(root_properties());
         }
-        let item = s.items.get(usize::try_from(id - 1).ok()?)?;
+        let item = s.items.get(usize::try_from(id.checked_sub(1)?).ok()?)?;
         Some(properties(item, s.recording))
     }
 }
@@ -256,7 +256,11 @@ impl Menu {
             let kids = if recursion_depth == 0 { Vec::new() } else { children(&s) };
             return Ok((s.revision, (0, root_properties(), kids)));
         }
-        let item = usize::try_from(parent_id - 1).ok().and_then(|i| s.items.get(i)).ok_or_else(|| zbus::fdo::Error::InvalidArgs("no such item".into()))?;
+        let item = parent_id
+            .checked_sub(1)
+            .and_then(|i| usize::try_from(i).ok())
+            .and_then(|i| s.items.get(i))
+            .ok_or_else(|| zbus::fdo::Error::InvalidArgs("no such item".into()))?;
         Ok((s.revision, (parent_id, properties(item, s.recording), Vec::new())))
     }
 
@@ -272,7 +276,11 @@ impl Menu {
         if event_id != "clicked" {
             return;
         }
-        let key = self.state.lock().ok().and_then(|s| usize::try_from(id - 1).ok().and_then(|i| s.items.get(i)).map(|item| item.key.clone()));
+        let key = self
+            .state
+            .lock()
+            .ok()
+            .and_then(|s| id.checked_sub(1).and_then(|i| usize::try_from(i).ok()).and_then(|i| s.items.get(i)).map(|item| item.key.clone()));
         if let Some(key) = key.filter(|k| !k.is_empty()) {
             (self.events)(TrayEvent::Menu(key));
         }

@@ -143,11 +143,12 @@ Change settings in the settings window (the tray menu's **Settings…**, or `fla
 ## Security
 
 - **Untrusted input is parsed by memory-safe code**: the barcode decoders (rxing), image decoders, the compositor's and D-Bus messages. A decoder that panics on a strange picture is caught; the capture goes on without codes.
-- **Files**: captures are created with `O_EXCL | O_NOFOLLOW` under a unique name, so a capture never replaces a file or writes through a planted link; temporary files and the KWin script live in a private (0700) runtime folder and are created exclusively, mode 0600.
+- **Files**: captures are created with `O_EXCL | O_NOFOLLOW` under a unique name, so a capture never replaces a file or writes through a planted link; temporary files and the KWin script live in a private (0700) runtime folder and are created exclusively, mode 0600. The editor saves into the folder it opened the picture from (held open since), replacing the file by rename: a link put in its place meanwhile is replaced, not followed. File names made from window titles lose control characters and the invisible ones that turn text around ("photo‮gnp.exe").
 - **IPC**: the tray app's socket is in a folder only you can enter, and both ends check the other's user ID (`SO_PEERCRED`). Commands are a fixed, small grammar; lines are capped.
-- **D-Bus**: replies from KWin's window script are only accepted from KWin's own connection; shortcut presses only from the shortcut service's, notification clicks only from the notification server's. Window lists and titles are capped in size.
+- **D-Bus**: replies from KWin's window script are only accepted from KWin's own connection; shortcut presses only from the shortcut service's, notification clicks only from the notification server's (its current owner, followed through the bus's own announcements). Nothing waits on the bus while its messages come in, so a flood of forged ones can't stall it. Window lists and titles are capped in size.
 - **What the screen says stays text**: code contents and window titles shown in notifications are escaped, with invisible direction overrides replaced, so a QR code can't pose as something else; "Open" is only offered for http(s), mailto, tel, sms, geo and matrix links.
-- **Commands you configure** ("run after capture") get the file's path quoted for the shell, and in `$FLATSHOT_PATH`.
+- **Commands you configure** ("run after capture"): `{path}` becomes a reference to `$FLATSHOT_PATH`, quoted to fit where it stands, so the file's name (which may come from a window title) is never read by the shell.
+- **Programs Flatshot starts** are run by their full path from `$PATH` (never the current folder) and inherit nothing but stdin, stdout and stderr: not the screen-cast stream, nor any other descriptor. Text printed to a terminal (a code's text, file names) has its control characters replaced.
 
 ## Development
 

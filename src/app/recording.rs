@@ -1003,7 +1003,7 @@ impl App {
 
     /// Copy, open, run the command and announce the saved recording.
     fn deliver_recording(&mut self, path: &Path, length: Option<Duration>, rec: &Recording) {
-        println!("{}", path.display());
+        crate::util::print_line(&path.to_string_lossy());
         let cfg = rec.cfg.clone();
         let copied = match cfg.clipboard.as_str() {
             "image" => self.copy_file(path),

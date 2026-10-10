@@ -36,7 +36,10 @@ pub fn clean(value: &str) -> String {
     let mut s = String::with_capacity(value.len());
     let mut in_unsafe = false;
     for c in value.chars() {
-        let unsafe_char = (c as u32) < 0x20 || c == '\u{7f}' || c == '/' || c == '\\' || c == LBRACE || c == RBRACE;
+        // (controls, C1 ones too, and the invisible characters that turn
+        // text around or hide in it: "photo\u{202E}gnp.exe" isn't a PNG)
+        let invisible = matches!(c, '\u{200B}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}');
+        let unsafe_char = c.is_control() || invisible || c == '/' || c == '\\' || c == LBRACE || c == RBRACE;
         if unsafe_char {
             if !in_unsafe {
                 s.push('_');
@@ -266,6 +269,9 @@ mod tests {
         assert_eq!(clean("..."), "");
         assert_eq!(clean("x\n\ty"), "x_y");
         assert_eq!(clean(&"a".repeat(100)).len(), 80);
+        assert_eq!(clean("photo\u{202E}gnp.exe"), "photo_gnp.exe");
+        assert_eq!(clean("a\u{9b}31mb"), "a_31mb");
+        assert_eq!(clean("👨\u{200D}👩"), "👨\u{200D}👩");
     }
 
     #[test]

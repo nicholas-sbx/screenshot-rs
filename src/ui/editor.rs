@@ -109,6 +109,8 @@ pub struct Editor {
     /// taken on): drawings are as thick as on the capture overlay
     pub dpr: f32,
     pub path: PathBuf,
+    /// where Save writes, its folder held since the file was opened
+    target: Option<SaveTarget>,
     alpha: bool,
     cfg: Config,
     keymap: Keymap,
@@ -178,6 +180,7 @@ impl Editor {
         let mut ed = Editor {
             image: Arc::new(image),
             dpr: dpr.max(0.25),
+            target: SaveTarget::open(&path).ok(),
             path,
             alpha,
             color_index: (cfg.default_color.clamp(0, CUSTOM as i64)) as usize,
@@ -1037,8 +1040,11 @@ impl Editor {
 
     /// Save back to the file. False (and why, in the status line) if it couldn't.
     pub fn save(&mut self) -> bool {
-        let path = self.path.clone();
-        self.save_to(&path)
+        let target = match self.target.take() {
+            Some(t) if t.is_for(&self.path) => Ok(t),
+            _ => SaveTarget::open(&self.path),
+        };
+        self.save_in(target)
     }
 
     pub fn save_as(&mut self) {
@@ -1046,14 +1052,23 @@ impl Editor {
         self.requests.push(Request::SaveAs);
     }
 
+    /// Save to `path` (chosen just now: Save as).
     pub fn save_to(&mut self, path: &Path) -> bool {
+        self.save_in(SaveTarget::open(path))
+    }
+
+    fn save_in(&mut self, target: Result<SaveTarget, String>) -> bool {
         let mut clock = crate::timing::Clock::new("editor save");
-        let written = self.render().and_then(|img| {
+        let written = target.and_then(|target| {
+            let img = self.render()?;
             clock.step("drawn", format!("{} × {}, {} drawings", img.width(), img.height(), self.shapes.len()));
-            write_picture(&img, path, &self.cfg, self.alpha)
+            let result = write_picture(&img, &target, &self.cfg, self.alpha);
+            self.target = Some(target);
+            result
         });
         match written {
-            Ok(path) => {
+            Ok(()) => {
+                let path = self.target.as_ref().map(|t| t.path.clone()).unwrap_or_default();
                 clock.step("saved", path.display().to_string());
                 self.say(format!("Saved to {}", path.display()));
                 self.path = path;
@@ -1279,28 +1294,78 @@ fn ask_button_at(view: (f32, f32), at: Point) -> Option<Answer> {
     ask_buttons(view).into_iter().find(|(_, r, ..)| r.contains(at)).map(|(a, ..)| a)
 }
 
-/// Write `img` to `path` in the format its extension names (PNG if none
-/// can be written here): to a new file beside it, then into its place, so
-/// a failed write never leaves half a picture. Returns where it went.
-pub fn write_picture(img: &Image, path: &Path, cfg: &Config, alpha: bool) -> Result<PathBuf, String> {
-    // (a link is followed: the picture it points to is what's saved)
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let ext = target.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+/// A file to save to, in a folder held open from the moment the file was
+/// chosen: a link put in the file's place later is replaced, never
+/// followed, and the folder can't be swapped for another.
+pub struct SaveTarget {
+    /// with the links it had when chosen resolved (one the user opened a
+    /// picture through saves to that picture)
+    pub path: PathBuf,
+    /// as it was given
+    given: PathBuf,
+    dir: std::os::fd::OwnedFd,
+    name: std::ffi::OsString,
+}
+
+impl SaveTarget {
+    pub fn open(path: &Path) -> Result<SaveTarget, String> {
+        use rustix::fs::{Mode, OFlags};
+        let resolved = match std::fs::canonicalize(path) {
+            Ok(p) => p,
+            Err(_) => {
+                // (a new file: its folder resolved)
+                let parent = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+                let name = path.file_name().ok_or_else(|| format!("{} names no file", path.display()))?;
+                std::fs::canonicalize(parent).map_err(|e| format!("{}: {e}", parent.display()))?.join(name)
+            }
+        };
+        let (Some(parent), Some(name)) = (resolved.parent(), resolved.file_name()) else {
+            return Err(format!("{} names no file", path.display()));
+        };
+        let dir =
+            rustix::fs::open(parent, OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty()).map_err(|e| format!("{}: {e}", parent.display()))?;
+        let name = name.to_os_string();
+        Ok(SaveTarget { path: resolved, given: path.to_path_buf(), dir, name })
+    }
+
+    /// Is this where `path` saves?
+    pub fn is_for(&self, path: &Path) -> bool {
+        self.path == path || self.given == path
+    }
+
+    /// Put `bytes` in the file: written to a new file beside it, then
+    /// renamed into its place, so a failed write never leaves half a file.
+    pub fn write(&self, bytes: &[u8]) -> Result<(), String> {
+        use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+        use std::io::Write;
+        let fail = |e: &dyn std::fmt::Display| format!("could not write {}: {e}", self.path.display());
+        let temp = format!(".{}.{}.tmp", self.name.to_string_lossy(), crate::util::random_hex(4));
+        let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let fd = rustix::fs::openat(&self.dir, temp.as_str(), flags, Mode::from_raw_mode(0o600)).map_err(|e| fail(&e))?;
+        // (the file keeps who may read it)
+        if let Ok(st) = rustix::fs::statat(&self.dir, self.name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
+            && FileType::from_raw_mode(st.st_mode) == FileType::RegularFile
+        {
+            let _ = rustix::fs::fchmod(&fd, Mode::from_raw_mode(st.st_mode & 0o777));
+        }
+        let written = std::fs::File::from(fd).write_all(bytes);
+        let placed =
+            written.map_err(|e| fail(&e)).and_then(|()| rustix::fs::renameat(&self.dir, temp.as_str(), &self.dir, self.name.as_os_str()).map_err(|e| fail(&e)));
+        if placed.is_err() {
+            let _ = rustix::fs::unlinkat(&self.dir, temp.as_str(), AtFlags::empty());
+        }
+        placed
+    }
+}
+
+/// Write `img` to `target` in the format its extension names (PNG if none
+/// can be written here).
+pub fn write_picture(img: &Image, target: &SaveTarget, cfg: &Config, alpha: bool) -> Result<(), String> {
+    let ext = target.path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     let ext = if ext == "jpeg" { "jpg".to_string() } else { ext };
     let format = crate::codec::writable_formats().iter().find(|f| f.0 == ext).map(|f| f.0).unwrap_or("png");
     let bytes = if format == "png" { crate::codec::encode_png(img, alpha)? } else { crate::codec::encode(img, format, cfg.quality.clamp(1, 100) as u8)? };
-    let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "picture".into());
-    let temp = crate::deliver::write_unique(&dir.join(format!(".{name}.{}.tmp", crate::util::random_hex(4))), &bytes)?;
-    // (the file keeps who may read it)
-    if let Ok(meta) = std::fs::metadata(&target) {
-        let _ = std::fs::set_permissions(&temp, meta.permissions());
-    }
-    if let Err(e) = std::fs::rename(&temp, &target) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(format!("could not write {}: {e}", target.display()));
-    }
-    Ok(target)
+    target.write(&bytes)
 }
 
 #[cfg(test)]
@@ -1318,6 +1383,36 @@ mod tests {
         // picture coordinates to window coordinates
         let c = ed.canvas_rect();
         Point::new(c.x + ed.offset.x + x * ed.zoom, c.y + ed.offset.y + y * ed.zoom)
+    }
+
+    #[test]
+    fn saving_follows_no_link_put_in_later() {
+        let base = std::env::temp_dir().join(format!("flatshot-save-{}", crate::util::random_hex(4)));
+        let (dir, elsewhere) = (base.join("shared"), base.join("home"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let secret = elsewhere.join("secret");
+        std::fs::write(&secret, "keep me").unwrap();
+        let pic = dir.join("pic.png");
+        std::fs::write(&pic, "old").unwrap();
+        let target = SaveTarget::open(&pic).unwrap();
+        // The file swapped for a link: the link is replaced, not followed.
+        std::fs::remove_file(&pic).unwrap();
+        std::os::unix::fs::symlink(&secret, &pic).unwrap();
+        target.write(b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep me");
+        assert!(std::fs::symlink_metadata(&pic).unwrap().is_file());
+        assert_eq!(std::fs::read(&pic).unwrap(), b"new");
+        // The folder swapped for a link: the picture still goes where it was.
+        std::fs::rename(&dir, base.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+        std::fs::write(elsewhere.join("pic.png"), "theirs").unwrap();
+        target.write(b"newer").unwrap();
+        assert_eq!(std::fs::read(base.join("moved/pic.png")).unwrap(), b"newer");
+        assert_eq!(std::fs::read_to_string(elsewhere.join("pic.png")).unwrap(), "theirs");
+        let left: Vec<_> = std::fs::read_dir(base.join("moved")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 1, "no temporary file left: {left:?}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

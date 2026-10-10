@@ -479,6 +479,7 @@ dependencies = [
  "calloop",
  "calloop-wayland-source",
  "fontdb",
+ "futures-lite",
  "gif",
  "harfrust",
  "image-webp",

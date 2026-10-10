@@ -267,6 +267,11 @@ fn hyprland() -> Option<Desktop> {
         .find(|p| p.exists())?;
     let ask = |what: &str| -> Option<Value> {
         let mut s = UnixStream::connect(&sock).ok()?;
+        // (the old place is in /tmp, open to all: only our own Hyprland counts)
+        let ours = rustix::net::sockopt::socket_peercred(&s).is_ok_and(|c| c.uid == rustix::process::getuid());
+        if !ours {
+            return None;
+        }
         s.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
         s.write_all(format!("j/{what}").as_bytes()).ok()?;
         let mut out = Vec::new();

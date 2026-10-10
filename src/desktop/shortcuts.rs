@@ -130,51 +130,30 @@ pub fn start(events: impl Fn(ShortcutEvent) + Send + 'static) -> Result<(), Stri
     let reply = call("getComponent", &(COMPONENT,))?;
     let component: zbus::zvariant::OwnedObjectPath = reply.body().deserialize().map_err(|e| e.to_string())?;
     let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(SERVICE).map_err(|e| e.to_string())?.build();
-    let iter = zbus::blocking::MessageIterator::for_match_rule(rule, conn, Some(32)).map_err(|e| e.to_string())?;
-    std::thread::Builder::new()
-        .name("flatshot-shortcuts".into())
-        .spawn(move || {
-            let mut service = owner(conn);
-            for msg in iter {
-                let Ok(msg) = msg else { continue };
-                let header = msg.header();
-                // Only the shortcut service's own signals count.
-                let sender = header.sender().map(|s| s.to_string());
-                if sender.is_none() || sender != service {
-                    service = owner(conn);
-                    if sender.is_none() || sender != service {
-                        continue;
-                    }
-                }
-                let (iface, member, path) =
-                    (header.interface().map(|i| i.to_string()), header.member().map(|m| m.to_string()), header.path().map(|p| p.to_string()));
-                match (iface.as_deref(), member.as_deref()) {
-                    (Some(COMPONENT_IFACE), Some("globalShortcutPressed")) if path.as_deref() == Some(component.as_str()) => {
-                        if let Ok((comp, action, _)) = msg.body().deserialize::<(String, String, i64)>()
-                            && comp == COMPONENT
-                            && ACTIONS.iter().any(|a| a.0 == action)
-                        {
-                            events(ShortcutEvent::Pressed(action));
-                        }
-                    }
-                    (Some(IFACE), Some("yourShortcutsChanged")) => {
-                        if let Ok((id, _)) = msg.body().deserialize::<(Vec<String>, Vec<(Vec<i32>,)>)>()
-                            && id.first().map(String::as_str) == Some(COMPONENT)
-                        {
-                            events(ShortcutEvent::Changed);
-                        }
-                    }
-                    _ => {}
+    // (only the shortcut service's own signals come through)
+    crate::dbus::listen(SERVICE, rule, "flatshot-shortcuts", move |msg| {
+        let header = msg.header();
+        let (iface, member, path) = (header.interface().map(|i| i.as_str()), header.member().map(|m| m.as_str()), header.path().map(|p| p.as_str()));
+        match (iface, member) {
+            (Some(COMPONENT_IFACE), Some("globalShortcutPressed")) if path == Some(component.as_str()) => {
+                if let Ok((comp, action, _)) = msg.body().deserialize::<(String, String, i64)>()
+                    && comp == COMPONENT
+                    && ACTIONS.iter().any(|a| a.0 == action)
+                {
+                    events(ShortcutEvent::Pressed(action));
                 }
             }
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn owner(conn: &zbus::blocking::Connection) -> Option<String> {
-    let reply = conn.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "GetNameOwner", &(SERVICE,)).ok()?;
-    reply.body().deserialize::<String>().ok()
+            (Some(IFACE), Some("yourShortcutsChanged")) => {
+                if let Ok((id, _)) = msg.body().deserialize::<(Vec<String>, Vec<(Vec<i32>,)>)>()
+                    && id.first().map(String::as_str) == Some(COMPONENT)
+                {
+                    events(ShortcutEvent::Changed);
+                }
+            }
+            _ => {}
+        }
+        true
+    })
 }
 
 /// The keys of `action` ("" if none).

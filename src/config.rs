@@ -41,7 +41,7 @@ pub struct Config {
     pub notify: bool,
     /// none | image | folder
     pub open_after: String,
-    /// shell command; {path} is replaced by the quoted file path
+    /// shell command; {path} stands for the file (see deliver::command_line)
     pub run_command: String,
     pub sound: bool,
     pub sound_file: String,

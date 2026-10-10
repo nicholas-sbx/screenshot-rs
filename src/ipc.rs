@@ -25,17 +25,22 @@ fn uid() -> u32 {
 /// and closed to others if it exists.
 pub fn runtime_dir() -> io::Result<PathBuf> {
     let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p| p.is_absolute());
-    let dir = match base {
-        Some(b) if secure_dir(&b).is_ok() => b.join("flatshot"),
-        _ => std::env::temp_dir().join(format!("flatshot-{}.run", uid())),
-    };
-    match fs::DirBuilder::new().mode(0o700).create(&dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
+    let mut candidates = Vec::new();
+    if let Some(b) = base.filter(|b| secure_dir(b).is_ok()) {
+        candidates.push(b.join("flatshot"));
     }
-    secure_dir(&dir)?;
-    Ok(dir)
+    // Without one: the temp folder, unless someone else took the name
+    // there first; then (as every Flatshot of ours concludes alike) the cache.
+    candidates.push(std::env::temp_dir().join(format!("flatshot-{}.run", uid())));
+    candidates.push(crate::config::cache_home().join("flatshot").join("run"));
+    let mut last = io::Error::other("no runtime folder");
+    for dir in candidates {
+        match fs::DirBuilder::new().mode(0o700).recursive(true).create(&dir).and_then(|()| secure_dir(&dir)) {
+            Ok(()) => return Ok(dir),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
 }
 
 /// A real folder (not a link), owned by us, that nobody else can use.
@@ -133,7 +138,10 @@ pub struct Server {
 impl Server {
     /// Start serving, unless another tray app already does (Ok(None)).
     pub fn bind() -> io::Result<Option<Server>> {
-        let dir = runtime_dir()?;
+        Self::bind_in(&runtime_dir()?)
+    }
+
+    fn bind_in(dir: &std::path::Path) -> io::Result<Option<Server>> {
         let lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -195,11 +203,12 @@ mod tests {
     fn round_trip() {
         let tmp = std::env::temp_dir().join(format!("flatshot-ipc-test-{}", crate::util::random_hex(4)));
         fs::DirBuilder::new().mode(0o700).create(&tmp).unwrap();
-        // SAFETY: tests in this module run one at a time in this process.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &tmp) };
-        let server = Server::bind().unwrap().expect("first server");
-        assert!(Server::bind().unwrap().is_none(), "a second one must not serve");
-        let t = std::thread::spawn(|| (send("screens 0 pin"), query("status", Duration::from_secs(2))));
+        let server = Server::bind_in(&tmp).unwrap().expect("first server");
+        assert!(Server::bind_in(&tmp).unwrap().is_none(), "a second one must not serve");
+        let path = tmp.join("ipc");
+        let t = std::thread::spawn(move || {
+            (exchange(&path, "screens 0 pin", Duration::from_millis(1500)).is_some(), exchange(&path, "status", Duration::from_secs(2)))
+        });
         let mut got = Vec::new();
         let start = std::time::Instant::now();
         while got.is_empty() && start.elapsed() < Duration::from_secs(5) {

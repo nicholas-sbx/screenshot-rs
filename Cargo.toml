@@ -28,6 +28,7 @@ calloop = "0.14"
 calloop-wayland-source = "0.4"
 # D-Bus: pure Rust, with its own small executor thread.
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+futures-lite = { version = "2", default-features = false, features = ["std"] }
 # Drawing and text.
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 fontdb = { version = "0.24", default-features = false, features = ["std", "fs", "memmap", "fontconfig"] }

@@ -308,51 +308,35 @@ impl Notifier {
 /// Hear the notification server's ActionInvoked and NotificationClosed for
 /// our notifications, on a thread of its own. False if that can't be done.
 fn listen(ids: Arc<Mutex<HashMap<u32, u64>>>, events: mpsc::Sender<NoteEvent>, wake: Waker) -> bool {
-    let Ok(conn) = crate::dbus::session() else { return false };
-    let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(SERVICE).and_then(|b| b.path(PATH)).map(|b| b.build());
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender(SERVICE)
+        .and_then(|b| b.interface(SERVICE))
+        .and_then(|b| b.path(PATH))
+        .map(|b| b.build());
     let Ok(rule) = rule else { return false };
-    let Ok(iter) = zbus::blocking::MessageIterator::for_match_rule(rule, conn, Some(64)) else {
-        return false;
-    };
-    let spawned = std::thread::Builder::new().name("flatshot-notify-events".into()).spawn(move || {
-        // Only the notification server's own signals count.
-        let mut server = owner(conn);
-        for msg in iter {
-            let Ok(msg) = msg else { continue };
-            let header = msg.header();
-            let sender = header.sender().map(|s| s.to_string());
-            if sender.is_none() || sender != server {
-                server = owner(conn); // (it may have restarted)
-                if sender.is_none() || sender != server {
-                    continue;
-                }
+    // (only the notification server's own signals come through)
+    let listening = crate::dbus::listen(SERVICE, rule, "flatshot-notify-events", move |msg| {
+        let event = match msg.header().member().map(|m| m.as_str()) {
+            Some("ActionInvoked") => match msg.body().deserialize::<(u32, String)>() {
+                Ok((id, key)) => ids.lock().ok().and_then(|ids| ids.get(&id).copied()).map(|t| NoteEvent::Action(t, key)),
+                Err(_) => None,
+            },
+            Some("NotificationClosed") => match msg.body().deserialize::<(u32, u32)>() {
+                Ok((id, _)) => ids.lock().ok().and_then(|mut ids| ids.remove(&id)).map(NoteEvent::Closed),
+                Err(_) => None,
+            },
+            _ => None,
+        };
+        if let Some(e) = event {
+            if events.send(e).is_err() {
+                return false;
             }
-            let event = match header.member().map(|m| m.as_str()) {
-                Some("ActionInvoked") => match msg.body().deserialize::<(u32, String)>() {
-                    Ok((id, key)) => ids.lock().ok().and_then(|ids| ids.get(&id).copied()).map(|t| NoteEvent::Action(t, key)),
-                    Err(_) => None,
-                },
-                Some("NotificationClosed") => match msg.body().deserialize::<(u32, u32)>() {
-                    Ok((id, _)) => ids.lock().ok().and_then(|mut ids| ids.remove(&id)).map(NoteEvent::Closed),
-                    Err(_) => None,
-                },
-                _ => None,
-            };
-            if let Some(e) = event {
-                if events.send(e).is_err() {
-                    return;
-                }
-                wake();
-            }
+            wake();
         }
+        true
     });
-    spawned.is_ok()
-}
-
-/// The unique name of the notification server.
-fn owner(conn: &zbus::blocking::Connection) -> Option<String> {
-    let reply = conn.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "GetNameOwner", &(SERVICE,)).ok()?;
-    reply.body().deserialize::<String>().ok()
+    listening.is_ok()
 }
 
 /// A path for a notification's text: its file name.

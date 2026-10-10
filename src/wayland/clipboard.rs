@@ -7,8 +7,9 @@
 //! program takes the clipboard. Pasting (into a text being typed) reads the
 //! current selection's text.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::fd::OwnedFd;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
@@ -42,6 +43,11 @@ pub struct OfferData(pub Mutex<Vec<String>>);
 
 /// How long a paste waits for data still being made.
 const WAIT_FOR_DATA: Duration = Duration::from_secs(30);
+/// How long a program pasting may go without reading what it asked for.
+const STALL: Duration = Duration::from_secs(10);
+/// Pastes being served now (each by a thread), and the most at once.
+static SENDING: AtomicUsize = AtomicUsize::new(0);
+const MAX_SENDING: usize = 16;
 
 /// What's offered, which may still be on its way (a picture being encoded
 /// after the overlay that had the keyboard has gone).
@@ -236,13 +242,21 @@ impl Clipboard {
             None => o.slot.clone(),
         };
         // (big pictures fill the pipe, and may still be being made: written
-        // by a thread of their own)
-        let _ = std::thread::Builder::new().name("flatshot-clipboard".into()).spawn(move || {
+        // by a thread of their own; a program that asks again and again
+        // without reading gets nothing past the first few)
+        if SENDING.fetch_add(1, Ordering::AcqRel) >= MAX_SENDING {
+            SENDING.fetch_sub(1, Ordering::AcqRel);
+            return;
+        }
+        let sent = std::thread::Builder::new().name("flatshot-clipboard".into()).spawn(move || {
             if let Some(data) = slot.wait() {
-                let mut f = std::fs::File::from(fd);
-                let _ = f.write_all(&data);
+                let _ = write_for(fd, &data, STALL);
             }
+            SENDING.fetch_sub(1, Ordering::AcqRel);
         });
+        if sent.is_err() {
+            SENDING.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 
     /// Someone else took the clipboard: let go of ours.
@@ -310,6 +324,33 @@ impl Clipboard {
         }
         rx
     }
+}
+
+/// Write all of `data` to `fd` (a pipe to a program pasting), giving up
+/// when it takes nothing for `stall`: it may never read.
+pub fn write_for(fd: OwnedFd, data: &[u8], stall: Duration) -> std::io::Result<()> {
+    use rustix::event::{PollFd, PollFlags};
+    use rustix::io::Errno;
+    let flags = rustix::fs::fcntl_getfl(&fd)?;
+    rustix::fs::fcntl_setfl(&fd, flags | rustix::fs::OFlags::NONBLOCK)?;
+    let mut at = 0;
+    while at < data.len() {
+        match rustix::io::write(&fd, &data[at..]) {
+            Ok(n) => at += n,
+            Err(Errno::AGAIN) => {
+                let mut fds = [PollFd::new(&fd, PollFlags::OUT)];
+                let ts = rustix::time::Timespec { tv_sec: stall.as_secs() as i64, tv_nsec: stall.subsec_nanos() as i64 };
+                match rustix::event::poll(&mut fds, Some(&ts)) {
+                    Ok(0) => return Err(std::io::ErrorKind::TimedOut.into()),
+                    Ok(_) | Err(Errno::INTR) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Err(Errno::INTR) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
 }
 
 /// Read `from` to its end (at most MAX_PASTE), giving up after `limit`:

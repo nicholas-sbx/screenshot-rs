@@ -190,7 +190,11 @@ impl ScreenCast {
             .call_method(Some(portal::DESKTOP), portal::PATH, Some(SCREENCAST), "OpenPipeWireRemote", &(session, options))
             .map_err(|e| format!("the screen cast's stream: {e}"))?;
         let fd: zbus::zvariant::OwnedFd = reply.body().deserialize().map_err(|e| format!("the screen cast's stream: {e}"))?;
-        Ok(fd.into())
+        let fd: OwnedFd = fd.into();
+        // (D-Bus hands descriptors over without close-on-exec: no program
+        // started but the recorder may have this one)
+        let _ = rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC);
+        Ok(fd)
     }
 
     /// The stream's size in pixels, from GStreamer's own negotiation (a

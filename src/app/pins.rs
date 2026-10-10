@@ -402,7 +402,7 @@ impl App {
     fn save_pin(&mut self, i: usize) {
         let cfg = crate::config::load();
         match crate::deliver::save(&self.pins[i].image, &cfg, None, &Shot::new("region")) {
-            Ok((path, _, _)) => println!("{}", path.display()),
+            Ok((path, _, _)) => crate::util::print_line(&path.to_string_lossy()),
             Err(e) => crate::warn!("{e}"),
         }
     }

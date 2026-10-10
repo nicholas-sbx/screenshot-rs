@@ -206,9 +206,9 @@ pub fn decode_bmp(bytes: &[u8]) -> Result<Image, String> {
 /// Decode with an external tool into a PNG in our private folder.
 fn decode_with_tool(path: &Path, tools: &[(&str, &[&str])]) -> Result<Image, String> {
     for (tool, extra) in tools {
-        let Some(exe) = crate::util::which(tool) else { continue };
+        let Some(mut cmd) = crate::util::command(tool) else { continue };
         let tmp = private_temp("png")?;
-        let status = std::process::Command::new(exe)
+        let status = cmd
             .args(*extra)
             .arg(path)
             .arg(&tmp)
@@ -318,7 +318,7 @@ pub fn encode(img: &Image, format: &str, quality: u8) -> Result<Vec<u8>, String>
 
 /// Write a PNG to a private temp file, run `tool [args] in out`, read out.
 fn encode_with_tool(img: &Image, ext: &str, tool: &str, args: &[&str], out_flag: bool) -> Result<Vec<u8>, String> {
-    let exe = crate::util::which(tool).ok_or_else(|| format!("{tool} is not installed"))?;
+    let mut cmd = crate::util::command(tool).ok_or_else(|| format!("{tool} is not installed"))?;
     let input = private_temp("png")?;
     let output = private_temp(ext)?;
     let png = encode_png(img, img.has_alpha())?;
@@ -335,7 +335,6 @@ fn encode_with_tool(img: &Image, ext: &str, tool: &str, args: &[&str], out_flag:
         cleanup();
         return Err(e.to_string());
     }
-    let mut cmd = std::process::Command::new(exe);
     cmd.args(args).arg(&input);
     if out_flag {
         cmd.arg("-o");

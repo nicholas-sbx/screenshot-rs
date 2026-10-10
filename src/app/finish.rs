@@ -50,7 +50,7 @@ impl App {
             }
             Outcome::CodeText(text) => {
                 let copied = self.copy_text(&text, slot);
-                println!("{text}");
+                util::print_line(&text);
                 if self.cfg.notify {
                     let summary = if copied { "Copied from code" } else { "Code" };
                     let body = util::elide(&util::displayable(&text), 300);
@@ -176,7 +176,7 @@ impl App {
         if result.saved
             && let Some(p) = &result.path
         {
-            println!("{}", p.display());
+            util::print_line(&p.to_string_lossy());
         }
         let copied = match result.clip.clone() {
             Some((mimes, data)) => {

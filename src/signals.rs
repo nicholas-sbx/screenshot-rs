@@ -22,8 +22,13 @@ extern "C" fn on_signal(signal: libc::c_int) {
     if fd >= 0 {
         let byte = signal as u8;
         // SAFETY: write(2) is async-signal-safe; with the pipe full, the
-        // signal is dropped (others are waiting to be read anyway).
-        unsafe { libc::write(fd, (&byte as *const u8).cast(), 1) };
+        // signal is dropped (others are waiting to be read anyway). errno
+        // is put back as it was: the code interrupted may be reading it.
+        unsafe {
+            let errno = *libc::__errno_location();
+            libc::write(fd, (&byte as *const u8).cast(), 1);
+            *libc::__errno_location() = errno;
+        }
     }
 }
 

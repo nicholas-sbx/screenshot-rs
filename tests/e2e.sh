@@ -222,12 +222,23 @@ cat > "$work/tray.sh" <<SH
 #!/usr/bin/env bash
 set -u
 $EX/fake_notify > "$work/notify.log" 2>&1 &
-FAKE_KDE_PRESS="screen@1500" FAKE_KDE_MENU="Capture last region@2500" $EX/fake_kde > "$work/kde.log" 2>&1 &
+FAKE_KDE_PRESS="screen@1500,monitor@6500" FAKE_KDE_MENU="Capture last region@2500" $EX/fake_kde > "$work/kde.log" 2>&1 &
 sleep 0.4
 $BIN --tray -v > "$work/tray.log" 2>&1 &
 sleep 3.5
+# Forged shortcut presses, sent straight to the tray app (a flood of them)
+# and to everyone: none may count, and the tray app must keep answering.
+names() { dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.\$@; }
+item=\$(names ListNames | grep -o 'org.kde.StatusNotifierItem-[0-9-]*' | head -n1)
+me=\$(names GetNameOwner string:\$item | grep -o '":[0-9.]*"' | tr -d '"')
+forge() { dbus-send --session --type=signal "\$@" /component/flatshot org.kde.kglobalaccel.Component.globalShortcutPressed string:flatshot string:region int64:0; }
+$EX/dbus_flood "\$me" 3000 >> "$work/tray-test.log"
+forge --dest=\$me
+forge
+echo "forged to \$me" >> "$work/tray-test.log"
+sleep 0.5
 $BIN -r 100x50+0+0 > "$work/forwarded.log" 2>&1; echo "forwarded \$?" >> "$work/tray-test.log"
-sleep 1
+sleep 2.5
 $BIN --quit; echo "quit \$?" >> "$work/tray-test.log"
 sleep 1
 pgrep -f -- "$BIN --tray" > /dev/null && echo "still running" >> "$work/tray-test.log" || echo "gone" >> "$work/tray-test.log"
@@ -241,6 +252,12 @@ grep -q "tray: registered" "$work/kde.log" && pass "tray icon registered" || fai
 grep -q "tray: menu 1 Capture region" "$work/kde.log" && pass "tray menu" || fail "no tray menu"
 grep -q "kglobalaccel: register" "$work/kde.log" && pass "shortcuts registered" || fail "shortcuts not registered"
 grep -q "shortcut screen pressed" "$work/tray.log" && pass "shortcut heard" || fail "shortcut not heard"
+if grep -q "forged to :" "$work/tray-test.log" && ! grep -q "shortcut region pressed" "$work/tray.log"; then
+    pass "forged shortcut signals ignored"
+    grep -q "shortcut monitor pressed" "$work/tray.log" && pass "a shortcut after the flood heard" || fail "the flood stalled the shortcuts"
+else
+    fail "forged shortcut signals: $(grep forged "$work/tray-test.log"), $(grep -c "shortcut region pressed" "$work/tray.log") heard"
+fi
 grep -q "command: rect:100x50+0+0" "$work/tray.log" && pass "command forwarded" || fail "command not forwarded"
 [ $((after - before)) -ge 3 ] && pass "tray captures saved ($((after - before)))" || fail "tray saved $((after - before)) captures"
 grep -q 'actions=\["default", "Open"' "$work/notify.log" && pass "notification with buttons" || fail "no notification buttons"

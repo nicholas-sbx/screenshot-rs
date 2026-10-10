@@ -76,8 +76,8 @@ pub fn which(name: &str) -> Option<PathBuf> {
     }
     let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
     for dir in path.as_bytes().split(|&b| b == b':') {
-        if dir.is_empty() {
-            continue; // (an empty entry would mean the current folder: never)
+        if !dir.starts_with(b"/") {
+            continue; // (an empty or relative entry means the current folder: never)
         }
         let p = Path::new(OsStr::from_bytes(dir)).join(name);
         if is_executable(&p) {
@@ -95,33 +95,65 @@ fn is_executable(p: &Path) -> bool {
     p.is_file() && rustix::fs::access(p, rustix::fs::Access::EXEC_OK).is_ok()
 }
 
-/// Start a program that carries on by itself: its own session, no
-/// terminal, nothing inherited but the environment. It's left to init
-/// (forked twice), so it never lingers as a zombie of ours.
+/// `name` from $PATH as a command, run by its full path (so the current
+/// folder is never searched) and inheriting nothing but stdin, stdout and
+/// stderr. None when it isn't installed.
+pub fn command(name: &str) -> Option<Command> {
+    let mut cmd = Command::new(which(name)?);
+    inherit_nothing(&mut cmd);
+    Some(cmd)
+}
+
+/// Hand the program `cmd` starts no descriptor but stdin, stdout and
+/// stderr. Flatshot's own are close-on-exec already; this catches those
+/// made without it by libraries (zbus receives D-Bus's that way, the
+/// screen-cast stream among them).
+pub fn inherit_nothing(cmd: &mut Command) -> &mut Command {
+    // SAFETY: close_range(2) is a plain system call, async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            cloexec_from(3);
+            Ok(())
+        })
+    }
+}
+
+/// Mark descriptors `first` and up close-on-exec (between fork and exec:
+/// async-signal-safe). Kernels before 5.11 can't; nothing is done there.
+pub fn cloexec_from(first: u32) {
+    // SAFETY: a system call taking only integers.
+    unsafe { libc::syscall(libc::SYS_close_range, first, libc::c_uint::MAX, libc::CLOSE_RANGE_CLOEXEC) };
+}
+
+/// Start a program that carries on by itself: found on $PATH, in its own
+/// session, no terminal, nothing inherited but the environment. A thread
+/// waits for it, so it never lingers as a zombie of ours (and it goes on
+/// should Flatshot end first).
 pub fn spawn_detached(argv: &[&OsStr], env: &[(&str, &OsStr)]) -> bool {
     let Some((program, args)) = argv.split_first() else {
         return false;
     };
-    let mut cmd = Command::new(program);
+    let Some(exe) = program.to_str().and_then(which) else {
+        return false;
+    };
+    let mut cmd = Command::new(exe);
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     for (k, v) in env {
         cmd.env(k, v);
     }
-    // SAFETY: only async-signal-safe calls (setsid, fork, _exit) between
-    // fork and exec.
+    // SAFETY: setsid(2) and close_range(2) are async-signal-safe.
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
-            match libc::fork() {
-                -1 => Err(std::io::Error::last_os_error()),
-                0 => Ok(()),         // the grandchild goes on to exec
-                _ => libc::_exit(0), // the middle one leaves at once
-            }
+            cloexec_from(3);
+            Ok(())
         });
     }
     match cmd.spawn() {
         Ok(mut child) => {
-            let _ = child.wait(); // (the middle process, gone already)
+            let _ = std::thread::Builder::new().name("flatshot-child".into()).spawn(move || {
+                let _ = child.wait();
+            });
             true
         }
         Err(_) => false,
@@ -132,17 +164,6 @@ pub fn spawn_detached(argv: &[&OsStr], env: &[(&str, &OsStr)]) -> bool {
 pub fn spawn(argv: &[&str]) -> bool {
     let argv: Vec<&OsStr> = argv.iter().map(OsStr::new).collect();
     spawn_detached(&argv, &[])
-}
-
-/// A string as one shell word, as Python's `shlex.quote`.
-pub fn shell_quote(s: &str) -> String {
-    if s.is_empty() {
-        return "''".into();
-    }
-    if s.bytes().all(|c| c.is_ascii_alphanumeric() || b"@%+=:,./-_".contains(&c)) {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', r#"'"'"'"#))
 }
 
 /// A `file://` URI for an absolute path, with the bytes that need it escaped.
@@ -203,6 +224,17 @@ pub fn displayable(text: &str) -> String {
         .collect()
 }
 
+/// A line on stdout: as it is for a program reading it, and with control
+/// characters made harmless for a terminal (a QR code's text could
+/// otherwise set its title, or write its clipboard).
+pub fn print_line(text: &str) {
+    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        println!("{}", displayable(text));
+    } else {
+        println!("{text}");
+    }
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -210,14 +242,6 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn quoting() {
-        assert_eq!(shell_quote(""), "''");
-        assert_eq!(shell_quote("/a/b.png"), "/a/b.png");
-        assert_eq!(shell_quote("a b"), "'a b'");
-        assert_eq!(shell_quote("it's"), r#"'it'"'"'s'"#);
-    }
 
     #[test]
     fn uris() {

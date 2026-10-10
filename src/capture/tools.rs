@@ -35,7 +35,7 @@ pub fn run(tool: &str, cursor: bool) -> Result<Image, String> {
         "gnome-screenshot" => args.extend(["-f", &p]),
         _ => args.push(&p),
     }
-    let result = run_waiting(Command::new(&exe).args(&args)).and_then(|()| codec::decode_file(&path));
+    let result = run_waiting(util::inherit_nothing(&mut Command::new(&exe)).args(&args)).and_then(|()| codec::decode_file(&path));
     let _ = std::fs::remove_file(&path);
     result.map_err(|e| format!("{tool}: {e}"))
 }

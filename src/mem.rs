@@ -83,11 +83,6 @@ impl Mapping {
     pub fn fd(&self) -> Option<BorrowedFd<'_>> {
         self.fd.as_ref().map(|f| f.as_fd())
     }
-
-    /// A raw view for a worker filling disjoint parts (see [`RawView`]).
-    pub fn raw(&mut self) -> RawView {
-        RawView { ptr: self.ptr, len: self.len }
-    }
 }
 
 impl Drop for Mapping {
@@ -102,37 +97,6 @@ fn check_len(len: usize) -> io::Result<usize> {
         return Err(io::Error::other(format!("buffer of {len} bytes refused")));
     }
     Ok(len)
-}
-
-/// A pointer and length into a [`Mapping`], for a worker thread that
-/// writes it while the owner waits. The owner must keep the mapping alive
-/// and untouched until the worker is done (joined, or its result received).
-#[derive(Clone, Copy)]
-pub struct RawView {
-    ptr: NonNull<u8>,
-    len: usize,
-}
-
-// SAFETY: the owner promises (see type docs) not to touch or drop the
-// mapping while the worker uses it.
-unsafe impl Send for RawView {}
-
-impl RawView {
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// # Safety
-    /// The mapping must be alive, and nothing else may access it while
-    /// the returned slice is in use.
-    pub unsafe fn as_mut_slice<'a>(self) -> &'a mut [u8] {
-        // SAFETY: guaranteed by the caller.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
-    }
 }
 
 /// Make freed heap memory go back to the system promptly. Pictures use
