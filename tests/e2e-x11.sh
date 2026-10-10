@@ -68,7 +68,7 @@ echo "Xvfb is up on $DISPLAY"
 $BIN -v --no-copy > "$work/region.log" 2>&1 &
 pid=$!
 up "$work/region.log" || true
-$EX/xinject move 500 400 drag 100 100 300 200
+$EX/xinject move 500 400 sleep 200 drag 100 100 300 200
 finish $pid
 if [ $code = 0 ]; then pass "region capture exited 0"; else fail "region capture exited $code"; cat "$work/region.log"; fi
 expect_size "region capture" "$(newest)" "200 100"
@@ -91,7 +91,7 @@ up "$work/noise.log" || true
 $BIN -v -o "$work/copied.png" > "$work/copy.log" 2>&1 &
 pid=$!
 up "$work/copy.log" || true
-$EX/xinject move 500 400 drag 150 120 650 470 sleep 500
+$EX/xinject move 500 400 sleep 200 drag 150 120 650 470 sleep 500
 kill -0 $pid 2>/dev/null && pass "the run stays to serve the clipboard" || fail "the run ended, taking the clipboard with it"
 $EX/xpaste TARGETS > "$work/targets.txt" 2>/dev/null || true
 grep -qx "image/png" "$work/targets.txt" && pass "the clipboard offers image/png" || fail "clipboard types: $(tr '\n' ' ' < "$work/targets.txt")"
@@ -108,7 +108,7 @@ wait $pid $noise 2>/dev/null || true
 $BIN -v > "$work/escape.log" 2>&1 &
 pid=$!
 up "$work/escape.log" || true
-$EX/xinject move 300 300 key Escape
+$EX/xinject move 300 300 sleep 200 key Escape
 finish $pid
 [ $code = 1 ] && pass "escape cancels" || fail "escape: exit $code"
 
@@ -117,7 +117,7 @@ finish $pid
 $BIN --pin -v > "$work/pin.log" 2>&1 &
 pid=$!
 up "$work/pin.log" || true
-$EX/xinject move 500 400 drag 100 100 300 200 sleep 500 drag 150 150 450 350 sleep 500
+$EX/xinject move 500 400 sleep 200 drag 100 100 300 200 sleep 500 drag 150 150 450 350 sleep 500
 screen "$work/pin.png"
 $EX/xinject click 500 350 sleep 200 key Escape sleep 300
 finish $pid 3
@@ -161,7 +161,7 @@ before=$(md5sum < "$work/edit.png")
 $BIN -i "$work/edit.png" -v > "$work/editor.log" 2>&1 &
 pid=$!
 up "$work/editor.log" || true
-$EX/xinject move 400 300 key b drag 300 250 450 380 sleep 200 key ctrl+s sleep 400 key ctrl+w sleep 300
+$EX/xinject move 400 300 sleep 200 key b drag 300 250 450 380 sleep 200 key ctrl+s sleep 400 key ctrl+w sleep 300
 finish $pid 3
 [ $code = 0 ] && pass "editor closed" || fail "the editor didn't close (exit $code)"
 [ "$(md5sum < "$work/edit.png")" != "$before" ] && pass "editor saved the drawing" || fail "editor didn't save"
@@ -189,7 +189,7 @@ video_check() { # what, file, "WxH"
 rm -f "$work/record.code"
 (code=0; $BIN --record --no-copy -v > "$work/record.log" 2>&1 || code=$?; echo $code > "$work/record.code") &
 up "$work/record.log" || true
-$EX/xinject move 400 300 drag 300 200 900 600 sleep 400 key Return sleep 2000
+$EX/xinject move 400 300 sleep 200 drag 300 200 900 600 sleep 400 key Return sleep 2000
 screen "$work/recording.png"
 $EX/xinject move 641 641 sleep 200 click 641 641
 for _ in $(seq 150); do [ -s "$work/record.code" ] && break; sleep 0.1; done

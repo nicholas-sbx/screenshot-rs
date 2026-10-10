@@ -78,7 +78,7 @@ sleep 0.3
 $BIN -v > "$work/region.log" 2>&1 &
 pid=$!
 up "$work/region.log" || true
-$EX/inject move 500 400 drag 100 100 300 200
+$EX/inject move 500 400 sleep 200 drag 100 100 300 200
 finish $pid
 if [ $code = 0 ]; then pass "region capture exited 0"; else fail "region capture exited $code"; cat "$work/region.log"; fi
 expect_size "region capture" "$(newest)" "200 100"
@@ -89,7 +89,7 @@ if [ "$(wl-paste --list-types 2>/dev/null | head -n1)" = "image/png" ]; then pas
 $BIN -v > "$work/escape.log" 2>&1 &
 pid=$!
 up "$work/escape.log" || true
-$EX/inject move 300 300 key Escape
+$EX/inject move 300 300 sleep 200 key Escape
 finish $pid
 [ $code = 1 ] && pass "escape cancels" || fail "escape: exit $code"
 
@@ -99,7 +99,7 @@ $BIN --pin -v > "$work/pin.log" 2>&1 &
 pid=$!
 up "$work/pin.log" || true
 (
-    $EX/inject move 500 400 drag 100 100 300 200 sleep 500 drag 150 150 450 350 sleep 1500 click 500 400 sleep 200 key Escape sleep 300
+    $EX/inject move 500 400 sleep 200 drag 100 100 300 200 sleep 500 drag 150 150 450 350 sleep 1500 click 500 400 sleep 200 key Escape sleep 300
 ) &
 injector=$!
 sleep 1.6
