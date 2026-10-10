@@ -48,6 +48,12 @@ pub struct Config {
     pub run_command: String,
     pub sound: bool,
     pub sound_file: String,
+    /// put every capture on a background (the style last used)
+    pub beautify: bool,
+    /// beautify::Style, in its config form ({}: the defaults)
+    pub beautify_style: Map<String, Value>,
+    /// name -> a style, for a house style
+    pub beautify_presets: Map<String, Value>,
     pub theme: String,
     /// color | theme | white | black | auto (white or black, like the desktop)
     pub tray_icon: String,
@@ -178,7 +184,16 @@ impl Config {
             _ => BTreeMap::new(),
         };
         let record_fps = i("record_fps", 30);
+        let object = |k: &str| match data.get(k) {
+            Some(Value::Object(m)) => m.clone(),
+            _ => Map::new(),
+        };
+        let mut beautify_presets = object("beautify_presets");
+        beautify_presets.retain(|_, v| v.is_object());
         Config {
+            beautify: b("beautify", false),
+            beautify_style: object("beautify_style"),
+            beautify_presets,
             save_to_disk: b("save_to_disk", true),
             save_dir: if save_dir.is_empty() { default_dir() } else { expand_user(&save_dir) },
             filename,
@@ -244,6 +259,9 @@ impl Config {
         put("run_command", self.run_command.clone().into());
         put("sound", self.sound.into());
         put("sound_file", self.sound_file.clone().into());
+        put("beautify", self.beautify.into());
+        put("beautify_style", Value::Object(self.beautify_style.clone()));
+        put("beautify_presets", Value::Object(self.beautify_presets.clone()));
         put("theme", self.theme.clone().into());
         put("tray_icon", self.tray_icon.clone().into());
         put("dim_opacity", self.dim_opacity.into());

@@ -467,6 +467,15 @@ impl Settings {
                 ],
             },
             Block::Card {
+                heading: "Beautify".into(),
+                rows: vec![Row::new(
+                    "beautify",
+                    "Add a background",
+                    "Uses the background, padding, corners and shadow last set in the annotation editor. Also toggled with Ctrl+B or the toolbar button.",
+                    Control::Toggle(c.beautify),
+                )],
+            },
+            Block::Card {
                 heading: "Then".into(),
                 rows: vec![
                     Row::new("clipboard", "Copy to clipboard", "", seg(&[("image", "Image"), ("path", "File path"), ("none", "Nothing")], &c.clipboard)),

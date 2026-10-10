@@ -11,6 +11,7 @@ pub const APP_ID: &str = "flatshot-rs";
 pub const APP_NAME: &str = "Flatshot RS";
 
 pub mod app;
+pub mod beautify;
 pub mod capture;
 pub mod cli;
 pub mod clipboard;

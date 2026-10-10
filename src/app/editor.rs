@@ -26,6 +26,8 @@ pub struct EditorWin {
     paste: Option<mpsc::Receiver<Option<String>>>,
     /// the window's least size, as last set
     min: (u32, u32),
+    /// a picture for the background being chosen
+    image_dialog: Option<mpsc::Receiver<Result<Option<PathBuf>, String>>>,
 }
 
 struct EditorPaint<'a>(&'a mut Editor);
@@ -94,7 +96,7 @@ impl App {
         }
         // (never so small its bars overlap)
         self.dpy.set_min_size(Owner::Editor(id), min);
-        self.editors.push(EditorWin { id, ed, title, dialog: None, paste: None, min });
+        self.editors.push(EditorWin { id, ed, title, dialog: None, paste: None, min, image_dialog: None });
         self.dpy.flush();
         true
     }
@@ -177,6 +179,19 @@ impl App {
                     });
                     self.editors[i].dialog = Some(rx);
                 }
+                Request::ChooseImage(start) => {
+                    if self.editors[i].image_dialog.is_some() {
+                        continue;
+                    }
+                    let (tx, rx) = mpsc::channel();
+                    let waker = self.waker.clone();
+                    let _ = std::thread::Builder::new().name("flatshot-dialog".into()).spawn(move || {
+                        let images = ["png", "jpg", "jpeg", "webp", "bmp", "gif"].iter().map(|e| format!("*.{e}")).collect();
+                        let _ = tx.send(portal::open_file("Background picture", &start, &[("Images".to_string(), images)]));
+                        waker();
+                    });
+                    self.editors[i].image_dialog = Some(rx);
+                }
                 Request::Close => {
                     self.dpy.remove(Owner::Editor(id));
                     self.editors.remove(i);
@@ -215,6 +230,16 @@ impl App {
                 w.paste = None;
                 if let Some(t) = text {
                     w.ed.paste(&t);
+                }
+            }
+            if let Some(rx) = &w.image_dialog
+                && let Ok(answer) = rx.try_recv()
+            {
+                w.image_dialog = None;
+                match answer {
+                    Ok(Some(path)) => w.ed.background_image(&path),
+                    Ok(None) => {}
+                    Err(e) => crate::warn!("no file dialog: {e}"),
                 }
             }
             if let Some(rx) = &w.dialog

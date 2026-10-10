@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::beautify::{self, Style};
 use crate::config::Config;
+use crate::geom::IPoint;
 use crate::geom::{Damage, IRect, Point, Rect};
 use crate::image::{Canvas, Image};
 use crate::keys::{KeyPress, Keymap, Where};
@@ -21,6 +23,7 @@ use crate::render::paint::{Align, Pen};
 use crate::render::text::{self, DEMIBOLD, MEDIUM};
 use crate::render::theme::{self, Color, SIZES, SWATCHES};
 use crate::render::{Painter, icons};
+use crate::ui::beautypanel::{self, Event as PanelEvent};
 use crate::ui::cropper::{Cropper, Done};
 use crate::ui::panels::{ColorPicker, LineEdit, PICKER_SIZE, PickerEvent};
 use crate::ui::picture::{self, Moved};
@@ -45,6 +48,8 @@ const KEEP: f32 = 48.0;
 const CUSTOM: usize = SWATCHES.len();
 const SAY_FOR: Duration = Duration::from_secs(4);
 const COPIED_FOR: Duration = Duration::from_secs(2);
+/// How long after the last change the style becomes the last used.
+const REMEMBER_AFTER: Duration = Duration::from_millis(400);
 
 const SHAPE_HINT: &str = "Shift: square  ·  Ctrl: from the middle  ·  Alt: move it";
 const CROP_HINT: &str =
@@ -67,6 +72,8 @@ pub enum Request {
     Paste,
     /// ask where to save, then `save_to` there
     SaveAs,
+    /// ask for a picture for the background, then `background_image` it
+    ChooseImage(PathBuf),
     /// the window can close now
     Close,
 }
@@ -161,7 +168,9 @@ impl DrawingsMut for Shapes<'_> {
 }
 
 /// The picture and its drawings as last drawn, at the view's zoom.
-type Layer = ((u32, u32, i64, i64, i64, u64), Image);
+type Layer = ((u32, u32, i64, i64, i64, u64, u64), Image);
+/// Beautify's background and shadow, and where the picture goes on it.
+type Backdrop = ((usize, u64), Arc<Image>, IPoint);
 
 pub struct Editor {
     pub image: Arc<Image>,
@@ -197,6 +206,18 @@ pub struct Editor {
     zoom_label: Rect,
     /// the zoom's menu, open (its rows' rectangles)
     zoom_menu: Option<Vec<(Rect, Option<u32>)>>,
+    /// Beautify (the Background panel): shown round the picture, and in
+    /// what's saved and copied
+    beauty_on: bool,
+    beauty: Style,
+    /// what was saved (None: off)
+    saved_beauty: Option<Style>,
+    panel: beautypanel::Panel,
+    /// the style becomes the last used once changes stop, then
+    remember_at: Option<Instant>,
+    /// (changes with the style)
+    beauty_version: u64,
+    backdrop: RefCell<Option<Backdrop>>,
     next_id: u64,
     active: Option<Shape>,
     text_edit: Option<Shape>,
@@ -281,6 +302,7 @@ impl Editor {
         let tool = Tool::from_id(&cfg.default_tool).filter(|t| t.uses_color()).unwrap_or(Tool::Pen);
         let keymap = Keymap::new(&cfg.keys);
         let custom_color = Color::parse(&cfg.custom_color).unwrap_or(SWATCHES[0]);
+        let cfg_style = cfg.beautify_style.clone();
         let mut ed = Editor {
             image: Arc::new(image),
             dpr: dpr.max(0.25),
@@ -311,6 +333,13 @@ impl Editor {
             zoom_slider: Rect::default(),
             zoom_label: Rect::default(),
             zoom_menu: None,
+            beauty_on: false,
+            beauty: Style::from_map(&cfg_style),
+            saved_beauty: None,
+            panel: beautypanel::Panel::default(),
+            remember_at: None,
+            beauty_version: 0,
+            backdrop: RefCell::new(None),
             next_id: 1,
             active: None,
             text_edit: None,
@@ -397,13 +426,17 @@ impl Editor {
 
     /// When it next needs a look (a message to clear).
     pub fn next_deadline(&self) -> Option<Instant> {
-        [self.status.as_ref().map(|s| s.1 + SAY_FOR), self.copied_until].into_iter().flatten().min()
+        [self.status.as_ref().map(|s| s.1 + SAY_FOR), self.copied_until, self.remember_at].into_iter().flatten().min()
     }
 
     pub fn on_timer(&mut self, now: Instant) {
         if self.status.as_ref().is_some_and(|s| s.1 + SAY_FOR <= now) {
             self.status = None;
             self.damaged = true;
+        }
+        if self.remember_at.is_some_and(|t| t <= now) {
+            self.remember_at = None;
+            self.remember_beauty();
         }
         if self.copied_until.is_some_and(|t| t <= now) {
             self.copied_until = None;
@@ -417,7 +450,8 @@ impl Editor {
 
     fn canvas_rect(&self) -> Rect {
         let top = self.top_h();
-        Rect::new(0.0, top, self.view.0, (self.view.1 - top - STATUS_H).max(1.0))
+        let panel = if self.beauty_on { beautypanel::WIDTH } else { 0.0 };
+        Rect::new(0.0, top, (self.view.0 - panel).max(1.0), (self.view.1 - top - STATUS_H).max(1.0))
     }
 
     /// The bars above the canvas: the toolbar, and the picture bar while cropping.
@@ -428,7 +462,8 @@ impl Editor {
     /// The smallest the window can be with nothing overlapping: the bars'
     /// widths (the picture bar's too while cropping) and the canvas's least.
     pub fn min_size(&self) -> (u32, u32) {
-        let mut w = self.bar_width().max(self.zoom_bar_width() + 160.0).max(MIN_CANVAS.0);
+        let panel = if self.beauty_on { beautypanel::WIDTH } else { 0.0 };
+        let mut w = self.bar_width().max(self.zoom_bar_width() + 160.0).max(MIN_CANVAS.0 + panel);
         if self.tool == Tool::Crop {
             w = w.max(self.picture_bar_width());
         }
@@ -464,6 +499,9 @@ impl Editor {
         redo.enabled = self.can_redo();
         items.push(undo);
         items.push(redo);
+        let mut beauty = Item::new("beautify", Look::Icon { icon: "beautify", size: 36.0 }, km.hint("Background, padding and shadow", "beautify"));
+        beauty.active = self.beauty_on;
+        items.push(beauty);
         self.bar = items;
         let copied = self.copied_until.is_some();
         let (dirty, path) = (self.dirty, self.path.display().to_string());
@@ -505,6 +543,14 @@ impl Editor {
         }
         self.layout_picture_bar();
         self.layout_zoom_bar();
+        self.place_panel();
+    }
+
+    fn place_panel(&mut self) {
+        if self.beauty_on {
+            let (rect, name) = (self.panel_rect(), self.image_name());
+            self.panel.place(rect, &self.beauty, &name);
+        }
     }
 
     /// The picture bar, while cropping: the crop's shape and margin, cutting
@@ -692,6 +738,7 @@ impl Editor {
             "zoom-in" => self.zoom_to(self.zoom * 1.25, None),
             "zoom-out" => self.zoom_to(self.zoom / 1.25, None),
             "zoom.label" => self.open_zoom_menu(),
+            "beautify" => self.toggle_beauty(),
             "crop.ratio" => {
                 self.cropper.next_ratio();
                 self.refresh_bar();
@@ -1001,7 +1048,9 @@ impl Editor {
     /// The drawings changed: unsaved while they differ from what was saved
     /// (undoing back to that is saved again).
     fn changed(&mut self) {
-        self.dirty = self.shapes.iter().map(|(id, _)| *id).ne(self.saved.iter().copied()) || !Arc::ptr_eq(&self.image, &self.saved_image);
+        self.dirty = self.shapes.iter().map(|(id, _)| *id).ne(self.saved.iter().copied())
+            || !Arc::ptr_eq(&self.image, &self.saved_image)
+            || self.beauty_state() != self.saved_beauty;
         self.shapes_version += 1;
         self.refresh_bar();
     }
@@ -1093,10 +1142,10 @@ impl Editor {
 
     /// The whole picture in view, no bigger than it really is.
     pub fn fit(&mut self) {
-        let (pw, ph) = picture_size(&self.image, self.dpr);
+        let b = self.view_box();
         let c = self.canvas_rect();
-        self.zoom = 1.0f32.min((c.w - 32.0) / pw.max(1.0)).min((c.h - 32.0) / ph.max(1.0)).max(ZOOM.0);
-        self.offset = Point::new(((c.w - pw * self.zoom) / 2.0).round(), ((c.h - ph * self.zoom) / 2.0).round());
+        self.zoom = 1.0f32.min((c.w - 32.0) / b.w.max(1.0)).min((c.h - 32.0) / b.h.max(1.0)).max(ZOOM.0);
+        self.offset = Point::new(((c.w - b.w * self.zoom) / 2.0 - b.x * self.zoom).round(), ((c.h - b.h * self.zoom) / 2.0 - b.y * self.zoom).round());
         self.fitted = true;
         self.damaged = true;
         self.refresh_zoom_bar();
@@ -1150,6 +1199,9 @@ impl Editor {
         if self.width_field.rect.contains(at) || self.height_field.rect.contains(at) {
             return CursorShape::Text;
         }
+        if self.beauty_on && (self.panel.is_open() || self.panel.rect.contains(at)) {
+            return if self.panel.name.rect.contains(at) { CursorShape::Text } else { CursorShape::Arrow };
+        }
         if self.asking.is_some() || at.y < self.top_h() || at.y > self.view.1 - STATUS_H || self.picker.as_ref().is_some_and(|p| p.rect().contains(at)) {
             return CursorShape::Arrow;
         }
@@ -1183,6 +1235,18 @@ impl Editor {
         let hovered = self.bar_item_at(at);
         if hovered != self.hovered || self.zoom_menu.is_some() {
             self.hovered = hovered;
+            self.damaged = true;
+        }
+        if self.beauty_on && (self.panel.dragging() || self.panel.is_open() || self.panel.rect.contains(at)) {
+            let (name, presets) = (self.image_name(), self.preset_names());
+            let was = self.panel.hovered;
+            let ev = self.panel.motion(at, &mut self.beauty, &name, &presets);
+            if ev != PanelEvent::None || was != self.panel.hovered {
+                self.panel_event(ev);
+            }
+            return;
+        }
+        if self.panel.hovered.take().is_some() {
             self.damaged = true;
         }
         match self.pressed {
@@ -1271,6 +1335,16 @@ impl Editor {
                 None => {}
             }
             return;
+        }
+        if self.beauty_on && button == Button::Left && (self.panel.is_open() || self.panel.rect.contains(at)) {
+            let (name, presets) = (self.image_name(), self.preset_names());
+            let ev = self.panel.press(at, &mut self.beauty, &name, &presets);
+            self.panel_event(ev);
+            return;
+        }
+        if self.panel.name.focused {
+            self.panel.name.focused = false;
+            self.damaged = true;
         }
         let in_field = |f: &LineEdit| f.rect.contains(at);
         if button == Button::Left && self.tool == Tool::Crop && (in_field(&self.width_field) || in_field(&self.height_field)) {
@@ -1381,6 +1455,10 @@ impl Editor {
     }
 
     fn release(&mut self, button: Button, at: Point) {
+        if self.panel.dragging() {
+            self.panel.release();
+            return;
+        }
         if self.pressed == Some("picker") {
             self.pressed = None;
             if let Some(p) = &mut self.picker {
@@ -1431,6 +1509,12 @@ impl Editor {
     /// the pointer, Shift scrolls sideways.
     pub fn scroll(&mut self, steps: f32) {
         if self.asking.is_some() {
+            return;
+        }
+        if self.beauty_on && self.pointer.is_some_and(|p| self.panel.rect.contains(p)) {
+            let name = self.image_name();
+            self.panel.scroll_by(steps * 48.0, &self.beauty, &name);
+            self.damaged = true;
             return;
         }
         if self.mods & keyseq::CTRL != 0 {
@@ -1517,6 +1601,14 @@ impl Editor {
         }
         if self.width_field.focused || self.height_field.focused {
             return self.size_key(k);
+        }
+        if self.panel.wants_keys() {
+            let ev = self.panel.key(k);
+            return self.panel_event(ev);
+        }
+        if k.key == key::ESCAPE && self.panel.close() {
+            self.damaged = true;
+            return;
         }
         if self.has_selection() && self.with_selection(|sel, d| sel.key(d, k)) {
             return self.refresh_bar(); // (Delete, or an arrow key nudging it)
@@ -1632,6 +1724,7 @@ impl Editor {
             "zoom_in" => self.zoom_to(self.zoom * 1.25, None),
             "zoom_out" => self.zoom_to(self.zoom / 1.25, None),
             "close" => self.close(),
+            "beautify" => self.toggle_beauty(),
             "size.down" => self.set_size(self.size.saturating_sub(1)),
             "size.up" => self.set_size(self.size + 1),
             _ => {
@@ -1646,6 +1739,11 @@ impl Editor {
 
     /// Text from an input method (compose, dead keys, CJK, emoji).
     pub fn commit_string(&mut self, s: &str) {
+        if self.panel.wants_keys() {
+            self.panel.insert(s);
+            self.damaged = true;
+            return;
+        }
         if self.width_field.focused || self.height_field.focused {
             let width = self.width_field.focused;
             let field = if width { &mut self.width_field } else { &mut self.height_field };
@@ -1666,6 +1764,9 @@ impl Editor {
 
     /// The clipboard's text, asked for with Request::Paste.
     pub fn paste(&mut self, s: &str) {
+        if self.panel.wants_keys() {
+            return self.commit_string(s.lines().next().unwrap_or(""));
+        }
         if self.width_field.focused || self.height_field.focused {
             return self.commit_string(s.lines().next().unwrap_or(""));
         }
@@ -1688,7 +1789,11 @@ impl Editor {
     }
 
     pub fn wants_text(&self) -> bool {
-        self.text_edit.is_some() || self.picker.as_ref().is_some_and(|p| p.hex.focused) || self.width_field.focused || self.height_field.focused
+        self.text_edit.is_some()
+            || self.picker.as_ref().is_some_and(|p| p.hex.focused)
+            || self.width_field.focused
+            || self.height_field.focused
+            || self.panel.wants_keys()
     }
 
     // -- output ----------------------------------------------------------------------------
@@ -1705,6 +1810,9 @@ impl Editor {
         }
         if !self.has_alpha() {
             out.force_opaque();
+        }
+        if self.beauty_on {
+            out = beautify::render(&out, &self.beauty, self.dpr)?;
         }
         Ok(out)
     }
@@ -1771,6 +1879,7 @@ impl Editor {
                 self.path = path;
                 self.saved = self.shapes.iter().map(|(id, _)| *id).collect();
                 self.saved_image = self.image.clone();
+                self.saved_beauty = self.beauty_state();
                 self.dirty = false;
                 self.refresh_bar();
                 true
@@ -1836,6 +1945,9 @@ impl Editor {
         }
         if self.tool == Tool::Crop {
             self.paint_picture_bar(&mut p, &ptr);
+        }
+        if self.beauty_on {
+            self.panel.paint(&mut p, &self.beauty, &self.image_name(), &self.preset_names());
         }
         // The status line: a hint (or what just happened), the size, and the zoom's controls.
         let top = self.view.1 - STATUS_H;
@@ -1910,6 +2022,7 @@ impl Editor {
             (self.offset.y * 64.0) as i64,
             (self.zoom * 4096.0) as i64,
             self.shapes_version,
+            if self.beauty_on { self.beauty_version + 1 } else { 0 },
         );
         {
             let mut layer = self.layer.borrow_mut();
@@ -1968,9 +2081,26 @@ impl Editor {
         let (pw, ph) = picture_size(&self.image, self.dpr);
         let mut p = Painter::new(img.pixmap_mut(), self.scale);
         let frame = Rect::new(self.offset.x, self.offset.y, pw * self.zoom, ph * self.zoom);
-        p.stroke_rect(frame.adjusted(-0.5, -0.5, 0.5, 0.5), Pen::new(c.line, 1.0));
-        // Close up, whole pixels (as a paint program shows them); further out, smooth.
-        p.draw_image(&self.image, frame, self.image.rect().to_f(), self.zoom * self.scale < self.dpr);
+        let smooth = self.zoom * self.scale < self.dpr;
+        if self.beauty_on {
+            // The background and shadow round it, and its corners rounded, as it will be saved.
+            if let Some((bg, at)) = self.backdrop() {
+                let k = self.zoom / self.dpr;
+                let r = Rect::new(frame.x - at.x as f32 * k, frame.y - at.y as f32 * k, bg.width() as f32 * k, bg.height() as f32 * k);
+                p.draw_image(&bg, r, bg.rect().to_f(), true);
+            }
+            p.save();
+            let radius = beautify::corners(&self.beauty, &self.image, self.dpr) / self.dpr * self.zoom;
+            if radius > 0.0 {
+                p.clip_rounded(frame, radius);
+            }
+            p.draw_image(&self.image, frame, self.image.rect().to_f(), smooth);
+            p.restore();
+        } else {
+            p.stroke_rect(frame.adjusted(-0.5, -0.5, 0.5, 0.5), Pen::new(c.line, 1.0));
+            // Close up, whole pixels (as a paint program shows them); further out, smooth.
+            p.draw_image(&self.image, frame, self.image.rect().to_f(), smooth);
+        }
         if self.shapes.iter().any(|(_, s)| !s.hidden) {
             p.translate(self.offset.x, self.offset.y);
             p.scale_by(self.zoom, self.zoom);
@@ -1980,6 +2110,125 @@ impl Editor {
                 s.paint(&mut p, &self.image, self.dpr);
             }
         }
+    }
+
+    /// Beautify's background and shadow for the picture (kept until the
+    /// picture or the style changes), and where the picture is on it (px).
+    fn backdrop(&self) -> Option<(Arc<Image>, IPoint)> {
+        let key = (Arc::as_ptr(&self.image) as usize, self.beauty_version);
+        let mut cache = self.backdrop.borrow_mut();
+        if cache.as_ref().is_none_or(|(k, ..)| *k != key) {
+            let (img, at) = beautify::backdrop(&self.image, &self.beauty, self.dpr).ok()?;
+            *cache = Some((key, Arc::new(img), at));
+        }
+        cache.as_ref().map(|(_, img, at)| (img.clone(), *at))
+    }
+
+    /// What's shown, in the picture's coordinates: the picture, and its
+    /// background round it while beautifying.
+    fn view_box(&self) -> Rect {
+        let (pw, ph) = picture_size(&self.image, self.dpr);
+        if !self.beauty_on {
+            return Rect::new(0.0, 0.0, pw, ph);
+        }
+        match self.backdrop() {
+            Some((bg, at)) => Rect::new(-at.x as f32 / self.dpr, -at.y as f32 / self.dpr, bg.width() as f32 / self.dpr, bg.height() as f32 / self.dpr),
+            None => Rect::new(0.0, 0.0, pw, ph),
+        }
+    }
+
+    fn beauty_state(&self) -> Option<Style> {
+        self.beauty_on.then(|| self.beauty.clone())
+    }
+
+    /// Show or hide the Background panel; the background goes with it.
+    pub fn toggle_beauty(&mut self) {
+        self.beauty_on = !self.beauty_on;
+        self.panel.close();
+        self.refresh_bar();
+        self.layout_bar();
+        self.fit();
+        self.changed();
+    }
+
+    /// The style changed (the panel's controls).
+    fn beauty_changed(&mut self) {
+        self.beauty.clean();
+        self.place_panel();
+        self.beauty_version += 1;
+        self.remember_at = Some(Instant::now() + REMEMBER_AFTER);
+        if self.fitted {
+            self.fit();
+        }
+        self.changed();
+    }
+
+    /// The style becomes the last used: what Beautify after capture uses.
+    fn remember_beauty(&mut self) {
+        let style = self.beauty.to_map();
+        self.cfg.beautify_style = style.clone();
+        crate::config::update(move |c| c.beautify_style = style);
+    }
+
+    fn save_preset(&mut self, name: String) {
+        let style = self.beauty.to_map();
+        self.cfg.beautify_presets.insert(name.clone(), serde_json::Value::Object(style.clone()));
+        let (n, st) = (name.clone(), style);
+        crate::config::update(move |c| {
+            c.beautify_presets.insert(n, serde_json::Value::Object(st));
+        });
+        self.say(format!("Saved the preset {name}"));
+    }
+
+    fn use_preset(&mut self, name: &str) {
+        if let Some(serde_json::Value::Object(m)) = self.cfg.beautify_presets.get(name) {
+            self.beauty = Style::from_map(m);
+            self.beauty_changed();
+        }
+    }
+
+    /// A picture chosen for the background.
+    pub fn background_image(&mut self, path: &Path) {
+        self.beauty.image = path.to_string_lossy().into_owned();
+        self.beauty.background = "image".into();
+        self.beauty_changed();
+    }
+
+    fn preset_names(&self) -> Vec<String> {
+        self.cfg.beautify_presets.keys().cloned().collect()
+    }
+
+    fn image_name(&self) -> String {
+        if self.beauty.image.is_empty() {
+            "No image selected".into()
+        } else {
+            Path::new(&self.beauty.image).file_name().map(|n| crate::util::displayable(&n.to_string_lossy())).unwrap_or_default()
+        }
+    }
+
+    fn panel_rect(&self) -> Rect {
+        let top = self.top_h();
+        Rect::new(self.view.0 - beautypanel::WIDTH, top, beautypanel::WIDTH, (self.view.1 - top - STATUS_H).max(1.0))
+    }
+
+    fn panel_event(&mut self, ev: PanelEvent) {
+        match ev {
+            PanelEvent::None => {}
+            PanelEvent::Changed => self.beauty_changed(),
+            PanelEvent::UseColour => {
+                self.beauty.color = self.color().hex();
+                self.beauty_changed();
+            }
+            PanelEvent::ChooseImage => {
+                let start =
+                    Path::new(&self.beauty.image).parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(crate::config::home);
+                self.requests.push(Request::ChooseImage(start));
+            }
+            PanelEvent::UsePreset(name) => self.use_preset(&name),
+            PanelEvent::SavePreset(name) => self.save_preset(name),
+            PanelEvent::Paste => self.requests.push(Request::Paste),
+        }
+        self.damaged = true;
     }
 
     /// The status line's text when nothing else is said.
@@ -2374,6 +2623,36 @@ mod tests {
         ed.set_view(w as f32, h as f32);
         assert!(ed.zoom_bar[0].rect.x >= 160.0, "room for the size and some hint");
         assert!(ed.actions[0].rect.x >= ed.bar.last().unwrap().rect.right(), "the toolbar's buttons apart");
+    }
+
+    #[test]
+    fn beautify() {
+        let mut ed = editor();
+        let narrow = ed.min_size().0;
+        ed.bar_click("beautify");
+        assert!(ed.beauty_on && ed.dirty);
+        assert!(ed.min_size().0 >= narrow, "room for the panel too");
+        assert!(ed.canvas_rect().w <= ed.view.0 - beautypanel::WIDTH);
+        let style = ed.beauty.clone();
+        let (size, _) = beautify::layout((400, 300), &style, 1.0);
+        let img = ed.render().unwrap();
+        assert_eq!(img.size(), size);
+        // A change from the panel: the style, remembered once changes stop.
+        ed.beauty.padding = 8;
+        ed.panel_event(PanelEvent::Changed);
+        assert!(ed.next_deadline().is_some());
+        ed.on_timer(Instant::now() + Duration::from_secs(1));
+        assert_eq!(Style::from_map(&crate::config::load().beautify_style).padding, 8);
+        assert_eq!(ed.render().unwrap().size(), (416, 316));
+        // A preset saved and used again.
+        ed.panel_event(PanelEvent::SavePreset("tight".into()));
+        ed.beauty.padding = 100;
+        ed.panel_event(PanelEvent::UsePreset("tight".into()));
+        assert_eq!(ed.beauty.padding, 8);
+        // Off again: as saved.
+        ed.toggle_beauty();
+        assert!(!ed.dirty);
+        assert_eq!(ed.render().unwrap().size(), (400, 300));
     }
 
     #[test]

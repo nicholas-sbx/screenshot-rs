@@ -217,6 +217,17 @@ $BIN -m > /dev/null && expect_size "current monitor" "$(newest)" "1600 1000" || 
 $BIN -r 64x48+0+0 -o "$work/out.png" > /dev/null && expect_size "--output" "$work/out.png" "64 48" || fail "--output failed"
 $BIN -r 64x48+0+0 -o - --no-copy > "$work/stdout.png" && expect_size "PNG to stdout" "$work/stdout.png" "64 48" || fail "-o - failed"
 
+# Beautify after capture: on the last style's background (64 px padding).
+python3 - "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["beautify"] = True; json.dump(c, open(sys.argv[1], "w"))
+PY
+$BIN -r 64x48+0+0 -o "$work/beautified.png" > /dev/null && expect_size "Beautify after capture" "$work/beautified.png" "192 176" || fail "beautified capture failed"
+python3 - "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["beautify"] = False; json.dump(c, open(sys.argv[1], "w"))
+PY
+
 # The active window on KDE: KWin's picture of the window itself, kept with
 # its transparent shadow (a stand-in KWin).
 cat > "$work/window.sh" <<SH

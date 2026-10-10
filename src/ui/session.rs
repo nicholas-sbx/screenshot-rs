@@ -1162,6 +1162,18 @@ impl Session {
         self.refresh();
     }
 
+    /// Beautify this capture and the next ones (Settings → After capture →
+    /// Beautify), or not.
+    fn toggle_beautify(&mut self) {
+        if self.st.tool == Tool::Record {
+            return;
+        }
+        let on = !self.st.cfg.beautify;
+        self.st.cfg.beautify = on;
+        config::update(move |c| c.beautify = on);
+        self.refresh();
+    }
+
     fn toggle_pin(&mut self) {
         self.st.pin_mode = !self.st.pin_mode;
         self.refresh();
@@ -1511,6 +1523,7 @@ impl Session {
             "redo" => self.redo(),
             "codes" => self.toggle_codes(),
             "pin" => self.toggle_pin(),
+            "beautify" => self.toggle_beautify(),
             "snap" => self.toggle_snap(),
             "pointer" => self.toggle_pointer(),
             "copy_color" => self.copy_color(target),
@@ -2218,6 +2231,7 @@ impl Session {
             "pointer" => self.toggle_pointer(),
             "undo" => self.undo(),
             "redo" => self.redo(),
+            "beautify" => self.toggle_beautify(),
             "pin" => self.toggle_pin(),
             "screen" => self.whole_screen(o),
             "close" => self.cancel(),
@@ -2457,6 +2471,7 @@ fn toolbar_view(st: &State, codes: CodeScan, can_undo: bool, can_redo: bool) -> 
         can_undo,
         can_redo,
         pin_mode: st.pin_mode,
+        beautify: st.cfg.beautify,
         keymap: &st.keymap,
     }
 }
