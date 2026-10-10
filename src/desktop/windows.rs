@@ -43,12 +43,20 @@ const SCRIPT: &str = r#"
         if (w.desktop !== undefined) return w.desktop === cur || w.desktop === -1;
         return true;
     }
+    var all = %ALL%;  // panels, notifications, popups and the like too
+    function wanted(w) {
+        if (w.normalWindow || w.dialog) return true;
+        if (!all || w.desktopWindow || w.pid === %PID%) return false;  // (not the wallpaper, nor Flatshot's own)
+        return !!(w.dock || w.notification || w.criticalNotification || w.onScreenDisplay || w.utility || w.splash
+                  || w.toolbar || w.menu || w.popupMenu || w.dropdownMenu || w.tooltip || w.comboBox || w.popupWindow
+                  || w.appletPopup);
+    }
     var act = workspace.activeWindow || workspace.activeClient;
     var active = -1;
     for (var i = 0; i < list.length; i++) {
         var w = list[i];
         try {
-            if (!(w.normalWindow || w.dialog) || w.minimized || w.deleted || w.hidden) continue;
+            if (!wanted(w) || w.minimized || w.deleted || w.hidden) continue;
             if (!onCurrent(w)) continue;
             var g = w.frameGeometry;
             if (!g || g.width < 8 || g.height < 8) continue;
@@ -65,9 +73,11 @@ const SCRIPT: &str = r#"
 "#;
 
 /// Ask whichever compositor this is; None if none can answer in `timeout`.
-pub fn query(timeout: Duration) -> Option<Desktop> {
+/// `all`: panels, notifications, popups and the like too, not just app
+/// windows and dialogs.
+pub fn query(timeout: Duration, all: bool) -> Option<Desktop> {
     if crate::x11::chosen() {
-        return crate::x11::windows::query();
+        return crate::x11::windows::query(all);
     }
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
         return hyprland();
@@ -75,7 +85,7 @@ pub fn query(timeout: Duration) -> Option<Desktop> {
     if let Some(sock) = std::env::var_os("SWAYSOCK") {
         return sway(std::path::Path::new(&sock));
     }
-    kwin(timeout)
+    kwin(timeout, all)
 }
 
 /// Is there a compositor to ask (without asking)?
@@ -104,7 +114,7 @@ impl Report {
     }
 }
 
-fn kwin(timeout: Duration) -> Option<Desktop> {
+fn kwin(timeout: Duration, all: bool) -> Option<Desktop> {
     let conn = crate::dbus::session().ok()?;
     let owner = conn
         .call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "GetNameOwner", &(KWIN,))
@@ -122,7 +132,11 @@ fn kwin(timeout: Duration) -> Option<Desktop> {
     // before KWin reads it.
     let dir = crate::ipc::runtime_dir().ok()?;
     let file = dir.join(format!("windows-{token}.js"));
-    let script = SCRIPT.replace("%SERVICE%", &me).replace("%PATH%", &path);
+    let script = SCRIPT
+        .replace("%ALL%", if all { "true" } else { "false" })
+        .replace("%PID%", &std::process::id().to_string())
+        .replace("%SERVICE%", &me)
+        .replace("%PATH%", &path);
     let name = format!("flatshot-windows-{token}");
     let result = (|| {
         write_private(&file, &script).ok()?;

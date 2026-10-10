@@ -70,6 +70,8 @@ pub struct Config {
     pub snap_sensitivity: i64,
     pub span_monitors: bool,
     pub detect_windows: bool,
+    /// ... panels, notifications, popups and the like too, not just app windows
+    pub detect_all_windows: bool,
     /// The active window (instant capture) on KDE is KWin's picture of it:
     /// with its title bar and borders, and its shadow (transparent round it).
     pub window_frame: bool,
@@ -218,6 +220,7 @@ impl Config {
             snap_sensitivity: i("snap_sensitivity", 5).clamp(1, 10),
             span_monitors: b("span_monitors", true),
             detect_windows: b("detect_windows", true),
+            detect_all_windows: b("detect_all_windows", true),
             window_frame: b("window_frame", true),
             window_shadow: b("window_shadow", true),
             show_codes: b("show_codes", true),
@@ -275,6 +278,7 @@ impl Config {
         put("snap_sensitivity", self.snap_sensitivity.into());
         put("span_monitors", self.span_monitors.into());
         put("detect_windows", self.detect_windows.into());
+        put("detect_all_windows", self.detect_all_windows.into());
         put("window_frame", self.window_frame.into());
         put("window_shadow", self.window_shadow.into());
         put("show_codes", self.show_codes.into());

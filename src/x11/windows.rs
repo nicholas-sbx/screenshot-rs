@@ -26,13 +26,16 @@ x11rb::atom_manager! {
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_NORMAL,
         _NET_WM_WINDOW_TYPE_DIALOG,
+        _NET_WM_WINDOW_TYPE_DESKTOP,
+        _NET_WM_PID,
         _NET_FRAME_EXTENTS,
         _NET_WM_NAME,
         UTF8_STRING,
     }
 }
 
-pub fn query() -> Option<Desktop> {
+/// `all`: panels, notifications, popups and the like too.
+pub fn query(all: bool) -> Option<Desktop> {
     let (conn, screen) = x11rb::connect(None).ok()?;
     let root = conn.setup().roots[screen].root;
     let atoms = Atoms::new(&conn).ok()?.reply().ok()?;
@@ -47,7 +50,7 @@ pub fn query() -> Option<Desktop> {
     let mut windows = Vec::new();
     let mut active_window = None;
     for &w in clients.iter().rev().take(MAX_WINDOWS).collect::<Vec<_>>().iter().rev() {
-        let Some(found) = describe(&conn, &atoms, root, *w, current, scale) else { continue };
+        let Some(found) = describe(&conn, &atoms, root, *w, current, scale, all) else { continue };
         if Some(*w) == active {
             active_window = Some(found.clone());
         }
@@ -63,7 +66,7 @@ fn cardinals(conn: &RustConnection, w: xproto::Window, property: xproto::Atom, k
 }
 
 /// Window `w`, if it's a normal window shown on the current desktop.
-fn describe(conn: &RustConnection, atoms: &Atoms, root: xproto::Window, w: xproto::Window, current: Option<u32>, scale: f32) -> Option<Window> {
+fn describe(conn: &RustConnection, atoms: &Atoms, root: xproto::Window, w: xproto::Window, current: Option<u32>, scale: f32, all: bool) -> Option<Window> {
     let attrs = conn.get_window_attributes(w).ok()?;
     let geometry = conn.get_geometry(w).ok()?;
     let origin = conn.translate_coordinates(w, root, 0, 0).ok()?;
@@ -74,6 +77,7 @@ fn describe(conn: &RustConnection, atoms: &Atoms, root: xproto::Window, w: xprot
     let name = conn.get_property(false, w, atoms._NET_WM_NAME, atoms.UTF8_STRING, 0, (MAX_TITLE as u32) * 4).ok()?;
     let old_name = conn.get_property(false, w, AtomEnum::WM_NAME, AtomEnum::ANY, 0, (MAX_TITLE as u32) * 4).ok()?;
     let class = conn.get_property(false, w, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 64).ok()?;
+    let pid = conn.get_property(false, w, atoms._NET_WM_PID, AtomEnum::CARDINAL, 0, 1).ok()?;
     if attrs.reply().ok()?.map_state != MapState::VIEWABLE {
         return None;
     }
@@ -88,8 +92,14 @@ fn describe(conn: &RustConnection, atoms: &Atoms, root: xproto::Window, w: xprot
         return None;
     }
     let types: Vec<u32> = kind.reply().ok().and_then(|r| r.value32().map(|v| v.collect())).unwrap_or_default();
-    if !types.is_empty() && !types.iter().any(|t| *t == atoms._NET_WM_WINDOW_TYPE_NORMAL || *t == atoms._NET_WM_WINDOW_TYPE_DIALOG) {
-        return None;
+    let app_window = types.is_empty() || types.iter().any(|t| *t == atoms._NET_WM_WINDOW_TYPE_NORMAL || *t == atoms._NET_WM_WINDOW_TYPE_DIALOG);
+    if !app_window {
+        // Panels, docks, notifications and the like, when asked for: not the
+        // wallpaper, nor Flatshot's own.
+        let own = pid.reply().ok().and_then(|r| r.value32().and_then(|mut v| v.next())) == Some(std::process::id());
+        if !all || own || types.contains(&atoms._NET_WM_WINDOW_TYPE_DESKTOP) {
+            return None;
+        }
     }
     let g = geometry.reply().ok()?;
     let o = origin.reply().ok()?;

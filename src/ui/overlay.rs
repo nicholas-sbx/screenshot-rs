@@ -458,8 +458,9 @@ impl Overlay {
                 && let Some((r, w)) = hover
             {
                 let label = self.window_label(st, r, w);
-                let bounds = self.dev(r, 2).united(&self.dev(pill_rect(&label, Point::new(r.x + 8.0, r.y + 8.0), PillStyle::small()), 2));
-                elements.push(Element { id: Id::Window, bounds, key: hash(&(rect_key(r), &label)) });
+                let (bx, opacity) = self.window_label_box(r, &label);
+                let bounds = self.dev(r, 2).united(&self.dev(bx, 2));
+                elements.push(Element { id: Id::Window, bounds, key: hash(&(rect_key(r), &label, rect_key(bx), (opacity * 10.0) as i32)) });
             }
             if self.sel_rect.is_none() && st.codes_visible && st.tool == Tool::Region && !self.codes.is_empty() {
                 let mut b = IRect::default();
@@ -584,6 +585,37 @@ impl Overlay {
         if st.cfg.rainbow { Color::from_hsv((st.rainbow_t / RAINBOW_SECONDS).rem_euclid(1.0), 0.75, 1.0) } else { theme::c().accent }
     }
 
+    /// Where a window's label goes: above its top left; else inside its top
+    /// left, if the window is big enough; else below it, or beside it;
+    /// always on the screen. Faded while the pointer is near, so what's
+    /// under it shows (as the hint does).
+    fn window_label_box(&self, r: Rect, label: &str) -> (Rect, f32) {
+        let size = pill_rect(label, Point::ZERO, PillStyle::small()).size();
+        let (w, h) = size;
+        let screen = self.rect();
+        let fits_inside = r.w >= w + 16.0 && r.h >= h + 16.0;
+        let places = [
+            (Point::new(r.x, r.y - h - 6.0), false),
+            (Point::new(r.x + 8.0, r.y + 8.0), true),
+            (Point::new(r.x, r.bottom() + 6.0), false),
+            (Point::new(r.right() + 6.0, r.y), false),
+            (Point::new(r.x - w - 6.0, r.y), false),
+        ];
+        let bx = places
+            .iter()
+            .map(|(at, inside)| (Rect::new(at.x, at.y, w, h), *inside))
+            .find(|(b, inside)| (fits_inside || !inside) && screen.contains_rect(b))
+            .map(|b| b.0)
+            .unwrap_or_else(|| {
+                // (no room anywhere: as near as can be)
+                let x = (r.x + 8.0).min(screen.right() - w - 4.0).max(screen.x + 4.0);
+                let y = (r.y + 8.0).min(screen.bottom() - h - 4.0).max(screen.y + 4.0);
+                Rect::new(x, y, w, h)
+            });
+        let near = self.cursor_pos.is_some_and(|c| bx.adjusted(-HINT_NEAR / 2.0, -HINT_NEAR / 2.0, HINT_NEAR / 2.0, HINT_NEAR / 2.0).contains(c));
+        (bx, if near { 0.3 } else { 1.0 })
+    }
+
     fn window_label(&self, st: &State, r: Rect, w: usize) -> String {
         let size = format!("{} × {}", py_round(r.w * self.dpr), py_round(r.h * self.dpr));
         let title = st.windows.get(w).map(|w| util::displayable(&w.title)).unwrap_or_default();
@@ -702,12 +734,14 @@ impl Overlay {
         if rtool {
             if selection.is_none()
                 && let Some((r, w)) = hover
-                && r.intersects(&region_logical.adjusted(-200.0, -40.0, 200.0, 40.0))
             {
-                let edge = c.text.with_alpha(110);
-                p.stroke_rect(r.adjusted(0.5, 0.5, -0.5, -0.5), Pen::new(edge, 1.0));
                 let label = self.window_label(st, r, w);
-                pill(&mut p, &label, Point::new(r.x + 8.0, r.y + 8.0), PillStyle::small());
+                let (bx, opacity) = self.window_label_box(r, &label);
+                if r.united(&bx).intersects(&region_logical.adjusted(-2.0, -2.0, 2.0, 2.0)) {
+                    let edge = c.text.with_alpha(110);
+                    p.stroke_rect(r.adjusted(0.5, 0.5, -0.5, -0.5), Pen::new(edge, 1.0));
+                    pill(&mut p, &label, bx.top_left(), PillStyle { opacity, ..PillStyle::small() });
+                }
             }
             if self.sel_rect.is_none() && st.codes_visible && st.tool == Tool::Region {
                 self.paint_codes(&mut p);

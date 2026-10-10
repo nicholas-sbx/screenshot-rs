@@ -166,8 +166,9 @@ impl App {
         if matches!(mode, Mode::Monitor | Mode::Window) || names_window(&self.cfg) || (!instant && self.cfg.detect_windows) {
             let (tx, rx) = mpsc::channel();
             let waker = self.waker.clone();
+            let all = self.cfg.detect_all_windows;
             let _ = std::thread::Builder::new().name("flatshot-windows".into()).spawn(move || {
-                let _ = tx.send(crate::desktop::windows::query(DESKTOP_WAIT));
+                let _ = tx.send(crate::desktop::windows::query(DESKTOP_WAIT, all));
                 waker();
             });
             self.desktop_rx = Some(rx);
