@@ -29,7 +29,7 @@ const MARGIN: f32 = 28.0;
 const SEG_PAD: f32 = 3.0;
 const SEG_GAP: f32 = 2.0;
 
-const CODES_HINT: &str = "Date and time: %Y %m %d %H %M %S. Window: {app} {title}. Also {mode} (region, window, monitor, desktop), {monitor}, {w} {h} for the size and {n} for a counter ({n:4} pads it). For a literal %, { or }, write %%, {{ or }}.";
+const CODES_HINT: &str = "Available codes: %Y %m %d %H %M %S (date and time), {app}, {title}, {mode}, {monitor}, {w} and {h} (image size), {n} (counter; {n:4} pads it). A / creates a subfolder; %%, {{ and }} give a literal %, { or }.";
 
 /// What the window needs done outside itself.
 #[derive(Debug, PartialEq)]
@@ -294,16 +294,16 @@ impl Settings {
         let general = vec![Block::Card {
             heading: String::new(),
             rows: vec![
-                Row::new("theme", "Theme", "For the toolbar, the settings and the other panels. Your drawing colours stay the same.", Control::None)
+                Row::new("theme", "Theme", "Colours of the toolbar, panels and windows. Drawing colours are not affected.", Control::None)
                     .below(Control::Segmented { options: theme_options, dots, value: theme_value }),
+                Row::new("tray_icon", "Tray icon", "Auto uses white or black to match the desktop's light or dark colour scheme.", Control::None)
+                    .below(seg(&[("color", "Colour"), ("theme", "Theme"), ("white", "White"), ("black", "Black"), ("auto", "Auto")], &c.tray_icon)),
                 Row::new(
-                    "tray_icon",
-                    "Tray icon",
-                    "White and black are plain outlines, for panels that use symbolic icons. Auto picks white or black to suit a dark or light desktop.",
-                    Control::None,
-                )
-                .below(seg(&[("color", "Colour"), ("theme", "Theme"), ("white", "White"), ("black", "Black"), ("auto", "Auto")], &c.tray_icon)),
-                Row::new("autostart", "Start at login", "Keeps Flatshot RS in the system tray so shortcuts work.", Control::Toggle(autostart::enabled())),
+                    "autostart",
+                    "Start at login",
+                    "Starts Flatshot RS in the system tray, so global shortcuts work.",
+                    Control::Toggle(autostart::enabled()),
+                ),
                 Row::new(
                     "config_folder",
                     "Configuration folder",
@@ -338,80 +338,90 @@ impl Settings {
                     Row::new(
                         "toolbar_follows_mouse",
                         "Toolbar follows the mouse",
-                        "Show the toolbar on the monitor the pointer is on.",
+                        "Shows the toolbar on the monitor under the pointer.",
                         Control::Toggle(c.toolbar_follows_mouse),
-                    ),
-                    Row::new(
-                        "detect_windows",
-                        "Detect windows",
-                        "Hover a window and click to capture just that window. KDE Plasma, Sway, Hyprland and X11.",
-                        Control::Toggle(c.detect_windows),
                     ),
                     Row::new(
                         "span_monitors",
                         "Select across monitors",
-                        "A drag, or a clicked window, may cross onto other monitors. The toolbar stays on one.",
+                        "Selections, clicked windows and drawings can span several monitors.",
                         Control::Toggle(c.span_monitors),
-                    ),
-                    Row::new(
-                        "include_pointer",
-                        "Include the mouse pointer",
-                        "In instant captures: active window, monitor, all screens, last region.",
-                        Control::Toggle(c.include_pointer),
-                    ),
-                    Row::new(
-                        "region_pointer",
-                        "Mouse pointer when selecting",
-                        "Your choice adds a toolbar button (M), but takes a little longer to open.",
-                        seg(&[("hidden", "Never"), ("shown", "Always"), ("toggle", "Your choice")], &c.region_pointer),
-                    ),
-                    Row::new(
-                        "screenshot_method",
-                        "Take the screenshot",
-                        "Each screen keeps every monitor's own pixels when their scales differ, and is the fastest.",
-                        seg(&[("screens", "Each screen"), ("desktop", "Whole desktop")], &c.screenshot_method),
-                    ),
-                    Row::new(
-                        "snap_edges",
-                        "Snap to edges",
-                        "Selections snap to edges in the picture, boxes first. Also the toolbar's magnet button, or G; hold Ctrl to place freely.",
-                        Control::Toggle(c.snap_edges),
-                    ),
-                    Row::new(
-                        "snap_distance",
-                        "Snap distance",
-                        "How close the pointer must be to an edge.",
-                        Control::Slider { value: c.snap_distance, min: 2, max: 40, step: 1, fmt: fmt_px },
-                    ),
-                    Row::new(
-                        "snap_sensitivity",
-                        "Snap sensitivity",
-                        "Higher snaps to fainter and shorter edges too.",
-                        Control::Slider { value: c.snap_sensitivity, min: 1, max: 10, step: 1, fmt: fmt_plain },
                     ),
                 ],
             },
             Block::Card {
-                heading: "Active window".into(),
+                heading: "Window capture".into(),
                 rows: vec![
                     Row::new(
-                        "window_frame",
-                        "Title bar and borders",
-                        "KDE Plasma takes the window on its own, even where something covers it.",
-                        Control::Toggle(c.window_frame),
+                        "detect_windows",
+                        "Window selection",
+                        "Highlights the window under the pointer; clicking captures it. KDE Plasma, Sway, Hyprland and X11.",
+                        Control::Toggle(c.detect_windows),
                     ),
                     Row::new(
+                        "detect_all_windows",
+                        "Include panels and popups",
+                        "Panels, docks, notifications, menus and tooltips can also be selected. KDE Plasma and X11.",
+                        Control::Toggle(c.detect_all_windows),
+                    ),
+                    Row::new("window_frame", "Title bar and borders", "Included in active window captures. KDE Plasma only.", Control::Toggle(c.window_frame)),
+                    Row::new(
                         "window_shadow",
-                        "Shadow",
-                        "Its real shadow and rounded corners, transparent around it. JPEG fills that in white.",
+                        "Window shadow",
+                        "Included in active window captures, with a transparent background. JPEG files use white instead.",
                         Control::Toggle(c.window_shadow),
+                    ),
+                ],
+            },
+            Block::Card {
+                heading: "Mouse pointer".into(),
+                rows: vec![
+                    Row::new(
+                        "include_pointer",
+                        "Show in instant captures",
+                        "Applies to active window, monitor, all screens and last region captures.",
+                        Control::Toggle(c.include_pointer),
+                    ),
+                    Row::new(
+                        "region_pointer",
+                        "Show when selecting",
+                        "Toggle adds a toolbar button (M) and takes slightly longer to open.",
+                        seg(&[("hidden", "Never"), ("shown", "Always"), ("toggle", "Toggle")], &c.region_pointer),
+                    ),
+                ],
+            },
+            Block::Card {
+                heading: "Snap to edges".into(),
+                rows: vec![
+                    Row::new(
+                        "snap_edges",
+                        "Snap selections to edges",
+                        "Moves selection corners onto nearby edges in the image. Also toggled with G or the magnet button. Hold Ctrl to place freely.",
+                        Control::Toggle(c.snap_edges),
+                    ),
+                    Row::new(
+                        "snap_distance",
+                        "Distance",
+                        "Maximum distance between the pointer and an edge.",
+                        Control::Slider { value: c.snap_distance, min: 2, max: 40, step: 1, fmt: fmt_px },
+                    ),
+                    Row::new(
+                        "snap_sensitivity",
+                        "Sensitivity",
+                        "Higher values also snap to faint and short edges.",
+                        Control::Slider { value: c.snap_sensitivity, min: 1, max: 10, step: 1, fmt: fmt_plain },
                     ),
                 ],
             },
             Block::Card {
                 heading: "Magnifier and crosshair".into(),
                 rows: vec![
-                    Row::new("show_loupe", "Magnifier", "Zoomed pixels, coordinates and colour beside the pointer.", Control::Toggle(c.show_loupe)),
+                    Row::new(
+                        "show_loupe",
+                        "Magnifier",
+                        "Shows enlarged pixels, coordinates and the colour next to the pointer.",
+                        Control::Toggle(c.show_loupe),
+                    ),
                     Row::new(
                         "loupe_size",
                         "Magnifier size",
@@ -419,27 +429,30 @@ impl Settings {
                         Control::Slider { value: c.loupe_size, min: config::LOUPE_SIZES.0, max: config::LOUPE_SIZES.1, step: 20, fmt: fmt_px },
                     ),
                     Row::new("show_crosshair", "Crosshair lines", "Lines across the screen through the pointer.", Control::Toggle(c.show_crosshair)),
-                    Row::new("rainbow", "Rainbow", "The crosshair and the magnifier's square cycle through the colours.", Control::Toggle(c.rainbow)),
-                    Row::new(
-                        "show_hint",
-                        "Hints",
-                        "What to do next, in the middle of the screen. It fades when the pointer comes near.",
-                        Control::Toggle(c.show_hint),
-                    ),
+                    Row::new("rainbow", "Rainbow", "The crosshair and magnifier cycle through colours.", Control::Toggle(c.rainbow)),
+                    Row::new("show_hint", "Hints", "Usage tips in the middle of the screen.", Control::Toggle(c.show_hint)),
                 ],
             },
             Block::Card {
                 heading: "QR codes and barcodes".into(),
-                rows: vec![Row::new("show_codes", "Show results", "Q or the toolbar's code button changes this too.", Control::Toggle(c.show_codes))],
+                rows: vec![Row::new("show_codes", "Detect and show", "Also toggled with Q or the code button on the toolbar.", Control::Toggle(c.show_codes))],
             },
             Block::Card {
                 heading: "Advanced".into(),
-                rows: vec![Row::new(
-                    "backend",
-                    "Capture method",
-                    "Automatic picks the fastest your desktop has.",
-                    Control::Combo { options: backends, value: if c.backend == "qt" { "auto".into() } else { c.backend.clone() } },
-                )],
+                rows: vec![
+                    Row::new(
+                        "screenshot_method",
+                        "Screenshot",
+                        "Each screen keeps every monitor at its own resolution when scales differ, and is the fastest.",
+                        seg(&[("desktop", "Whole desktop"), ("screens", "Each screen")], &c.screenshot_method),
+                    ),
+                    Row::new(
+                        "backend",
+                        "Capture backend",
+                        "Automatic uses the fastest one the desktop has.",
+                        Control::Combo { options: backends, value: if c.backend == "qt" { "auto".into() } else { c.backend.clone() } },
+                    ),
+                ],
             },
         ];
         // After capture
@@ -450,18 +463,14 @@ impl Settings {
                 heading: "Save".into(),
                 rows: vec![
                     Row::new("save_to_disk", "Save to a folder", "", Control::Toggle(c.save_to_disk)),
-                    Row::new("save_dir", "Folder", CODES_HINT, Control::None).below(line(&c.save_dir, "", vec!["Choose…"])),
-                    Row::new("filename", "File name", "The same codes. A / makes subfolders; the extension is added for you.", Control::None).below(line(
-                        &c.filename,
-                        "",
-                        vec![],
-                    )),
+                    Row::new("save_dir", "Folder", "", Control::None).below(line(&c.save_dir, "", vec!["Choose…"])),
+                    Row::new("filename", "File name", CODES_HINT, Control::None).below(line(&c.filename, "", vec![])),
                     Row::new("preview", "", "", Control::None).below(Control::Text(String::new())),
                     Row::new("format", "Format", "", Control::Segmented { dots: vec![None; formats.len()], options: formats, value: format_value }),
                     Row::new(
                         "quality",
                         "Quality",
-                        "Higher is sharper and larger.",
+                        "Higher values give sharper images and larger files.",
                         Control::Slider { value: c.quality, min: 10, max: 100, step: 5, fmt: fmt_plain },
                     ),
                 ],
@@ -479,19 +488,13 @@ impl Settings {
                 heading: "Then".into(),
                 rows: vec![
                     Row::new("clipboard", "Copy to clipboard", "", seg(&[("image", "Image"), ("path", "File path"), ("none", "Nothing")], &c.clipboard)),
-                    Row::new("notify", "Show a notification", "With Open, Show in folder, Annotate and Pin.", Control::Toggle(c.notify)),
-                    Row::new("open_after", "Open", "", seg(&[("none", "Nothing"), ("image", "Image"), ("folder", "Folder")], &c.open_after)),
+                    Row::new("notify", "Show a notification", "Includes Open, Show in folder, Annotate and Pin buttons.", Control::Toggle(c.notify)),
+                    Row::new("open_after", "Open afterwards", "", seg(&[("none", "Nothing"), ("image", "Image"), ("folder", "Folder")], &c.open_after)),
                     Row::new("sound", "Play a sound", "", Control::Toggle(c.sound)),
-                    Row::new("sound_file", "Sound file", "Leave empty for the desktop's own. OGG, WAV, FLAC or MP3.", Control::None).below(line(
-                        &c.sound_file,
-                        "The desktop's screenshot sound",
-                        vec!["Choose…", "Play"],
-                    )),
-                    Row::new("run_command", "Run a command", "{path} stands for the image file (also $FLATSHOT_PATH).", Control::None).below(line(
-                        &c.run_command,
-                        "curl -F file=@{path} https://example.com/upload",
-                        vec![],
-                    )),
+                    Row::new("sound_file", "Sound file", "Empty uses the desktop's screenshot sound. OGG, WAV, FLAC and MP3 are supported.", Control::None)
+                        .below(line(&c.sound_file, "The desktop's screenshot sound", vec!["Choose…", "Play"])),
+                    Row::new("run_command", "Run a command", "{path} is replaced with the path of the image (also in $FLATSHOT_PATH).", Control::None)
+                        .below(line(&c.run_command, "curl -F file=@{path} https://example.com/upload", vec![])),
                 ],
             },
         ];
@@ -501,23 +504,23 @@ impl Settings {
                 heading: String::new(),
                 rows: vec![
                     Row::new("recorder", "Recorder", crate::record::method().label(), Control::None),
-                    Row::new("record_dir", "Folder", CODES_HINT, Control::None).below(line(&c.record_dir, "", vec!["Choose…"])),
-                    Row::new("record_filename", "File name", "The same codes. The extension is added for you.", Control::None).below(line(&c.record_filename, "", vec![])),
+                    Row::new("record_dir", "Folder", "", Control::None).below(line(&c.record_dir, "", vec!["Choose…"])),
+                    Row::new("record_filename", "File name", CODES_HINT, Control::None).below(line(&c.record_filename, "", vec![])),
                     Row::new("record_preview", "", "", Control::None).below(Control::Text(String::new())),
-                    Row::new("record_countdown", "Countdown", "Before recording starts.", Control::Slider { value: c.record_countdown, min: 0, max: 10, step: 1, fmt: fmt_seconds_off }),
+                    Row::new("record_countdown", "Countdown", "Delay before recording starts.", Control::Slider { value: c.record_countdown, min: 0, max: 10, step: 1, fmt: fmt_seconds_off }),
                 ],
             },
             Block::Card {
                 heading: "Defaults".into(),
                 rows: vec![
-                    Row::new("record_format", "Format", "GIFs have no sound.", seg(&[("mp4", "MP4"), ("webm", "WebM"), ("gif", "GIF")], &c.record_format)),
+                    Row::new("record_format", "Format", "GIF files have no audio.", seg(&[("mp4", "MP4"), ("webm", "WebM"), ("gif", "GIF")], &c.record_format)),
                     Row::new("record_fps", "Frame rate", "", seg(&[("24", "24 fps"), ("30", "30 fps"), ("60", "60 fps")], &c.record_fps.to_string())),
                     Row::new("record_mic", "Microphone", "", Control::Toggle(c.record_mic)),
                     Row::new("record_system_audio", "Computer sound", "", Control::Toggle(c.record_system_audio)),
                     Row::new("record_cursor", "Mouse pointer", "", Control::Toggle(c.record_cursor)),
                 ],
             },
-            Block::Note("You can also change these under the area before you start. After a recording, the clipboard, notification, open and command settings from After capture apply; Copy to clipboard copies the video file.".into()),
+            Block::Note("These defaults can also be changed before each recording. The clipboard, notification, open and command settings under After capture also apply to recordings; the clipboard gets the video file.".into()),
         ];
         // Shortcuts (KDE's keys come later)
         let global_rows = shortcuts::ACTIONS
@@ -527,7 +530,7 @@ impl Settings {
         let mut shortcuts_page =
             vec![Block::Card { heading: String::new(), rows: global_rows }, Block::Note(global_note(None)), Block::Title("Keys in Flatshot RS".into())];
         shortcuts_page.push(Block::Note(
-            "While capturing and in the annotation editor. Click one and press a new key; Backspace clears it. Esc, Enter, and Ctrl+S / Ctrl+C to capture, stay as they are.".into(),
+            "Keys used in the capture screen and the annotation editor. Click a field and press a key; Backspace clears it. Esc, Enter, and Ctrl+S / Ctrl+C to capture, stay as they are.".into(),
         ));
         let keymap = keys::Keymap::new(&c.keys);
         for (heading, actions) in keys::groups() {
@@ -686,9 +689,9 @@ impl Settings {
     fn sync_visibility(&mut self) {
         let lossy: Vec<&str> = crate::codec::writable_formats().iter().filter(|f| f.2).map(|f| f.0).collect();
         let quality = lossy.contains(&self.cfg.format.as_str());
-        let (loupe, sound) = (self.cfg.show_loupe, self.cfg.sound);
+        let (loupe, sound, snap) = (self.cfg.show_loupe, self.cfg.sound, self.cfg.snap_edges);
         let previews = [("preview", self.preview(false)), ("record_preview", self.preview(true))];
-        for (id, shown) in [("quality", quality), ("loupe_size", loupe), ("sound_file", sound)] {
+        for (id, shown) in [("quality", quality), ("loupe_size", loupe), ("sound_file", sound), ("snap_distance", snap), ("snap_sensitivity", snap)] {
             if let Some(r) = self.find_mut(id) {
                 r.visible = shown;
             }
@@ -726,7 +729,7 @@ impl Settings {
         };
         let shot = Shot { mode: "region".into(), app: "firefox".into(), title: "Example page".into(), monitor: "DP-1".into() };
         let path = template::target_path(&dir, &name, &shot, (1920, 1080), &ext, true);
-        format!("For example: {}", path.display())
+        format!("Example: {}", path.display())
     }
 
     // -- layout ----------------------------------------------------------------------------
@@ -1088,8 +1091,10 @@ impl Settings {
                         self.set("sound_file", Value::from(current));
                         let ok = sound::play(&self.cfg.sound_file);
                         if let Some(row) = self.find_mut("sound_file") {
-                            row.error = (!ok)
-                                .then(|| "Couldn't play it: no such file, or no player (pw-play, paplay, ffplay or canberra-gtk-play) installed.".to_string());
+                            row.error = (!ok).then(|| {
+                                "Cannot play the sound: the file does not exist, or no player (pw-play, paplay, ffplay or canberra-gtk-play) installed."
+                                    .to_string()
+                            });
                         }
                     }
                     _ => {}
@@ -1152,14 +1157,14 @@ impl Settings {
         let Some(binding) = keys::binding(action) else { return };
         let label = keyseq::label(&seq);
         let error = if ["Esc", "Return", "Enter"].contains(&label.as_str()) {
-            Some(format!("{label} is kept for cancelling and capturing."))
+            Some(format!("{label} is reserved for cancelling and capturing."))
         } else {
             let current = keys::Keymap::new(&self.cfg.keys).keys;
             current
                 .iter()
                 .find(|(a, k)| a.as_str() != action && !k.is_empty() && !seq.is_empty() && keyseq::label(k) == label && keys::overlaps(a, action))
                 .and_then(|(a, _)| keys::binding(a))
-                .map(|clash| format!("{label} is already {}.", clash.1))
+                .map(|clash| format!("{label} is already assigned to {}.", clash.1))
         };
         if let Some(e) = error {
             if let Some(row) = self.row_mut(b, r) {
@@ -1585,8 +1590,8 @@ fn line_parts(rect: Rect, buttons: &[&str]) -> (Rect, Vec<Rect>) {
 fn global_note(enabled: Option<bool>) -> String {
     match enabled {
         None => "Looking for KDE's shortcut service…".into(),
-        Some(true) => "These are KDE global shortcuts; they also appear in System Settings → Shortcuts → Flatshot RS.".into(),
-        Some(false) => "Global shortcuts need KDE Plasma. Elsewhere, bind the command  flatshot-rs  in your desktop's keyboard settings.".into(),
+        Some(true) => "Global shortcuts are managed by KDE and also appear in System Settings → Shortcuts → Flatshot RS.".into(),
+        Some(false) => "Global shortcuts require KDE Plasma. On other desktops, bind the command flatshot-rs in the desktop's keyboard settings.".into(),
     }
 }
 
@@ -1654,7 +1659,7 @@ mod tests {
         assert_eq!(s.cfg.format, "jpg");
         assert!(s.find_mut("quality").unwrap().visible);
         // The file name example follows the field being typed.
-        assert!(matches!(&s.find_mut("preview").unwrap().below, Control::Text(t) if t.starts_with("For example: ")));
+        assert!(matches!(&s.find_mut("preview").unwrap().below, Control::Text(t) if t.starts_with("Example: ")));
     }
 
     fn row_at(s: &Settings, id: &str) -> (usize, usize) {
@@ -1729,7 +1734,7 @@ mod tests {
         assert!(s.row(b, r).unwrap().error.as_deref().is_some_and(|e| e.contains("Line")));
         // Esc is kept.
         s.assign(b, r, "Esc".into());
-        assert!(s.row(b, r).unwrap().error.as_deref().is_some_and(|e| e.contains("kept")));
+        assert!(s.row(b, r).unwrap().error.as_deref().is_some_and(|e| e.contains("reserved")));
         // Q... is the codes key, while capturing only: the editor's pen can't share it either (pen works in both).
         s.assign(b, r, "W".into());
         assert!(s.row(b, r).unwrap().error.is_none());

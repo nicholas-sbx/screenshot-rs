@@ -106,7 +106,7 @@ fn kde_worker(jobs: mpsc::Receiver<KdeJob>, answers: mpsc::Sender<KdeAnswer>, wa
                     if ok {
                         Some(KdeAnswer::Assigned(action, now, None))
                     } else {
-                        Some(KdeAnswer::Assigned(action, shortcuts::get(action), Some(format!("KDE didn't accept {what}."))))
+                        Some(KdeAnswer::Assigned(action, shortcuts::get(action), Some(format!("KDE rejected {what}."))))
                     }
                 }
             }
