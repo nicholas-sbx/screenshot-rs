@@ -645,7 +645,8 @@ impl Wayland {
         let icon = match shape {
             CursorShape::Crosshair => CursorIcon::Crosshair,
             CursorShape::Text => CursorIcon::Text,
-            CursorShape::Move => CursorIcon::Move,
+            // (the four arrows: "move" is the drag and drop arrow in many themes)
+            CursorShape::Move => CursorIcon::AllScroll,
             CursorShape::Hand => CursorIcon::Pointer,
             CursorShape::Arrow => CursorIcon::Default,
             CursorShape::ResizeNS => CursorIcon::NsResize,

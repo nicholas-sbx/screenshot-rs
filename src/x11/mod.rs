@@ -889,7 +889,8 @@ impl X11 {
         let names: &[&'static str] = match shape {
             CursorShape::Crosshair => &["crosshair"],
             CursorShape::Text => &["text", "xterm"],
-            CursorShape::Move => &["move", "fleur"],
+            // (the four arrows: "move" is the drag and drop arrow in many themes)
+            CursorShape::Move => &["all-scroll", "size_all", "fleur"],
             CursorShape::Hand => &["pointer", "hand2"],
             CursorShape::Arrow => &["default", "left_ptr"],
             CursorShape::ResizeNS => &["ns-resize", "sb_v_double_arrow"],
