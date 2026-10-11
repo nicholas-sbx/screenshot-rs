@@ -263,13 +263,16 @@ fn overlay_basics(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     // Window detection: hover highlights the topmost window, a click captures it.
     s.desktop_found(Desktop {
         windows: vec![
-            Window { rect: IRect::new(1060, 240, 225, 225), title: "QR card".into(), app: "viewer".into() },
-            Window { rect: IRect::new(120, 140, 820, 560), title: "Notes — Kate".into(), app: "kate".into() },
+            // Flatshot's own: its overlay (the whole monitor: never picked), and a pin (picked as any)
+            Window { rect: IRect::new(0, 0, 1600, 1000), title: String::new(), app: "flatshot-rs".into(), own: true },
+            Window { rect: IRect::new(1400, 800, 120, 90), title: "Flatshot RS pin".into(), app: "flatshot-rs".into(), own: true },
+            Window { rect: IRect::new(1060, 240, 225, 225), title: "QR card".into(), app: "viewer".into(), own: false },
+            Window { rect: IRect::new(120, 140, 820, 560), title: "Notes — Kate".into(), app: "kate".into(), own: false },
         ],
         active: None,
         cursor: None,
     });
-    check!(s.overlays[0].windows.len() == 2);
+    check!(s.overlays[0].windows.len() == 3, "Flatshot's overlay is a window to pick: {:?}", s.overlays[0].windows);
     s.pointer_motion(0, Point::new(1180.0, 450.0), 0, false);
     let hovered = s.overlays[0].hover_window.map(|h| s.st.windows[h.1].title.clone());
     check!(hovered.as_deref() == Some("QR card"), "{hovered:?}");
@@ -277,7 +280,10 @@ fn overlay_basics(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     let hovered = s.overlays[0].hover_window.map(|h| s.st.windows[h.1].title.clone());
     check!(hovered.as_deref() == Some("Notes — Kate"), "{hovered:?}");
     save_png(&frame(&mut s, 0)?, out, "overlay-window.png")?;
-    s.pointer_motion(0, Point::new(1500.0, 900.0), 0, false);
+    s.pointer_motion(0, Point::new(1450.0, 840.0), 0, false);
+    let hovered = s.overlays[0].hover_window.map(|h| s.st.windows[h.1].title.clone());
+    check!(hovered.as_deref() == Some("Flatshot RS pin"), "Flatshot's own pin isn't picked: {hovered:?}");
+    s.pointer_motion(0, Point::new(1500.0, 950.0), 0, false);
     check!(s.overlays[0].hover_window.is_none());
 
     // Dismiss the first code with its card's ×.

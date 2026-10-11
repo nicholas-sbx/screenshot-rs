@@ -46,7 +46,7 @@ const SCRIPT: &str = r#"
     var all = %ALL%;  // panels, notifications, popups and the like too
     function wanted(w) {
         if (w.normalWindow || w.dialog) return true;
-        if (!all || w.desktopWindow || w.pid === %PID%) return false;  // (not the wallpaper, nor Flatshot's own)
+        if (!all || w.desktopWindow) return false;  // (not the wallpaper)
         return !!(w.dock || w.notification || w.criticalNotification || w.onScreenDisplay || w.utility || w.splash
                   || w.toolbar || w.menu || w.popupMenu || w.dropdownMenu || w.tooltip || w.comboBox || w.popupWindow
                   || w.appletPopup);
@@ -62,7 +62,7 @@ const SCRIPT: &str = r#"
             if (!g || g.width < 8 || g.height < 8) continue;
             if (act && (w === act || String(w.internalId) === String(act.internalId))) active = out.length;
             out.push([Math.round(g.x), Math.round(g.y), Math.round(g.width), Math.round(g.height),
-                      String(w.caption || ""), String(w.resourceClass || "")]);
+                      String(w.caption || ""), String(w.resourceClass || ""), w.pid === %PID%]);
         } catch (e) {}
     }
     var cursor = null;
@@ -210,7 +210,8 @@ fn window_from_row(row: &Value) -> Option<Window> {
         return None;
     }
     let s = |i: usize| r.get(i).and_then(|v| v.as_str()).map(|t| t.chars().take(MAX_TITLE).collect::<String>()).unwrap_or_default();
-    Some(Window { rect: IRect::new(x, y, w, h), title: s(4), app: s(5) })
+    let own = r.get(6).and_then(|v| v.as_bool()).unwrap_or(false);
+    Some(Window { rect: IRect::new(x, y, w, h), title: s(4), app: s(5), own })
 }
 
 // -- sway ------------------------------------------------------------------------------
@@ -239,7 +240,7 @@ fn sway(sock: &std::path::Path) -> Option<Desktop> {
         if is_window && let Some(rect) = rect.filter(|r| r.w > 0 && r.h > 0) {
             let app = node.get("app_id").and_then(|v| v.as_str()).or_else(|| node.pointer("/window_properties/class").and_then(|v| v.as_str())).unwrap_or("");
             let title = node.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let w = Window { rect, title: title.chars().take(MAX_TITLE).collect(), app: app.chars().take(MAX_TITLE).collect() };
+            let w = Window { rect, title: title.chars().take(MAX_TITLE).collect(), app: app.chars().take(MAX_TITLE).collect(), own: false };
             if node.get("focused").and_then(|v| v.as_bool()).unwrap_or(false) {
                 *active = Some(w.clone());
                 if let Some(o) = output.and_then(|o| o.get("rect")) {
@@ -323,7 +324,7 @@ fn hyprland() -> Option<Desktop> {
         let size = w.get("size")?.as_array()?;
         let rect = IRect::new(at.first()?.as_i64()? as i32, at.get(1)?.as_i64()? as i32, size.first()?.as_i64()? as i32, size.get(1)?.as_i64()? as i32);
         let s = |k: &str| w.get(k).and_then(|v| v.as_str()).unwrap_or("").chars().take(MAX_TITLE).collect::<String>();
-        (rect.w > 0 && rect.h > 0).then(|| Window { rect, title: s("title"), app: s("class") })
+        (rect.w > 0 && rect.h > 0).then(|| Window { rect, title: s("title"), app: s("class"), own: false })
     });
     let cursor = ask("cursorpos").and_then(|p| Some(Point::new(p.get("x")?.as_f64()? as f32, p.get("y")?.as_f64()? as f32)));
     Some(Desktop { windows: active.iter().cloned().collect(), active, cursor })
@@ -336,10 +337,11 @@ mod tests {
     #[test]
     fn kwin_report() {
         let d = parse_kwin(
-            r#"{"windows": [[120, 140, 820, 560, "Notes — Kate", "kate"], [1060, 240, 225, 225, "QR card", "viewer"], ["x"], [0, 0, -5, 10, "bad", ""]], "active": 0, "cursor": [300, 400]}"#,
+            r#"{"windows": [[120, 140, 820, 560, "Notes — Kate", "kate"], [1060, 240, 225, 225, "QR card", "viewer", true], ["x"], [0, 0, -5, 10, "bad", ""]], "active": 0, "cursor": [300, 400]}"#,
         );
         assert_eq!(d.windows.iter().map(|w| w.title.as_str()).collect::<Vec<_>>(), ["QR card", "Notes — Kate"]);
         assert_eq!(d.active.as_ref().map(|w| w.app.as_str()), Some("kate"));
+        assert_eq!(d.windows.iter().map(|w| w.own).collect::<Vec<_>>(), [true, false], "whose windows are Flatshot's own");
         assert_eq!(d.cursor, Some(Point::new(300.0, 400.0)));
         assert_eq!(parse_kwin("not json"), Desktop::default());
         let long = format!(r#"{{"windows": [[0, 0, 10, 10, "{}", "a"]]}}"#, "x".repeat(5000));

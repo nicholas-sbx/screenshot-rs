@@ -48,6 +48,9 @@ pub struct Window {
     pub rect: IRect,
     pub title: String,
     pub app: String,
+    /// one of Flatshot's own (its capture overlay is left out, by its
+    /// covering a whole monitor; the rest can be picked like any)
+    pub own: bool,
 }
 
 /// A code found on screen; corners in the pixels of the picture scanned.

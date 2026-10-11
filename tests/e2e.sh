@@ -261,6 +261,8 @@ chmod +x "$work/hover.sh"
 dbus-run-session -- "$work/hover.sh" 2>/dev/null || true
 grep -q "1 window" "$work/hover.log" && pass "KWin's windows known, late" || { fail "KWin's windows never came"; tail -n 15 "$work/hover.log" "$work/kwin-hover.log" | sed 's/^/    /'; }
 expect_size "a click on a window captures it" "$work/hovered.png" "400 300"
+# (KWin's picture, Flatshot's own windows in it: it asked KWin not to hide them)
+grep -q "via kwin" "$work/hover.log" && pass "KWin's picture keeps Flatshot's own windows" || fail "the picture wasn't KWin's (did it ask KWin to hide Flatshot's windows?)"
 python3 - "$work/window.png" <<'PY' && pass "the window's shadow kept transparent" || fail "the window's shadow isn't transparent"
 import sys, zlib
 d = open(sys.argv[1], "rb").read()

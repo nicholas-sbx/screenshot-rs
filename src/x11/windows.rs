@@ -94,13 +94,10 @@ fn describe(conn: &RustConnection, atoms: &Atoms, root: xproto::Window, w: xprot
     }
     let types: Vec<u32> = kind.reply().ok().and_then(|r| r.value32().map(|v| v.collect())).unwrap_or_default();
     let app_window = types.is_empty() || types.iter().any(|t| *t == atoms._NET_WM_WINDOW_TYPE_NORMAL || *t == atoms._NET_WM_WINDOW_TYPE_DIALOG);
-    if !app_window {
-        // Panels, docks, notifications and the like, when asked for: not the
-        // wallpaper, nor Flatshot's own.
-        let own = pid.reply().ok().and_then(|r| r.value32().and_then(|mut v| v.next())) == Some(std::process::id());
-        if !all || own || types.contains(&atoms._NET_WM_WINDOW_TYPE_DESKTOP) {
-            return None;
-        }
+    let own = pid.reply().ok().and_then(|r| r.value32().and_then(|mut v| v.next())) == Some(std::process::id());
+    // Panels, docks, notifications and the like, when asked for: not the wallpaper.
+    if !app_window && (!all || types.contains(&atoms._NET_WM_WINDOW_TYPE_DESKTOP)) {
+        return None;
     }
     let g = geometry.reply().ok()?;
     let o = origin.reply().ok()?;
@@ -127,5 +124,5 @@ fn describe(conn: &RustConnection, atoms: &Atoms, root: xproto::Window, w: xprot
     let mut parts = class.split(|&b| b == 0).map(|p| String::from_utf8_lossy(p).into_owned());
     let instance = parts.next().unwrap_or_default();
     let app = if instance.is_empty() { parts.next().unwrap_or_default().to_lowercase() } else { instance };
-    Some(Window { rect: IRect::new(s(x), s(y), s(w), s(h)), title: title.chars().take(MAX_TITLE).collect(), app: app.chars().take(MAX_TITLE).collect() })
+    Some(Window { rect: IRect::new(s(x), s(y), s(w), s(h)), title: title.chars().take(MAX_TITLE).collect(), app: app.chars().take(MAX_TITLE).collect(), own })
 }
