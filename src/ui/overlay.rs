@@ -606,7 +606,8 @@ impl Overlay {
             return Some(sp); // a drag from another monitor is here now
         }
         let pos = self.cursor_pos?;
-        let allowed = !self.over_floating(24.0, self.chips_shown(st));
+        // (hidden right over a panel only: near one, it still shows)
+        let allowed = !self.over_floating(0.0, self.chips_shown(st));
         ((picking && st.cfg.show_loupe || st.eyedropper) && allowed && self.rect().contains(pos) && pos.x < self.width() && pos.y < self.height())
             .then_some(pos)
     }
