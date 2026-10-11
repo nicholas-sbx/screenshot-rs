@@ -45,7 +45,7 @@ impl Blink {
             self.on = true;
             return repaint;
         }
-        let on = self.caret.is_none() || (now.saturating_duration_since(self.since).as_millis() / HALF.as_millis()) % 2 == 0;
+        let on = self.caret.is_none() || (now.saturating_duration_since(self.since).as_millis() / HALF.as_millis()).is_multiple_of(2);
         if on != self.on {
             self.on = on;
             repaint.extend(self.caret);
