@@ -1743,8 +1743,8 @@ impl Session {
         self.timers.push((Instant::now() + after, t));
     }
 
-    /// Look for codes on each monitor's picture, one after another, in the
-    /// background; once a capture (later calls do nothing).
+    /// Look for codes on each monitor's picture, one after another (the
+    /// pointer's first), in the background; once a capture (later calls do nothing).
     fn start_scan(&mut self) {
         if !std::mem::take(&mut self.scan_pending) || self.done {
             return;
@@ -1752,7 +1752,10 @@ impl Session {
         self.timers.retain(|x| x.1 != Timer::Scan);
         self.scans_left = self.overlays.len();
         self.refresh_toolbars();
-        let pictures: Vec<(usize, Arc<Image>)> = self.overlays.iter().map(|o| (o.index, o.plain.clone().unwrap_or_else(|| o.base.clone()))).collect();
+        let mut pictures: Vec<(usize, Arc<Image>)> = self.overlays.iter().map(|o| (o.index, o.plain.clone().unwrap_or_else(|| o.base.clone()))).collect();
+        // The monitor being looked at first.
+        let first = self.st.pointer_overlay;
+        pictures.sort_by_key(|(o, _)| Some(*o) != first);
         let (tx, waker, cancelled) = (self.tx.clone(), self.waker.clone(), self.cancelled.clone());
         let started = std::thread::Builder::new().name("flatshot-scan".into()).spawn(move || {
             for (o, img) in pictures {

@@ -1,13 +1,20 @@
 //! Find QR codes and barcodes in a capture, off the UI thread.
 //!
 //! What's on screen is untrusted input, so the decoders are memory-safe
-//! Rust (rxing). The formats are split into groups scanned in parallel,
-//! all reading the same grey picture (no copies); a decoder that panics on
-//! a strange picture loses only its own group's codes.
+//! Rust (rxing). The work is split into small jobs shared out among the
+//! cores: each 2D format on its own, as it is and light on dark (as in dark
+//! themes), and the 1D codes in bands of rows. All read the same grey
+//! picture (no copies, but for the light-on-dark one); a decoder that panics
+//! on a strange picture loses only its own job's codes.
+//!
+//! (One reader for all the 2D formats, also trying each light on dark, takes
+//! three or four times as long as the same done apart: every place it
+//! looks, it tries them all, twice.)
 
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rxing::common::HybridBinarizer;
 use rxing::multi::{GenericMultipleBarcodeReader, MultipleBarcodeReader};
@@ -17,13 +24,22 @@ use crate::geom::Point;
 use crate::image::Image;
 use crate::ui::overlay::Code;
 
-/// The groups scanned side by side: 2D codes (also light on dark, as in
-/// dark themes), EAN / UPC, and the other 1D codes.
-const GROUPS: &[(&[F], bool)] = &[
-    (&[F::QR_CODE, F::DATA_MATRIX, F::AZTEC, F::PDF_417], true),
-    (&[F::EAN_13, F::EAN_8, F::UPC_A, F::UPC_E], false),
-    (&[F::CODE_128, F::CODE_39, F::CODE_93, F::CODABAR, F::ITF, F::RSS_14, F::RSS_EXPANDED], false),
-];
+/// The 2D formats, each scanned apart, also light on dark.
+const MATRIX: &[F] = &[F::QR_CODE, F::DATA_MATRIX, F::AZTEC, F::PDF_417];
+
+/// The 1D formats: EAN / UPC, and the others (dark on light).
+const BARS: &[&[F]] = &[&[F::EAN_13, F::EAN_8, F::UPC_A, F::UPC_E], &[F::CODE_128, F::CODE_39, F::CODE_93, F::CODABAR, F::ITF, F::RSS_14, F::RSS_EXPANDED]];
+
+/// The tallest band of rows the 1D codes are looked for in at once: a
+/// barcode's bars run top to bottom, so any row across it reads it.
+const BAND: u32 = 720;
+
+/// One job: `formats` in rows `rows` (of the light-on-dark picture, `inverted`).
+struct Job {
+    formats: &'static [F],
+    inverted: bool,
+    rows: (u32, u32),
+}
 
 /// Longest text kept from a code (a QR code holds at most about 7000).
 const MAX_TEXT: usize = 8192;
@@ -44,16 +60,29 @@ pub fn scan_luma(luma: &[u8], w: u32, h: u32) -> Vec<Code> {
     if luma.len() < w as usize * h as usize {
         return Vec::new();
     }
-    let groups: Vec<Vec<Code>> = std::thread::scope(|s| {
-        let handles: Vec<_> = GROUPS
-            .iter()
-            .map(|(formats, inverted)| s.spawn(move || catch_unwind(AssertUnwindSafe(|| scan_group(luma, w, h, formats, *inverted))).unwrap_or_default()))
+    let luma = &luma[..w as usize * h as usize];
+    let inverted: Vec<u8> = luma.iter().map(|v| 255 - v).collect();
+    let jobs = jobs(h);
+    let next = AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, jobs.len());
+    let found: Vec<Vec<Code>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut codes = Vec::new();
+                    while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let picture = if job.inverted { &inverted[..] } else { luma };
+                        codes.extend(catch_unwind(AssertUnwindSafe(|| scan_job(picture, luma, w, job))).unwrap_or_default());
+                    }
+                    codes
+                })
+            })
             .collect();
         handles.into_iter().map(|t| t.join().unwrap_or_default()).collect()
     });
     let mut seen = HashSet::new();
     let mut codes = Vec::new();
-    for code in groups.into_iter().flatten() {
+    for code in found.into_iter().flatten() {
         let c = code_box_center(&code.corners);
         // the same code found twice (by its text and where it is)
         if seen.insert((code.text.clone(), (c.x / 8.0) as i32, (c.y / 8.0) as i32)) {
@@ -63,17 +92,46 @@ pub fn scan_luma(luma: &[u8], w: u32, h: u32) -> Vec<Code> {
     codes
 }
 
+/// The jobs for a picture `h` rows tall, the longest first (QR codes, the
+/// ones most often found, take longest).
+fn jobs(h: u32) -> Vec<Job> {
+    let mut jobs = Vec::new();
+    for inverted in [false, true] {
+        jobs.push(Job { formats: &MATRIX[..1], inverted, rows: (0, h) });
+    }
+    // Bands overlapping a little, so a short barcode on the line between
+    // two is whole in one of them.
+    let bands = h.div_ceil(BAND).max(1);
+    let step = h.div_ceil(bands);
+    for formats in BARS {
+        for i in 0..bands {
+            let (a, b) = ((i * step).saturating_sub(32), ((i + 1) * step + 32).min(h));
+            jobs.push(Job { formats, inverted: false, rows: (a, b) });
+        }
+    }
+    for i in 1..MATRIX.len() {
+        for inverted in [false, true] {
+            jobs.push(Job { formats: &MATRIX[i..=i], inverted, rows: (0, h) });
+        }
+    }
+    jobs
+}
+
 fn code_box_center(corners: &[Point]) -> Point {
     let n = corners.len().max(1) as f32;
     let (sx, sy) = corners.iter().fold((0.0, 0.0), |(x, y), p| (x + p.x, y + p.y));
     Point::new(sx / n, sy / n)
 }
 
-fn scan_group(luma: &[u8], w: u32, h: u32, formats: &[F], inverted: bool) -> Vec<Code> {
-    let Ok(source) = Luma8Source::new_with_slice(luma, w, h) else { return Vec::new() };
+/// One job's codes, corners in the whole picture's pixels. `picture` is
+/// what's read (`luma`, or it light on dark).
+fn scan_job(picture: &[u8], luma: &[u8], w: u32, job: &Job) -> Vec<Code> {
+    let (y0, y1) = job.rows;
+    let h = luma.len() as u32 / w;
+    let band = &picture[y0 as usize * w as usize..y1 as usize * w as usize];
+    let Ok(source) = Luma8Source::new_with_slice(band, w, y1 - y0) else { return Vec::new() };
     let mut bitmap = BinaryBitmap::new(HybridBinarizer::new(source));
-    let hints =
-        DecodeHints { PossibleFormats: Some(formats.iter().copied().collect()), TryHarder: Some(true), AlsoInverted: Some(inverted), ..Default::default() };
+    let hints = DecodeHints { PossibleFormats: Some(job.formats.iter().copied().collect()), TryHarder: Some(true), ..Default::default() };
     let mut reader = GenericMultipleBarcodeReader::new(MultiUseMultiFormatReader::default());
     let Ok(results) = reader.decode_multiple_with_hints(&mut bitmap, &hints) else { return Vec::new() };
     let mut codes = Vec::new();
@@ -91,7 +149,7 @@ fn scan_group(luma: &[u8], w: u32, h: u32, formats: &[F], inverted: bool) -> Vec
         } else {
             text
         };
-        let pts: Vec<Point> = r.getPoints().iter().map(|p| Point::new(p.x, p.y)).filter(|p| p.x.is_finite() && p.y.is_finite()).collect();
+        let pts: Vec<Point> = r.getPoints().iter().map(|p| Point::new(p.x, p.y + y0 as f32)).filter(|p| p.x.is_finite() && p.y.is_finite()).collect();
         if pts.is_empty() {
             continue;
         }
