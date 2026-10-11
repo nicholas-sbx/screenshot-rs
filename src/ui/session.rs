@@ -2007,6 +2007,28 @@ impl Session {
         self.refresh();
     }
 
+    /// The recording area on `o`, moved over onto another monitor: it's that
+    /// monitor's now (most of it is there), with its handles and panel.
+    fn rehome_area(&mut self, o: usize) {
+        let Some(r) = self.overlays[o].rec_rect else { return };
+        let g = self.overlays[o].output.rect.to_f();
+        let area = r.translated(g.top_left());
+        let size = |k: usize| {
+            let i = area.intersected(&self.overlays[k].output.rect.to_f());
+            i.w.max(0.0) * i.h.max(0.0)
+        };
+        let Some(k) = (0..self.overlays.len()).max_by(|&a, &b| size(a).total_cmp(&size(b))).filter(|&k| k != o && size(k) > size(o)) else { return };
+        let to = self.overlays[k].output.rect.to_f();
+        let from = &mut self.overlays[o];
+        from.rec_rect = None;
+        from.rec_window = None;
+        from.panel = None;
+        let ov = &mut self.overlays[k];
+        ov.rec_rect = Some(area.translated(-to.top_left()));
+        ov.span_rect = None;
+        self.area_moved(k);
+    }
+
     /// Move or resize the recording area; a resized edge goes to `snapped`
     /// when snapping found an edge there. `center` (Ctrl): the opposite edge
     /// moves the other way, so the area stays centred.
@@ -2563,6 +2585,7 @@ impl Session {
             if self.overlays[o].rec_rect.is_some_and(|r| r.w < 8.0 || r.h < 8.0) {
                 self.overlays[o].rec_rect = None;
             }
+            self.rehome_area(o);
             self.refresh();
         } else if let Some(shape) = self.overlays[o].active.take()
             && shape.is_valid()

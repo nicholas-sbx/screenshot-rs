@@ -847,7 +847,28 @@ fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Imag
         }
         other => return Err(format!("capturing the right monitor gave {other:?}")),
     }
+    record_across_monitors(tmp)?;
     println!("self-test: drawings across monitors");
+    Ok(())
+}
+
+/// A recording area moved from one monitor onto another goes with its
+/// handles and panel.
+fn record_across_monitors(tmp: &Path) -> R {
+    let picture = Arc::new(Image::filled(800, 600, 0xFF404040)?);
+    let screens = vec![
+        Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 800, 600), scale: 1.0 }, picture: picture.clone(), pointer: None },
+        Screen { output: Output { name: "DP-2".into(), rect: IRect::new(800, 0, 800, 600), scale: 1.0 }, picture, pointer: None },
+    ];
+    let mut s = session(test_config(tmp), Request { record: true, ..Default::default() }, screens, FakeRecorder { problem: None, span: true });
+    s.pointer_enter(0, Point::new(300.0, 300.0));
+    drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(300.0, 250.0), 0);
+    check!(s.overlays[0].rec_rect.is_some() && s.overlays[0].panel.is_some(), "no area to record");
+    // Moved by its middle, most of the way onto the right monitor.
+    drag(&mut s, 0, Point::new(200.0, 175.0), Point::new(850.0, 175.0), 0);
+    check!(s.overlays[0].rec_rect.is_none() && s.overlays[0].span_rect == Some(Rect::new(750.0, 100.0, 200.0, 150.0)), "{:?}", s.overlays[0].span_rect);
+    check!(s.overlays[1].rec_rect == Some(Rect::new(-50.0, 100.0, 200.0, 150.0)), "the area didn't go over: {:?}", s.overlays[1].rec_rect);
+    check!(s.overlays[1].panel.is_some(), "its panel stayed behind");
     Ok(())
 }
 
