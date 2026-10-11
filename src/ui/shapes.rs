@@ -108,7 +108,7 @@ pub struct Drag {
 }
 
 impl Drag {
-    fn new(pos: Point, line_like: bool) -> Drag {
+    pub fn new(pos: Point, line_like: bool) -> Drag {
         Drag { start: pos, end: pos, anchor: pos, pointer: pos, line_like }
     }
 

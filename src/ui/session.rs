@@ -670,7 +670,20 @@ impl Session {
         if self.done {
             return;
         }
-        for ov in &mut self.overlays {
+        let spans = self.st.spans;
+        let mut moved = None;
+        for o in 0..self.overlays.len() {
+            let bounds = self.drag_bounds(o);
+            let ov = &mut self.overlays[o];
+            // The area being dragged out: squared or centred as the keys say.
+            if let Some(d) = &mut ov.sel_origin {
+                let mut m = Mods::from_keys(mods);
+                m.moving = false;
+                let at = d.pointer;
+                d.extend(at, m);
+                ov.sel_rect = Some(clip_selection(d.rect(), bounds));
+                moved = Some(o);
+            }
             if let Some(shape) = &mut ov.active
                 && let Some(d) = shape.drag()
             {
@@ -679,6 +692,11 @@ impl Session {
                 m.moving = false; // (moving needs the pointer to move)
                 shape.extend(at, m);
             }
+        }
+        if let Some(o) = moved
+            && spans
+        {
+            self.selection_moved(o, None);
         }
     }
 
@@ -2444,7 +2462,7 @@ impl Session {
         } else if matches!(tool, Tool::Region | Tool::Record) {
             self.disarm();
             let pos = self.snapped(o, pos, mods);
-            self.overlays[o].sel_origin = Some(pos);
+            self.overlays[o].sel_origin = Some(crate::ui::shapes::Drag::new(pos, false));
             self.overlays[o].sel_rect = Some(Rect::new(pos.x, pos.y, 0.0, 0.0));
             self.refresh();
         } else if tool == Tool::Text {
@@ -2498,9 +2516,9 @@ impl Session {
         // (the text being typed can be another monitor's, reaching here)
         let text_at = self.st.text_edit.as_ref().filter(|(eo, _)| *eo < self.overlays.len()).map(|(eo, _)| self.to_overlay(o, *eo, pos));
         let ov = &mut self.overlays[o];
-        if let Some(origin) = ov.sel_origin {
-            let end = snap.unwrap_or(pos);
-            ov.sel_rect = Some(clip_selection(Rect::from_points(origin, end), bounds));
+        if let Some(d) = &mut ov.sel_origin {
+            d.extend(snap.unwrap_or(pos), Mods::from_keys(mods));
+            ov.sel_rect = Some(clip_selection(d.rect(), bounds));
             ov.hover_window = None;
             if self.st.spans {
                 self.selection_moved(o, Some(pos));

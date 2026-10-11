@@ -116,7 +116,9 @@ pub struct Overlay {
     pub foreign_live: Vec<Shape>,
     /// another monitor's selected drawing (here), for its frame
     pub foreign_frame: Option<Shape>,
-    pub sel_origin: Option<Point>,
+    /// the area being dragged out (Shift: square, Ctrl: from its middle,
+    /// Alt: moved), as a rectangle's drag is
+    pub sel_origin: Option<crate::ui::shapes::Drag>,
     pub sel_rect: Option<Rect>,
     pub cursor_pos: Option<Point>,
     /// (index in the session's codes, the code's corners here, logical)

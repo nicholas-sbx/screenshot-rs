@@ -848,7 +848,38 @@ fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Imag
         other => return Err(format!("capturing the right monitor gave {other:?}")),
     }
     record_across_monitors(tmp)?;
+    area_keys(tmp)?;
     println!("self-test: drawings across monitors");
+    Ok(())
+}
+
+/// Dragging out an area with Shift makes it square, with Ctrl from its
+/// middle, and Alt moves it, as for a rectangle.
+fn area_keys(tmp: &Path) -> R {
+    let picture = Arc::new(Image::filled(800, 600, 0xFF404040)?);
+    let screen = Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 800, 600), scale: 1.0 }, picture, pointer: None };
+    let mut s = session(test_config(tmp), Request { record: true, ..Default::default() }, vec![screen], FakeRecorder { problem: None, span: false });
+    s.pointer_enter(0, Point::new(300.0, 300.0));
+    drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(300.0, 200.0), keyseq::SHIFT);
+    check!(s.overlays[0].rec_rect == Some(Rect::new(100.0, 100.0, 200.0, 200.0)), "Shift: {:?}", s.overlays[0].rec_rect);
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    drag(&mut s, 0, Point::new(400.0, 300.0), Point::new(450.0, 340.0), CTRL);
+    check!(s.overlays[0].rec_rect == Some(Rect::new(350.0, 260.0, 100.0, 80.0)), "Ctrl: {:?}", s.overlays[0].rec_rect);
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    // Alt held for the last stretch: the area so far moves with the pointer.
+    s.pointer_motion(0, Point::new(100.0, 100.0), 0, false);
+    s.button(0, Button::Left, true, Point::new(100.0, 100.0), 0);
+    s.pointer_motion(0, Point::new(200.0, 150.0), 0, false);
+    s.pointer_motion(0, Point::new(260.0, 170.0), keyseq::ALT, false);
+    s.button(0, Button::Left, false, Point::new(260.0, 170.0), keyseq::ALT);
+    check!(s.overlays[0].rec_rect == Some(Rect::new(160.0, 120.0, 100.0, 50.0)), "Alt: {:?}", s.overlays[0].rec_rect);
+    // Shift pressed mid-drag squares it there and then.
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    s.pointer_motion(0, Point::new(100.0, 100.0), 0, false);
+    s.button(0, Button::Left, true, Point::new(100.0, 100.0), 0);
+    s.pointer_motion(0, Point::new(300.0, 160.0), 0, false);
+    s.modifiers(keyseq::SHIFT);
+    check!(s.overlays[0].sel_rect == Some(Rect::new(100.0, 100.0, 200.0, 200.0)), "Shift pressed: {:?}", s.overlays[0].sel_rect);
     Ok(())
 }
 
