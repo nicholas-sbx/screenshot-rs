@@ -200,7 +200,8 @@ impl App {
         let s = &mut w.s;
         let p = |at: (f64, f64)| Point::new(at.0 as f32, at.1 as f32);
         match ev {
-            Input::Enter(at) | Input::Motion(at, _) => s.pointer_motion(p(at)),
+            Input::Enter(at) => s.pointer_motion(p(at), false),
+            Input::Motion(at, finger) => s.pointer_motion(p(at), finger),
             Input::Leave => s.pointer_leave(),
             Input::Button(b, pressed, at) => {
                 let button = match b {

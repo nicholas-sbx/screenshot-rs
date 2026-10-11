@@ -230,6 +230,12 @@ fn line(value: &str, placeholder: &str, buttons: Vec<&'static str>) -> Control {
     Control::Line { edit: Box::new(edit), buttons }
 }
 
+/// How near the window's right edge the scroll bar can be taken.
+const BAR_REACH: f32 = 12.0;
+
+/// How far a finger moves before it's scrolling rather than tapping.
+const PAN_SLOP: f32 = 10.0;
+
 pub struct Settings {
     cfg: Config,
     pages: Vec<Page>,
@@ -248,6 +254,13 @@ pub struct Settings {
     combo: Option<(usize, usize)>,
     /// a slider being dragged: (block, row)
     sliding: Option<(usize, usize)>,
+    /// the pointer is a finger (as of its latest move)
+    finger: bool,
+    /// the scroll bar's thumb being dragged, held this far below its top
+    bar_drag: Option<f32>,
+    /// a finger down on the page: where, the scroll then, and whether it's
+    /// moved far enough to be scrolling (not a tap)
+    pan: Option<(Point, f32, bool)>,
     mods: i32,
     damaged: bool,
     /// parts to draw again when not all of it is (logical rectangles)
@@ -273,6 +286,9 @@ impl Settings {
             recording: None,
             combo: None,
             sliding: None,
+            finger: false,
+            bar_drag: None,
+            pan: None,
             mods: 0,
             damaged: true,
             touched: Vec::new(),
@@ -891,6 +907,32 @@ impl Settings {
         layout.hits.into_iter().find(|(h, r)| r.contains(at) && (matches!(h, Hit::Nav(_)) || at.x >= NAV_W)).map(|(h, _)| h)
     }
 
+    /// The scroll bar's thumb: its top and height, when the page is
+    /// longer than the window.
+    fn thumb(&self, page_h: f32) -> Option<(f32, f32)> {
+        if page_h <= self.view.1 {
+            return None;
+        }
+        let bar_h = (self.view.1 * self.view.1 / page_h).max(32.0);
+        Some(((self.scroll / (page_h - self.view.1)) * (self.view.1 - bar_h), bar_h))
+    }
+
+    /// Scroll so the thumb's top is at `top`.
+    fn drag_thumb(&mut self, top: f32) {
+        let h = self.layout().height;
+        let Some((_, bar_h)) = self.thumb(h) else { return };
+        let room = (self.view.1 - bar_h).max(1.0);
+        self.set_scroll(top / room * (h - self.view.1));
+    }
+
+    fn set_scroll(&mut self, to: f32) {
+        self.combo = None;
+        self.scroll = to;
+        self.clamp_scroll();
+        self.place_fields();
+        self.damaged = true;
+    }
+
     fn clamp_scroll(&mut self) {
         let h = self.layout().height;
         self.scroll = self.scroll.clamp(0.0, (h - self.view.1).max(0.0));
@@ -910,8 +952,40 @@ impl Settings {
         matches!(self.hovered, Some(Hit::Row(b, r, Part::Field)) if matches!(self.row(b, r).map(|x| &x.below), Some(Control::Line { .. })))
     }
 
-    pub fn pointer_motion(&mut self, at: Point) {
+    /// The pointer moved to `at`; `finger`: it's a finger on a touchscreen.
+    pub fn pointer_motion(&mut self, at: Point, finger: bool) {
+        let near_bar = |p: Option<Point>| p.is_some_and(|p| p.x >= self.view.0 - BAR_REACH);
+        if near_bar(self.pointer) != near_bar(Some(at)) {
+            self.damaged = true; // (the bar widens under the pointer)
+        }
         self.pointer = Some(at);
+        self.finger = finger;
+        if let Some(grab) = self.bar_drag {
+            self.drag_thumb(at.y - grab);
+            return;
+        }
+        if let Some((start, scroll0, panning)) = self.pan {
+            let d = at - start;
+            if !panning && d.y.abs() > PAN_SLOP && d.y.abs() > d.x.abs() {
+                // A finger moving up or down scrolls: it's not a tap any more.
+                self.pan = Some((start, scroll0, true));
+                self.pressed = None;
+                self.sliding = None;
+                self.hover(None);
+            } else if !panning
+                && d.x.abs() > PAN_SLOP
+                && let Some(Hit::Row(b, r, Part::Control)) = self.pressed
+                && matches!(self.row(b, r).map(|x| &x.control), Some(Control::Slider { .. }))
+            {
+                // Across a slider: it slides.
+                self.pan = None;
+                self.sliding = Some((b, r));
+            }
+            if let Some((_, _, true)) = self.pan {
+                self.set_scroll(scroll0 - d.y);
+                return;
+            }
+        }
         if let Some((b, r)) = self.sliding {
             self.slide_to(b, r, at.x, false);
             return;
@@ -952,6 +1026,24 @@ impl Settings {
             return;
         }
         if !pressed {
+            if self.bar_drag.take().is_some() {
+                self.damaged = true;
+                return;
+            }
+            if let Some((_, _, panning)) = self.pan.take() {
+                if panning {
+                    return;
+                }
+                // A tap on a slider puts it there.
+                if let Some(Hit::Row(b, r, Part::Control)) = self.pressed
+                    && self.sliding.is_none()
+                    && matches!(self.row(b, r).map(|x| &x.control), Some(Control::Slider { .. }))
+                {
+                    self.pressed = None;
+                    self.slide_to(b, r, at.x, true);
+                    return;
+                }
+            }
             if let Some((b, r)) = self.sliding.take() {
                 self.slide_to(b, r, at.x, true);
             }
@@ -965,7 +1057,21 @@ impl Settings {
             return;
         }
         self.place_fields();
+        // The scroll bar: its thumb is dragged; elsewhere on it, the thumb
+        // jumps there (centred on the pointer) and is dragged from there.
+        if at.x >= self.view.0 - BAR_REACH
+            && let Some((top, bar_h)) = self.thumb(self.layout().height)
+        {
+            let grab = if (top..top + bar_h).contains(&at.y) { at.y - top } else { bar_h / 2.0 };
+            self.combo = None;
+            self.bar_drag = Some(grab);
+            self.drag_thumb(at.y - grab);
+            return;
+        }
         let hit = self.hit_at(at);
+        if self.finger {
+            self.pan = Some((at, self.scroll, false));
+        }
         // A press elsewhere: the dropdown closes, the field being typed in is done.
         if let Some(combo) = self.combo
             && !matches!(hit, Some(Hit::Option(_)))
@@ -998,7 +1104,8 @@ impl Settings {
                 }
                 self.damaged = true;
             }
-            Some(Hit::Row(b, r, Part::Control)) if matches!(self.row(b, r).map(|x| &x.control), Some(Control::Slider { .. })) => {
+            // (a finger on a slider: sliding or scrolling, as it moves)
+            Some(Hit::Row(b, r, Part::Control)) if !self.finger && matches!(self.row(b, r).map(|x| &x.control), Some(Control::Slider { .. })) => {
                 self.sliding = Some((b, r));
                 self.slide_to(b, r, at.x, false);
             }
@@ -1367,11 +1474,10 @@ impl Settings {
         }
         p.restore();
         // A thin scroll bar, when the page is longer than the window.
-        if layout.height > self.view.1 {
-            let frac = self.view.1 / layout.height;
-            let bar_h = (self.view.1 * frac).max(32.0);
-            let top = (self.scroll / (layout.height - self.view.1)) * (self.view.1 - bar_h);
-            p.fill_rounded_rect(Rect::new(self.view.0 - 6.0, top + 2.0, 4.0, bar_h - 4.0), 2.0, c.line);
+        if let Some((top, bar_h)) = self.thumb(layout.height) {
+            let wide = self.bar_drag.is_some() || self.pointer.is_some_and(|p| p.x >= self.view.0 - BAR_REACH);
+            let (x, w) = if wide { (self.view.0 - 8.0, 6.0) } else { (self.view.0 - 6.0, 4.0) };
+            p.fill_rounded_rect(Rect::new(x, top + 2.0, w, bar_h - 4.0), w / 2.0, if self.bar_drag.is_some() { c.muted } else { c.line });
         }
         // The sidebar.
         p.fill_rect(Rect::new(0.0, 0.0, NAV_W, self.view.1), c.ink);
@@ -1644,6 +1750,44 @@ mod tests {
         s.show_page(4);
         s.scroll_by(-100.0);
         assert!(s.scroll > 0.0 && s.scroll <= s.layout().height);
+    }
+
+    #[test]
+    fn scrolling_by_finger_and_by_the_bar() {
+        let mut s = settings();
+        let long = (0..s.pages.len()).max_by(|&a, &b| {
+            s.show_page(a);
+            let ha = s.layout().height;
+            s.show_page(b);
+            ha.total_cmp(&s.layout().height)
+        });
+        s.show_page(long.unwrap());
+        let h = s.layout().height;
+        assert!(h > s.view.1, "a page longer than the window");
+        let cfg = s.cfg.clone();
+        // A finger dragged up the page scrolls it, and clicks nothing.
+        let at = Point::new(400.0, 400.0);
+        s.pointer_motion(at, true);
+        s.button(Button::Left, true, at, 0);
+        for y in [395.0, 380.0, 300.0] {
+            s.pointer_motion(Point::new(402.0, y), true);
+        }
+        s.button(Button::Left, false, Point::new(402.0, 300.0), 0);
+        assert_eq!(s.scroll, 100.0);
+        assert!(s.cfg == cfg && s.requests.is_empty(), "the drag clicked something");
+        // The thumb dragged down the bar: to the end at the bottom.
+        let (top, _) = s.thumb(h).unwrap();
+        let x = s.view.0 - 4.0;
+        s.pointer_motion(Point::new(x, top + 5.0), false);
+        s.button(Button::Left, true, Point::new(x, top + 5.0), 0);
+        s.pointer_motion(Point::new(x, s.view.1 + 50.0), false);
+        s.button(Button::Left, false, Point::new(x, s.view.1 + 50.0), 0);
+        assert_eq!(s.scroll, h - s.view.1);
+        // A click above the thumb: it jumps there (to the top here).
+        s.pointer_motion(Point::new(x, 2.0), false);
+        s.button(Button::Left, true, Point::new(x, 2.0), 0);
+        s.button(Button::Left, false, Point::new(x, 2.0), 0);
+        assert_eq!(s.scroll, 0.0);
     }
 
     #[test]
