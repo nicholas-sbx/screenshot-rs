@@ -19,6 +19,10 @@ use crate::ui::session::{Request, Screen, Session, Setup};
 /// desktop (the active window, where the pointer is).
 const DESKTOP_WAIT: Duration = Duration::from_millis(1500);
 
+/// How long the overlay waits for them (it shows meanwhile, and the windows
+/// light up under the pointer once they're known: KWin can take seconds).
+const OVERLAY_DESKTOP_WAIT: Duration = Duration::from_secs(15);
+
 /// What to capture.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -167,8 +171,9 @@ impl App {
             let (tx, rx) = mpsc::channel();
             let waker = self.waker.clone();
             let all = self.cfg.detect_all_windows;
+            let wait = if instant { DESKTOP_WAIT } else { OVERLAY_DESKTOP_WAIT };
             let _ = std::thread::Builder::new().name("flatshot-windows".into()).spawn(move || {
-                let _ = tx.send(crate::desktop::windows::query(DESKTOP_WAIT, all));
+                let _ = tx.send(crate::desktop::windows::query(wait, all));
                 waker();
             });
             self.desktop_rx = Some(rx);

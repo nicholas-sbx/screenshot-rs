@@ -10,6 +10,11 @@
 //! CaptureActiveWindow answers 300 x 200 premultiplied ARGB32 (6): opaque
 //! blue inside, a clear 20-pixel border (the window's "shadow"); it prints
 //! the options it was given.
+//!
+//! org.kde.kwin.Scripting runs no JavaScript: a script loaded and started
+//! has its callDBus target sent a report of one window, 400 x 300 at
+//! (200, 150), after FAKE_KWIN_SCRIPT_DELAY_MS (default 2500), from a
+//! second connection of this process (KWin's scripts may call from one).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -86,6 +91,47 @@ impl FakeKWin {
     }
 }
 
+struct FakeScripting {
+    scripts: std::sync::Mutex<Vec<String>>,
+}
+
+/// The first two quoted strings after `callDBus(`: the service and path.
+fn target(script: &str) -> Option<(String, String)> {
+    let rest = &script[script.find("callDBus(")? + 9..];
+    let mut parts = rest.split('"').skip(1).step_by(2);
+    Some((parts.next()?.to_string(), parts.next()?.to_string()))
+}
+
+#[zbus::interface(name = "org.kde.kwin.Scripting")]
+impl FakeScripting {
+    #[zbus(name = "loadScript")]
+    fn load_script(&self, path: &str, _name: &str) -> i32 {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        self.scripts.lock().unwrap().push(text);
+        1
+    }
+
+    #[zbus(name = "unloadScript")]
+    fn unload_script(&self, _name: &str) -> bool {
+        true
+    }
+
+    #[zbus(name = "start")]
+    fn start(&self) {
+        let delay: u64 = std::env::var("FAKE_KWIN_SCRIPT_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2500);
+        for script in self.scripts.lock().unwrap().drain(..) {
+            let Some((service, path)) = target(&script) else { continue };
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                let conn = zbus::blocking::Connection::session().unwrap();
+                let report = r#"{"windows": [[200, 150, 400, 300, "Fake window", "fake"]], "active": 0, "cursor": [400, 300]}"#;
+                let r = conn.call_method(Some(service.as_str()), path.as_str(), Some("org.flatshot.Windows"), "report", &(report,));
+                println!("script reported: {}", r.map(|_| "ok".to_string()).unwrap_or_else(|e| e.to_string()));
+            });
+        }
+    }
+}
+
 fn main() {
     let screens = std::env::var("FAKE_KWIN_SCREENS")
         .unwrap_or_default()
@@ -102,6 +148,8 @@ fn main() {
         .name("org.kde.KWin")
         .unwrap()
         .serve_at("/org/kde/KWin/ScreenShot2", FakeKWin { screens })
+        .unwrap()
+        .serve_at("/Scripting", FakeScripting { scripts: Default::default() })
         .unwrap()
         .build()
         .unwrap();

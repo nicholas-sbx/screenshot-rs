@@ -240,6 +240,27 @@ SH
 chmod +x "$work/window.sh"
 dbus-run-session -- "$work/window.sh" 2>/dev/null || true
 expect_size "active window from KWin" "$work/window.png" "300 200"
+
+# KDE's windows under the pointer: KWin's script reports them late (after
+# 2.5 s, from another connection of its own); once known, a click on one
+# captures it.
+cat > "$work/hover.sh" <<SH
+#!/usr/bin/env bash
+unset SWAYSOCK
+FAKE_KWIN_SCREENS=HEADLESS-1:1600x1000 $EX/fake_kwin > "$work/kwin-hover.log" 2>&1 &
+sleep 0.5
+XDG_CURRENT_DESKTOP=KDE $BIN -v -o "$work/hovered.png" --no-copy > "$work/hover.log" 2>&1 &
+pid=\$!
+for _ in \$(seq 100); do grep -q "windows known" "$work/hover.log" && break; sleep 0.1; done
+$EX/inject move 400 300 sleep 200 click 400 300
+for _ in \$(seq 50); do kill -0 \$pid 2>/dev/null || break; sleep 0.1; done
+kill \$pid 2>/dev/null
+kill %1 2>/dev/null
+SH
+chmod +x "$work/hover.sh"
+dbus-run-session -- "$work/hover.sh" 2>/dev/null || true
+grep -q "1 window" "$work/hover.log" && pass "KWin's windows known, late" || { fail "KWin's windows never came"; tail -n 15 "$work/hover.log" "$work/kwin-hover.log" | sed 's/^/    /'; }
+expect_size "a click on a window captures it" "$work/hovered.png" "400 300"
 python3 - "$work/window.png" <<'PY' && pass "the window's shadow kept transparent" || fail "the window's shadow isn't transparent"
 import sys, zlib
 d = open(sys.argv[1], "rb").read()
