@@ -891,7 +891,7 @@ fn stacking_across_monitors(tmp: &Path, out: &Option<PathBuf>) -> R {
     s.set_color(2);
     let second = s.st.color().premul() | 0xFF00_0000;
     s.pointer_enter(1, Point::new(20.0, 320.0));
-    drag(&mut s, 1, Point::new(20.0, 320.0), Point::new(-40.0, 380.0), 0); // (right, reaching left)
+    drag(&mut s, 1, Point::new(20.0, 320.0), Point::new(-40.0, 440.0), 0); // (right, reaching left, and out below)
     let (l, r) = (frame(&mut s, 0)?, frame(&mut s, 1)?);
     check!(first != second && l.pixel(790, 350) == second && r.pixel(10, 350) == second, "the later drawing isn't on top on both monitors");
     check!(l.pixel(720, 395) == first && r.pixel(90, 395) == first);
@@ -906,6 +906,20 @@ fn stacking_across_monitors(tmp: &Path, out: &Option<PathBuf>) -> R {
     let edge = Point::new(a.geometry().right() + a.reach() + 4.0 - 800.0, a.geometry().center().y);
     s.pointer_motion(1, edge, 0, false);
     check!(s.cursor(1) == CursorShape::ResizeEW, "{:?} over the handle on the other monitor", s.cursor(1));
+    // Moved (from the other monitor), it comes to the top: on both monitors.
+    drag(&mut s, 1, Point::new(80.0, 395.0), Point::new(80.0, 390.0), 0);
+    let (l, r) = (frame(&mut s, 0)?, frame(&mut s, 1)?);
+    check!(l.pixel(790, 350) == first && r.pixel(10, 350) == first, "the moved drawing isn't on top on both monitors");
+    // Restyled (picked where it sticks out), the other one comes back on top.
+    click(&mut s, 0, Point::new(790.0, 420.0), 0);
+    check!(s.overlays[1].selection.current(&s.overlays[1].annotations).is_some(), "the other drawing wasn't picked");
+    s.set_color(4);
+    let third = s.st.color().premul() | 0xFF00_0000;
+    let (l, r) = (frame(&mut s, 0)?, frame(&mut s, 1)?);
+    check!(third != first && l.pixel(790, 350) == third && r.pixel(10, 350) == third, "the restyled drawing isn't on top on both monitors");
+    // (the first one again, for its trash button)
+    click(&mut s, 1, Point::new(80.0, 390.0), 0);
+    check!(s.overlays[0].selection.current(&s.overlays[0].annotations).is_some());
     // Its trash button deletes it (where it shows: just off its frame's top right).
     let _ = frame(&mut s, 0)?;
     save_png(&frame(&mut s, 1)?, out, "overlay-trash.png")?;
