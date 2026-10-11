@@ -97,20 +97,28 @@ pub fn supported() -> bool {
 
 /// Where the script's report arrives.
 struct Report {
-    tx: std::sync::Mutex<Option<mpsc::Sender<String>>>,
-    kwin: String,
+    /// (who sent it, and the report: weighed by the thread asking)
+    tx: std::sync::Mutex<mpsc::SyncSender<(String, String)>>,
+}
+
+/// The process on the other end of D-Bus connection `name`, as the bus says.
+fn pid_of(conn: &zbus::blocking::Connection, name: &str) -> Option<u32> {
+    conn.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "GetConnectionUnixProcessID", &(name,))
+        .ok()?
+        .body()
+        .deserialize::<u32>()
+        .ok()
 }
 
 #[zbus::interface(name = "org.flatshot.Windows")]
 impl Report {
+    // (named as the script calls it: zbus would make it "Report")
+    #[zbus(name = "report")]
     fn report(&self, #[zbus(header)] hdr: zbus::message::Header<'_>, json: String) {
-        // Only KWin's word counts: anyone on the bus could call this.
-        if hdr.sender().map(|s| s.as_str()) != Some(self.kwin.as_str()) {
-            return;
-        }
-        if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = tx.send(json);
-        }
+        // (anyone on the bus could call this: who it was is checked by the
+        // asking thread, not here, where asking the bus would hold it up)
+        let Some(sender) = hdr.sender().map(|s| s.to_string()) else { return };
+        let _ = self.tx.lock().unwrap_or_else(|e| e.into_inner()).try_send((sender, json));
     }
 }
 
@@ -125,8 +133,9 @@ fn kwin(timeout: Duration, all: bool) -> Option<Desktop> {
     let me = conn.unique_name()?.to_string();
     let token = util::random_hex(6);
     let path = format!("/flatshot/windows/w{token}");
-    let (tx, rx) = mpsc::channel();
-    let report = Report { tx: std::sync::Mutex::new(Some(tx)), kwin: owner };
+    let (tx, rx) = mpsc::sync_channel(8);
+    let kwin_pid = pid_of(conn, &owner);
+    let report = Report { tx: std::sync::Mutex::new(tx) };
     conn.object_server().at(path.as_str(), report).ok()?;
     // The script lives in our private folder: nobody else can change it
     // before KWin reads it.
@@ -142,7 +151,20 @@ fn kwin(timeout: Duration, all: bool) -> Option<Desktop> {
         write_private(&file, &script).ok()?;
         conn.call_method(Some(KWIN), "/Scripting", Some("org.kde.kwin.Scripting"), "loadScript", &(file.to_string_lossy().as_ref(), name.as_str())).ok()?;
         conn.call_method(Some(KWIN), "/Scripting", Some("org.kde.kwin.Scripting"), "start", &()).ok()?;
-        rx.recv_timeout(timeout).ok()
+        // Only KWin's word counts: its own connection, or another of its
+        // process's (its scripts may call from one), as the bus vouches.
+        let until = std::time::Instant::now() + timeout;
+        let mut got = None;
+        while let Ok((sender, json)) = rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+            if sender == owner || kwin_pid.is_some() && pid_of(conn, &sender) == kwin_pid {
+                got = Some(json);
+                break;
+            }
+        }
+        if got.is_none() {
+            crate::timing::log(format!("windows: KWin's script didn't report within {} ms", timeout.as_millis()));
+        }
+        got
     })();
     let _ = conn.call_method(Some(KWIN), "/Scripting", Some("org.kde.kwin.Scripting"), "unloadScript", &(name.as_str(),));
     let _ = std::fs::remove_file(&file);

@@ -256,6 +256,8 @@ pub struct Editor {
     asking: Option<Option<Answer>>,
     closing: bool,
     dirty: bool,
+    /// parts to repaint (window logical), short of all of it
+    touched: Vec<Rect>,
     damaged: bool,
     layer: RefCell<Option<Layer>>,
     shapes_version: u64,
@@ -373,6 +375,7 @@ impl Editor {
             asking: None,
             closing: false,
             dirty: false,
+            touched: Vec::new(),
             damaged: true,
             layer: RefCell::new(None),
             shapes_version: 0,
@@ -446,7 +449,20 @@ impl Editor {
     }
 
     pub fn damage(&mut self) -> Damage {
-        if std::mem::take(&mut self.damaged) { Damage::full() } else { Damage::new() }
+        let touched = std::mem::take(&mut self.touched);
+        if std::mem::take(&mut self.damaged) {
+            return Damage::full();
+        }
+        let mut d = Damage::new();
+        for r in touched {
+            d.add_logical(r, self.scale);
+        }
+        d
+    }
+
+    /// Repaint `r` (window logical).
+    pub fn touch(&mut self, r: Rect) {
+        self.touched.push(r);
     }
 
     fn canvas_rect(&self) -> Rect {
@@ -1073,7 +1089,15 @@ impl Editor {
         if let Some(t) = shape.as_text_mut() {
             t.editing = false;
         }
-        if shape.is_valid() && shape.text_changed() {
+        // A text left blank goes (one typed again: deleted, as a step undo brings back).
+        if shape.is_blank_text() {
+            if let Some(i) = replaces
+                && let Some((_, orig)) = self.shapes.get(i)
+            {
+                let gone = Shape::removed(orig, i);
+                self.commit(gone);
+            }
+        } else if shape.is_valid() && shape.text_changed() {
             self.commit(shape);
         } else if let Some(i) = replaces
             && let Some((_, orig)) = self.shapes.get_mut(i)
@@ -1423,9 +1447,9 @@ impl Editor {
             self.damaged = true;
             return;
         }
-        if self.commit_text() && self.tool == Tool::Text && self.text_at(pic).is_none() {
-            return; // (the first click finishes the text being typed)
-        }
+        // (with the text tool, a click elsewhere finishes the text being
+        // typed and starts another there)
+        self.commit_text();
         match self.tool {
             Tool::Text => {
                 let shape = match self.text_at(pic) {
@@ -1558,6 +1582,10 @@ impl Editor {
             let mut m = Mods::from_keys(mods);
             m.moving = false; // (moving needs the pointer to move)
             s.extend(at, m);
+            self.damaged = true;
+        }
+        if self.selection.dragging() {
+            self.with_selection(|sel, d| sel.modifiers(d, mods));
             self.damaged = true;
         }
     }
@@ -1790,6 +1818,14 @@ impl Editor {
     /// Where the caret of the text being typed is (window logical), for
     /// the input method.
     pub fn text_input(&self) -> Option<Rect> {
+        if let Some(r) = self.picker.as_ref().and_then(|p| p.caret_rect()) {
+            return Some(r);
+        }
+        for f in [&self.width_field, &self.height_field, &self.panel.name] {
+            if f.focused {
+                return Some(f.caret_rect());
+            }
+        }
         let s = self.text_edit.as_ref()?;
         let r = s.as_text()?.caret_rect(s.size);
         let c = self.canvas_rect();

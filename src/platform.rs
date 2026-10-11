@@ -240,6 +240,12 @@ impl Display {
     }
 
     /// The surface the keyboard is on.
+    /// Bring `owner`'s window to the front, focused; `token`: the
+    /// desktop's activation token for the click that asked, if it gave one.
+    pub fn activate(&mut self, owner: Owner, token: Option<String>) {
+        each!(self, d => d.activate(owner, token))
+    }
+
     pub fn keyboard_owner(&self) -> Option<Owner> {
         each!(self, d => d.keyboard_owner())
     }

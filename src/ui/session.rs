@@ -438,6 +438,9 @@ impl Session {
     /// Where the caret of the text being typed on overlay `o` is (for an
     /// input method's candidate window), if one is.
     pub fn text_input(&self, o: usize) -> Option<Rect> {
+        if let Some(p) = self.focused_picker() {
+            return if p == o { self.overlays[p].picker.as_ref()?.caret_rect() } else { None };
+        }
         let (eo, shape) = self.st.text_edit.as_ref()?;
         (*eo == o).then(|| shape.as_text().map(|t| t.caret_rect(shape.size)))?
     }
@@ -668,6 +671,23 @@ impl Session {
             return;
         }
         for ov in &mut self.overlays {
+            let ov = &mut *ov;
+            ov.selection.modifiers(&mut ov.annotations, mods);
+        }
+        let spans = self.st.spans;
+        let mut moved = None;
+        for o in 0..self.overlays.len() {
+            let bounds = self.drag_bounds(o);
+            let ov = &mut self.overlays[o];
+            // The area being dragged out: squared or centred as the keys say.
+            if let Some(d) = &mut ov.sel_origin {
+                let mut m = Mods::from_keys(mods);
+                m.moving = false;
+                let at = d.pointer;
+                d.extend(at, m);
+                ov.sel_rect = Some(clip_selection(d.rect(), bounds));
+                moved = Some(o);
+            }
             if let Some(shape) = &mut ov.active
                 && let Some(d) = shape.drag()
             {
@@ -676,6 +696,11 @@ impl Session {
                 m.moving = false; // (moving needs the pointer to move)
                 shape.extend(at, m);
             }
+        }
+        if let Some(o) = moved
+            && spans
+        {
+            self.selection_moved(o, None);
         }
     }
 
@@ -1438,6 +1463,13 @@ impl Session {
         p + Point::new((a.x - b.x) as f32, (a.y - b.y) as f32)
     }
 
+    /// The overlay whose monitor `pos` (on overlay `o`) is over.
+    fn overlay_under(&self, o: usize, pos: Point) -> Option<usize> {
+        let g = self.overlays[o].output.rect;
+        let at = IPoint::new(pos.x.floor() as i32 + g.x, pos.y.floor() as i32 + g.y);
+        self.overlays.iter().position(|ov| ov.output.rect.contains(at))
+    }
+
     /// Each overlay, topmost drawings first (the other overlays' are painted
     /// over this one's own), with `pos` (on `o`) in its coordinates.
     fn topmost_first(&self, o: usize, pos: Point) -> Vec<(usize, Point)> {
@@ -1506,12 +1538,16 @@ impl Session {
                 live.extend(moved_here(k, s));
             }
         }
+        // (the text being typed as it is: its box, caret and what's selected)
         if let Some((k, s)) = &self.st.text_edit
             && *k != o
         {
-            live.extend(moved_here(*k, s));
+            let s = s.shifted(offsets[*k]);
+            live.extend(s.bounds().intersects(&here).then_some(s));
         }
         self.overlays[o].foreign_live = live;
+        let frame = others.iter().find_map(|&k| self.overlays[k].selection.framed(&self.overlays[k].annotations).map(|s| s.shifted(offsets[k])));
+        self.overlays[o].foreign_frame = frame.filter(|s| Selection::frame_bounds_of(s, 1.0).intersects(&here));
     }
 
     // The select tool: one drawing selected at a time, on one monitor.
@@ -1599,7 +1635,15 @@ impl Session {
             t.editing = false;
         }
         if o < self.overlays.len() {
-            if shape.is_valid() && shape.text_changed() {
+            // A text left blank goes (one typed again: deleted, as a step undo brings back).
+            if shape.is_blank_text() {
+                if let Some(i) = replaces
+                    && let Some(orig) = self.overlays[o].annotations.get(i)
+                {
+                    let gone = Shape::removed(orig, i);
+                    self.commit_shape(o, gone);
+                }
+            } else if shape.is_valid() && shape.text_changed() {
                 self.commit_shape(o, shape);
             } else if let Some(i) = replaces
                 && let Some(orig) = self.overlays[o].annotations.get_mut(i)
@@ -1740,8 +1784,8 @@ impl Session {
         self.timers.push((Instant::now() + after, t));
     }
 
-    /// Look for codes on each monitor's picture, one after another, in the
-    /// background; once a capture (later calls do nothing).
+    /// Look for codes on each monitor's picture, one after another (the
+    /// pointer's first), in the background; once a capture (later calls do nothing).
     fn start_scan(&mut self) {
         if !std::mem::take(&mut self.scan_pending) || self.done {
             return;
@@ -1749,7 +1793,10 @@ impl Session {
         self.timers.retain(|x| x.1 != Timer::Scan);
         self.scans_left = self.overlays.len();
         self.refresh_toolbars();
-        let pictures: Vec<(usize, Arc<Image>)> = self.overlays.iter().map(|o| (o.index, o.plain.clone().unwrap_or_else(|| o.base.clone()))).collect();
+        let mut pictures: Vec<(usize, Arc<Image>)> = self.overlays.iter().map(|o| (o.index, o.plain.clone().unwrap_or_else(|| o.base.clone()))).collect();
+        // The monitor being looked at first.
+        let first = self.st.pointer_overlay;
+        pictures.sort_by_key(|(o, _)| Some(*o) != first);
         let (tx, waker, cancelled) = (self.tx.clone(), self.waker.clone(), self.cancelled.clone());
         let started = std::thread::Builder::new().name("flatshot-scan".into()).spawn(move || {
             for (o, img) in pictures {
@@ -1995,6 +2042,28 @@ impl Session {
         }
         self.area_moved(o);
         self.refresh();
+    }
+
+    /// The recording area on `o`, moved over onto another monitor: it's that
+    /// monitor's now (most of it is there), with its handles and panel.
+    fn rehome_area(&mut self, o: usize) {
+        let Some(r) = self.overlays[o].rec_rect else { return };
+        let g = self.overlays[o].output.rect.to_f();
+        let area = r.translated(g.top_left());
+        let size = |k: usize| {
+            let i = area.intersected(&self.overlays[k].output.rect.to_f());
+            i.w.max(0.0) * i.h.max(0.0)
+        };
+        let Some(k) = (0..self.overlays.len()).max_by(|&a, &b| size(a).total_cmp(&size(b))).filter(|&k| k != o && size(k) > size(o)) else { return };
+        let to = self.overlays[k].output.rect.to_f();
+        let from = &mut self.overlays[o];
+        from.rec_rect = None;
+        from.rec_window = None;
+        from.panel = None;
+        let ov = &mut self.overlays[k];
+        ov.rec_rect = Some(area.translated(-to.top_left()));
+        ov.span_rect = None;
+        self.area_moved(k);
     }
 
     /// Move or resize the recording area; a resized edge goes to `snapped`
@@ -2391,16 +2460,14 @@ impl Session {
                 {
                     let i = t.index_at(local, size);
                     t.edit.place(i, mods & keyseq::SHIFT != 0);
-                    if eo == o {
-                        self.overlays[o].text_drag = Some((pos, t.pos));
-                    }
+                    self.overlays[o].text_drag = Some((pos, t.pos));
                     return;
                 }
             }
         }
-        if self.commit_text() && self.st.tool == Tool::Text && self.text_at_any(o, pos).is_none() {
-            return; // the first click just finishes the text being typed
-        }
+        // (with the text tool, a click elsewhere finishes the text being
+        // typed and starts another there)
+        self.commit_text();
         let tool = self.st.tool;
         if tool == Tool::Record && self.st.countdown.is_some() {
             return;
@@ -2414,7 +2481,7 @@ impl Session {
         } else if matches!(tool, Tool::Region | Tool::Record) {
             self.disarm();
             let pos = self.snapped(o, pos, mods);
-            self.overlays[o].sel_origin = Some(pos);
+            self.overlays[o].sel_origin = Some(crate::ui::shapes::Drag::new(pos, false));
             self.overlays[o].sel_rect = Some(Rect::new(pos.x, pos.y, 0.0, 0.0));
             self.refresh();
         } else if tool == Tool::Text {
@@ -2427,9 +2494,7 @@ impl Session {
                     if let Some(t) = s.as_text_mut() {
                         let at = t.index_at(local, size);
                         t.edit.place(at, false);
-                        if k == o {
-                            self.overlays[o].text_drag = Some((pos, t.pos));
-                        }
+                        self.overlays[o].text_drag = Some((pos, t.pos));
                     }
                     (k, s)
                 }
@@ -2455,7 +2520,10 @@ impl Session {
 
     fn canvas_motion(&mut self, o: usize, pos: Point, mods: i32) {
         self.overlays[o].cursor_pos = Some(pos);
-        self.activate(o);
+        // (a drag keeps the pointer on the overlay it started on, wherever
+        // it goes: the toolbar follows it onto the monitor it's over)
+        let under = self.overlay_under(o, pos).unwrap_or(o);
+        self.activate(under);
         if let Some(k) = self.drag_owner.filter(|&k| k < self.overlays.len() && self.overlays[k].selection.dragging()) {
             let local = self.to_overlay(o, k, pos);
             let ov = &mut self.overlays[k];
@@ -2467,23 +2535,26 @@ impl Session {
         let snap = if selecting && self.st.snap_edges { Some(self.snapped(o, pos, mods)) } else { None };
         self.overlays[o].snap_point = snap;
         let bounds = self.drag_bounds(o);
-        let editing_here = self.st.text_edit.as_ref().is_some_and(|(eo, _)| *eo == o);
+        // (the text being typed can be another monitor's, reaching here)
+        let text_at = self.st.text_edit.as_ref().filter(|(eo, _)| *eo < self.overlays.len()).map(|(eo, _)| self.to_overlay(o, *eo, pos));
         let ov = &mut self.overlays[o];
-        if let Some(origin) = ov.sel_origin {
-            let end = snap.unwrap_or(pos);
-            ov.sel_rect = Some(clip_selection(Rect::from_points(origin, end), bounds));
+        if let Some(d) = &mut ov.sel_origin {
+            d.extend(snap.unwrap_or(pos), Mods::from_keys(mods));
+            ov.sel_rect = Some(clip_selection(d.rect(), bounds));
             ov.hover_window = None;
             if self.st.spans {
                 self.selection_moved(o, Some(pos));
             }
         } else if ov.rec_drag.is_some() {
             self.drag_area(o, pos, snap, mods & keyseq::CTRL != 0);
-        } else if ov.text_drag.is_some() && editing_here {
+        } else if ov.text_drag.is_some()
+            && let Some(local) = text_at
+        {
             // Dragging in the text selects (only the select tool moves text).
             if let Some((_, shape)) = &mut self.st.text_edit {
                 let size = shape.size;
                 if let Some(t) = shape.as_text_mut() {
-                    let i = t.index_at(pos, size);
+                    let i = t.index_at(local, size);
                     t.edit.place(i, true);
                 }
             }
@@ -2554,6 +2625,7 @@ impl Session {
             if self.overlays[o].rec_rect.is_some_and(|r| r.w < 8.0 || r.h < 8.0) {
                 self.overlays[o].rec_rect = None;
             }
+            self.rehome_area(o);
             self.refresh();
         } else if let Some(shape) = self.overlays[o].active.take()
             && shape.is_valid()

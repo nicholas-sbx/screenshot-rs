@@ -114,7 +114,11 @@ pub struct Overlay {
     pub foreign: Vec<Shape>,
     pub foreign_key: u64,
     pub foreign_live: Vec<Shape>,
-    pub sel_origin: Option<Point>,
+    /// another monitor's selected drawing (here), for its frame
+    pub foreign_frame: Option<Shape>,
+    /// the area being dragged out (Shift: square, Ctrl: from its middle,
+    /// Alt: moved), as a rectangle's drag is
+    pub sel_origin: Option<crate::ui::shapes::Drag>,
     pub sel_rect: Option<Rect>,
     pub cursor_pos: Option<Point>,
     /// (index in the session's codes, the code's corners here, logical)
@@ -167,6 +171,7 @@ impl Overlay {
             foreign: Vec::new(),
             foreign_key: 0,
             foreign_live: Vec::new(),
+            foreign_frame: None,
             sel_origin: None,
             sel_rect: None,
             cursor_pos: None,
@@ -467,6 +472,12 @@ impl Overlay {
             let key = hash(&(rect_key(r), self.selection.current(&self.annotations), st.theme_key));
             elements.push(Element { id: Id::SelectionFrame, bounds: self.dev(r, 2), key });
         }
+        if st.tool == Tool::Select
+            && let Some(s) = &self.foreign_frame
+        {
+            let r = Selection::frame_bounds_of(s, 1.0);
+            elements.push(Element { id: Id::ForeignFrame, bounds: self.dev(r, 2), key: hash(&(shape_key(s, 0), st.theme_key)) });
+        }
         if let Some((o, s)) = &st.text_edit
             && *o == self.index
         {
@@ -565,6 +576,7 @@ impl Overlay {
                 picker.hex.edit.cursor,
                 picker.hex.edit.anchor,
                 picker.hex.focused,
+                picker.hex.focused && crate::ui::caret::shown(),
                 &picker.ptr,
                 st.theme_key,
             ));
@@ -596,7 +608,8 @@ impl Overlay {
             return Some(sp); // a drag from another monitor is here now
         }
         let pos = self.cursor_pos?;
-        let allowed = !self.over_floating(24.0, self.chips_shown(st));
+        // (hidden right over a panel only: near one, it still shows)
+        let allowed = !self.over_floating(0.0, self.chips_shown(st));
         ((picking && st.cfg.show_loupe || st.eyedropper) && allowed && self.rect().contains(pos) && pos.x < self.width() && pos.y < self.height())
             .then_some(pos)
     }
@@ -751,6 +764,9 @@ impl Overlay {
         let mut p = Painter::for_region(target.pixmap_mut(), self.dpr, origin);
         if st.tool == Tool::Select {
             self.selection.paint_frame(&self.annotations, &mut p, 1.0);
+            if let Some(s) = &self.foreign_frame {
+                Selection::paint_frame_of(s, &mut p, 1.0);
+            }
         }
         let picking = rtool && self.rec_rect.is_none();
         if rtool {
@@ -1407,6 +1423,7 @@ enum Id {
     Active,
     Moving,
     SelectionFrame,
+    ForeignFrame,
     Foreign(usize),
     ForeignLive(usize),
     TextEdit,
@@ -1470,6 +1487,7 @@ fn shape_key(s: &Shape, index: usize) -> u64 {
             t.edit.cursor.hash(&mut h);
             t.edit.anchor.hash(&mut h);
             t.editing.hash(&mut h);
+            (t.editing && crate::ui::caret::shown()).hash(&mut h);
             ((t.pos.x * 64.0) as i32, (t.pos.y * 64.0) as i32).hash(&mut h);
         }
         Kind::Counter { number, .. } => number.hash(&mut h),

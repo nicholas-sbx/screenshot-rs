@@ -54,6 +54,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_SKIP_TASKBAR,
         _NET_WM_STATE_SKIP_PAGER,
         _NET_WM_MOVERESIZE,
+        _NET_ACTIVE_WINDOW,
         _MOTIF_WM_HINTS,
         _XKB_RULES_NAMES,
         CLIPBOARD,
@@ -889,7 +890,8 @@ impl X11 {
         let names: &[&'static str] = match shape {
             CursorShape::Crosshair => &["crosshair"],
             CursorShape::Text => &["text", "xterm"],
-            CursorShape::Move => &["move", "fleur"],
+            // (the four arrows: "move" is the drag and drop arrow in many themes)
+            CursorShape::Move => &["all-scroll", "size_all", "fleur"],
             CursorShape::Hand => &["pointer", "hand2"],
             CursorShape::Arrow => &["default", "left_ptr"],
             CursorShape::ResizeNS => &["ns-resize", "sb_v_double_arrow"],
@@ -923,6 +925,17 @@ impl X11 {
     }
 
     pub fn set_text_input(&mut self, _caret: Option<Rect>) {}
+
+    /// Bring `owner`'s window to the front, focused (asked for by the user,
+    /// as a pager would).
+    pub fn activate(&mut self, owner: Owner, _token: Option<String>) {
+        let Some(win) = self.surf(owner).map(|s| s.win) else { return };
+        let _ = self.conn.map_window(win);
+        let _ = self.conn.configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+        let ev = ClientMessageEvent::new(32, win, self.atoms._NET_ACTIVE_WINDOW, [2, x11rb::CURRENT_TIME, 0, 0, 0]);
+        let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+        let _ = self.conn.send_event(false, self.root, mask, ev);
+    }
 
     /// The window manager moves `owner`'s window with the pointer.
     pub fn start_move(&mut self, owner: Owner) -> bool {

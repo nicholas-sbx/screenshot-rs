@@ -802,6 +802,7 @@ fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Imag
     s.pointer_enter(0, Point::new(400.0, 500.0));
     tap(&mut s, 0, 0x46, "f", 0); // (a filled box: its pixels are plain to check)
     drag(&mut s, 0, Point::new(700.0, 300.0), Point::new(900.0, 400.0), 0);
+    check!(s.st.toolbar_overlay == Some(1), "the toolbar didn't follow the drag onto the right monitor: {:?}", s.st.toolbar_overlay);
     let color = s.st.color().premul() | 0xFF00_0000;
     let f = frame(&mut s, 1)?;
     check!(s.overlays[1].foreign.len() == 1, "the right monitor doesn't have the left one's drawing");
@@ -814,6 +815,28 @@ fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Imag
     let moved = s.overlays[0].annotations.last().map(|a| a.geometry());
     check!(moved == Some(Rect::new(730.0, 300.0, 200.0, 100.0)), "{moved:?}");
     check!(s.overlays[1].annotations.is_empty(), "it changed hands");
+    let _ = frame(&mut s, 1)?;
+    check!(s.overlays[1].foreign_frame.is_some(), "the right monitor doesn't frame the selected drawing reaching it");
+    // A text typed on the left monitor reaching the right one: shown there
+    // as being typed, and its caret placed by a click there.
+    tap(&mut s, 1, 0x54, "t", 0);
+    click(&mut s, 0, Point::new(760.0, 700.0), 0);
+    for ch in "across the line".chars() {
+        tap(&mut s, 0, 0x41, &ch.to_string(), 0);
+    }
+    let _ = frame(&mut s, 1)?;
+    check!(
+        s.overlays[1].foreign_live.iter().any(|x| x.as_text().is_some_and(|t| t.editing)),
+        "the text being typed isn't shown as typed on the right monitor: {:?} {:?}",
+        s.st.text_edit.as_ref().map(|(o, x)| (*o, x.bounds())),
+        s.overlays[1].foreign_live.len()
+    );
+    let end = s.st.text_edit.as_ref().and_then(|(_, x)| x.as_text()).map(|t| t.edit.cursor);
+    let at = s.st.text_edit.as_ref().map(|(_, x)| x.bounds()).ok_or("no text being typed")?;
+    click(&mut s, 1, Point::new(at.right() - 800.0 - 30.0, at.center().y), 0);
+    let moved = s.st.text_edit.as_ref().and_then(|(_, x)| x.as_text()).map(|t| t.edit.cursor);
+    check!(s.st.text_edit.is_some() && moved != end && moved.is_some_and(|c| c > 0), "a click in the text on the right monitor: {end:?} {moved:?}");
+    tap(&mut s, 0, key::ESCAPE, "", 0);
     // A capture of the right monitor alone includes the part that reaches it.
     let _ = frame(&mut s, 1)?;
     tap(&mut s, 1, 0x52, "r", 0);
@@ -825,7 +848,92 @@ fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Imag
         }
         other => return Err(format!("capturing the right monitor gave {other:?}")),
     }
+    record_across_monitors(tmp)?;
+    area_keys(tmp)?;
+    text_fields(tmp)?;
     println!("self-test: drawings across monitors");
+    Ok(())
+}
+
+/// Texts: with the text tool, a click away from the one being typed
+/// finishes it and starts another there; one left blank goes.
+fn text_fields(tmp: &Path) -> R {
+    let picture = Arc::new(Image::filled(800, 600, 0xFF404040)?);
+    let screen = Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 800, 600), scale: 1.0 }, picture, pointer: None };
+    let mut s = session(test_config(tmp), Request::default(), vec![screen], FakeRecorder { problem: None, span: false });
+    s.pointer_enter(0, Point::new(300.0, 300.0));
+    tap(&mut s, 0, 0x54, "t", 0);
+    click(&mut s, 0, Point::new(100.0, 100.0), 0);
+    for ch in "hi".chars() {
+        tap(&mut s, 0, 0x41, &ch.to_string(), 0);
+    }
+    click(&mut s, 0, Point::new(400.0, 300.0), 0);
+    let typing_at = s.st.text_edit.as_ref().and_then(|(_, t)| t.as_text()).map(|t| t.pos);
+    check!(s.overlays[0].annotations.len() == 1, "the first text wasn't kept");
+    check!(typing_at.is_some_and(|p| p.distance(Point::new(400.0, 300.0)) < 40.0), "no new text where clicked: {typing_at:?}");
+    // Left blank: gone when another is begun, and when finished.
+    click(&mut s, 0, Point::new(500.0, 400.0), 0);
+    check!(s.overlays[0].annotations.len() == 1 && s.st.text_edit.is_some(), "a blank text was kept");
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    check!(s.overlays[0].annotations.len() == 1 && s.st.text_edit.is_none());
+    // Typed again and emptied: it goes (a step undo brings back).
+    let at = s.overlays[0].annotations[0].bounds().center();
+    click(&mut s, 0, at, 0);
+    check!(s.st.text_edit.as_ref().is_some_and(|(_, t)| t.replaces == Some(0)), "not editing the text again");
+    tap(&mut s, 0, 0x41, "a", CTRL);
+    tap(&mut s, 0, key::BACKSPACE, "", 0);
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    check!(s.overlays[0].annotations.iter().all(|a| a.hidden || a.is_removed()), "an emptied text stayed");
+    Ok(())
+}
+
+/// Dragging out an area with Shift makes it square, with Ctrl from its
+/// middle, and Alt moves it, as for a rectangle.
+fn area_keys(tmp: &Path) -> R {
+    let picture = Arc::new(Image::filled(800, 600, 0xFF404040)?);
+    let screen = Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 800, 600), scale: 1.0 }, picture, pointer: None };
+    let mut s = session(test_config(tmp), Request { record: true, ..Default::default() }, vec![screen], FakeRecorder { problem: None, span: false });
+    s.pointer_enter(0, Point::new(300.0, 300.0));
+    drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(300.0, 200.0), keyseq::SHIFT);
+    check!(s.overlays[0].rec_rect == Some(Rect::new(100.0, 100.0, 200.0, 200.0)), "Shift: {:?}", s.overlays[0].rec_rect);
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    drag(&mut s, 0, Point::new(400.0, 300.0), Point::new(450.0, 340.0), CTRL);
+    check!(s.overlays[0].rec_rect == Some(Rect::new(350.0, 260.0, 100.0, 80.0)), "Ctrl: {:?}", s.overlays[0].rec_rect);
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    // Alt held for the last stretch: the area so far moves with the pointer.
+    s.pointer_motion(0, Point::new(100.0, 100.0), 0, false);
+    s.button(0, Button::Left, true, Point::new(100.0, 100.0), 0);
+    s.pointer_motion(0, Point::new(200.0, 150.0), 0, false);
+    s.pointer_motion(0, Point::new(260.0, 170.0), keyseq::ALT, false);
+    s.button(0, Button::Left, false, Point::new(260.0, 170.0), keyseq::ALT);
+    check!(s.overlays[0].rec_rect == Some(Rect::new(160.0, 120.0, 100.0, 50.0)), "Alt: {:?}", s.overlays[0].rec_rect);
+    // Shift pressed mid-drag squares it there and then.
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    s.pointer_motion(0, Point::new(100.0, 100.0), 0, false);
+    s.button(0, Button::Left, true, Point::new(100.0, 100.0), 0);
+    s.pointer_motion(0, Point::new(300.0, 160.0), 0, false);
+    s.modifiers(keyseq::SHIFT);
+    check!(s.overlays[0].sel_rect == Some(Rect::new(100.0, 100.0, 200.0, 200.0)), "Shift pressed: {:?}", s.overlays[0].sel_rect);
+    Ok(())
+}
+
+/// A recording area moved from one monitor onto another goes with its
+/// handles and panel.
+fn record_across_monitors(tmp: &Path) -> R {
+    let picture = Arc::new(Image::filled(800, 600, 0xFF404040)?);
+    let screens = vec![
+        Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 800, 600), scale: 1.0 }, picture: picture.clone(), pointer: None },
+        Screen { output: Output { name: "DP-2".into(), rect: IRect::new(800, 0, 800, 600), scale: 1.0 }, picture, pointer: None },
+    ];
+    let mut s = session(test_config(tmp), Request { record: true, ..Default::default() }, screens, FakeRecorder { problem: None, span: true });
+    s.pointer_enter(0, Point::new(300.0, 300.0));
+    drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(300.0, 250.0), 0);
+    check!(s.overlays[0].rec_rect.is_some() && s.overlays[0].panel.is_some(), "no area to record");
+    // Moved by its middle, most of the way onto the right monitor.
+    drag(&mut s, 0, Point::new(200.0, 175.0), Point::new(850.0, 175.0), 0);
+    check!(s.overlays[0].rec_rect.is_none() && s.overlays[0].span_rect == Some(Rect::new(750.0, 100.0, 200.0, 150.0)), "{:?}", s.overlays[0].span_rect);
+    check!(s.overlays[1].rec_rect == Some(Rect::new(-50.0, 100.0, 200.0, 150.0)), "the area didn't go over: {:?}", s.overlays[1].rec_rect);
+    check!(s.overlays[1].panel.is_some(), "its panel stayed behind");
     Ok(())
 }
 

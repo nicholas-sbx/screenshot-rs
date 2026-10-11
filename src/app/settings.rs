@@ -136,14 +136,20 @@ fn sound_folder(current: &str) -> PathBuf {
 impl App {
     /// Open the settings window (or keep the one open).
     pub(super) fn show_settings(&mut self) {
+        let token = self.tray.tray.as_ref().and_then(|t| t.take_activation_token());
         if self.settings.is_some() {
-            return; // (Wayland has no raising a window without the desktop's token)
+            self.dpy.activate(Owner::Settings, token);
+            self.dpy.flush();
+            return;
         }
         if let Err(e) = self.dpy.add_window(Owner::Settings, TITLE, SIZE, true) {
             self.report_failure("Can't show the settings", &e);
             return;
         }
         self.dpy.set_min_size(Owner::Settings, MIN_SIZE);
+        if token.is_some() {
+            self.dpy.activate(Owner::Settings, token);
+        }
         let (kde, jobs) = mpsc::channel();
         let (answers_tx, answers) = mpsc::channel();
         let waker = self.waker.clone();
@@ -194,7 +200,8 @@ impl App {
         let s = &mut w.s;
         let p = |at: (f64, f64)| Point::new(at.0 as f32, at.1 as f32);
         match ev {
-            Input::Enter(at) | Input::Motion(at, _) => s.pointer_motion(p(at)),
+            Input::Enter(at) => s.pointer_motion(p(at), false),
+            Input::Motion(at, finger) => s.pointer_motion(p(at), finger),
             Input::Leave => s.pointer_leave(),
             Input::Button(b, pressed, at) => {
                 let button = match b {
@@ -329,6 +336,7 @@ impl App {
         let Some((logical, scale)) = self.dpy.surface(Owner::Settings) else { return };
         w.s.set_view(logical.0 as f32, logical.1 as f32);
         w.s.set_scale(scale);
+        crate::ui::caret::set_shown(self.blink.shown_in(Owner::Settings));
         self.dpy.redraw(Owner::Settings, 0, &mut SettingsPaint(&mut w.s));
     }
 }

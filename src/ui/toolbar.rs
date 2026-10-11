@@ -147,11 +147,12 @@ fn build(v: &View<'_>) -> Vec<Item> {
         CodeScan::Found(0) => "No codes found".to_string(),
         CodeScan::Found(n) => format!("{n} code{} found", if n != 1 { "s" } else { "" }),
     };
-    let mut codes = if v.codes_visible {
-        Item::new("codes", Look::Icon { icon: "codes", size: 36.0 }, km.hint("Hide QR / barcodes", "codes") + &format!("  ·  {found}"))
-    } else {
-        Item::new("codes", Look::Icon { icon: "codes-off", size: 36.0 }, km.hint("Show QR / barcodes", "codes") + &format!("  ·  {found}"))
-    };
+    // (on or off as the magnet is: the same icon, lit while on)
+    let mut codes = Item::new(
+        "codes",
+        Look::Icon { icon: "codes", size: 36.0 },
+        km.hint("Show QR / barcodes", "codes") + if v.codes_visible { "  ·  on" } else { "  ·  off" } + &format!("  ·  {found}"),
+    );
     codes.toggled = Some(v.codes_visible);
     codes.enabled = !recording;
     items.push(codes);
@@ -242,6 +243,6 @@ mod tests {
         let undo = t.items.iter().find(|i| i.id == "undo").unwrap();
         assert!(!undo.enabled);
         assert!(t.items.iter().find(|i| i.id == "region").unwrap().active);
-        assert_eq!(t.items.iter().find(|i| i.id == "codes").unwrap().hint, "Hide QR / barcodes  ·  Q  ·  2 codes found");
+        assert_eq!(t.items.iter().find(|i| i.id == "codes").unwrap().hint, "Show QR / barcodes  ·  Q  ·  on  ·  2 codes found");
     }
 }

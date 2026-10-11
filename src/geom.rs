@@ -416,6 +416,14 @@ impl Damage {
         !self.full && self.rects.is_empty()
     }
 
+    /// Add `r`, logical pixels at `scale`, with a little to spare.
+    pub fn add_logical(&mut self, r: Rect, scale: f32) {
+        let r = r.adjusted(-2.0, -2.0, 2.0, 2.0);
+        let (x0, y0) = ((r.x * scale).floor() as i32, (r.y * scale).floor() as i32);
+        let (x1, y1) = ((r.right() * scale).ceil() as i32, (r.bottom() * scale).ceil() as i32);
+        self.add(IRect::new(x0, y0, x1 - x0, y1 - y0));
+    }
+
     pub fn set_full(&mut self) {
         self.full = true;
         self.rects.clear();

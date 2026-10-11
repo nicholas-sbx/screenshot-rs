@@ -108,7 +108,7 @@ pub struct Drag {
 }
 
 impl Drag {
-    fn new(pos: Point, line_like: bool) -> Drag {
+    pub fn new(pos: Point, line_like: bool) -> Drag {
         Drag { start: pos, end: pos, anchor: pos, pointer: pos, line_like }
     }
 
@@ -381,6 +381,13 @@ impl Shape {
         c
     }
 
+    /// The same moved by `d`, all as it is (a text being typed stays so).
+    pub fn shifted(&self, d: Point) -> Shape {
+        let mut c = self.clone();
+        c.map_points(|p| p + d);
+        c
+    }
+
     /// A copy stretched from the box `old` to `new`.
     pub fn fitted(&self, old: Rect, new: Rect) -> Shape {
         let sx = if old.w != 0.0 { new.w / old.w } else { 1.0 };
@@ -477,6 +484,11 @@ impl Shape {
             Kind::Text(t) => !t.edit.text.trim().is_empty() || (t.original.is_some() && self.text_changed()),
             _ => self.drag().is_some_and(Drag::is_valid),
         }
+    }
+
+    /// A text with nothing (but spaces) in it.
+    pub fn is_blank_text(&self) -> bool {
+        matches!(&self.kind, Kind::Text(t) if t.edit.text.trim().is_empty())
     }
 
     /// For an edited copy of a text: is it any different from the original?
@@ -800,7 +812,7 @@ fn paint_text(p: &mut Painter<'_>, t: &TextShape, color: Color, size: usize) {
             }
         }
     }
-    if t.editing {
+    if t.editing && super::caret::shown() {
         p.fill_rect(t.caret_rect(size), palette.accent);
     }
 }

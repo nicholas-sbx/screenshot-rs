@@ -2,6 +2,7 @@
 //! that runs it.
 
 pub mod beautypanel;
+pub mod caret;
 pub mod cropper;
 pub mod editor;
 pub mod menu;
