@@ -33,6 +33,9 @@ use crate::ui::widgets::Look;
 pub const RECORD_FORMATS: &[(&str, &str)] = &[("mp4", "MP4"), ("webm", "WebM"), ("gif", "GIF")];
 const SCAN_AFTER: Duration = Duration::from_millis(60);
 const RAINBOW_EVERY: Duration = Duration::from_millis(50);
+/// How long the toolbar waits to learn which monitor the pointer is on
+/// before it shows on the primary one.
+const TOOLBAR_WAIT: Duration = Duration::from_millis(300);
 
 /// What was asked for.
 #[derive(Clone, Debug, Default)]
@@ -167,6 +170,7 @@ enum Timer {
     Countdown,
     Rainbow,
     Scan,
+    Toolbar,
 }
 
 /// The panels floating over an overlay.
@@ -221,6 +225,8 @@ pub struct Session {
     drag_owner: Option<usize>,
     /// overlays in the order things were drawn on them, for undo
     history: Vec<usize>,
+    /// the last drawing's place in the stack across monitors (Shape::order)
+    stacked: u64,
     redo_stack: Vec<usize>,
     /// Esc went down here; it acts when it comes up
     escape_down: bool,
@@ -229,6 +235,8 @@ pub struct Session {
     may_span: bool,
     /// all the monitors (global logical)
     virtual_rect: IRect,
+    /// the primary monitor (an overlay)
+    primary: usize,
     timers: Vec<(Instant, Timer)>,
     started: Instant,
     pub clock: Clock,
@@ -293,11 +301,13 @@ impl Session {
             desktop: None,
             codes: Vec::new(),
             history: Vec::new(),
+            stacked: 0,
             redo_stack: Vec::new(),
             escape_down: false,
             countdown_overlay: None,
             may_span,
             virtual_rect,
+            primary: primary.min(n.saturating_sub(1)),
             timers: Vec::new(),
             started: Instant::now(),
             clock: Clock::new(what),
@@ -323,11 +333,18 @@ impl Session {
             s.place_floating(o);
         }
         // Until the pointer enters an overlay: the monitor it's on, if
-        // known, else the primary one.
-        let start = if s.st.cfg.toolbar_follows_mouse { cursor.and_then(|c| s.overlay_at(c)) } else { None };
-        let first = start.unwrap_or(primary.min(n - 1));
-        s.st.pointer_overlay = Some(first);
-        s.st.toolbar_overlay = Some(first);
+        // known. Else the toolbar (and the hint) wait to hear which, rather
+        // than show on the wrong one first and jump, but not for long: then
+        // they show on the primary one.
+        let follows = s.st.cfg.toolbar_follows_mouse;
+        let start = if follows { cursor.and_then(|c| s.overlay_at(c)) } else { None };
+        if follows && start.is_none() && n > 1 {
+            s.schedule(Timer::Toolbar, TOOLBAR_WAIT);
+        } else {
+            let first = start.unwrap_or(s.primary);
+            s.st.pointer_overlay = Some(first);
+            s.st.toolbar_overlay = Some(first);
+        }
         s.refresh();
         if let Some(c) = cursor {
             s.point_at(c);
@@ -372,6 +389,10 @@ impl Session {
     /// The parts of overlay `o` to repaint now (device pixels of its buffer).
     pub fn damage(&mut self, o: usize) -> crate::geom::Damage {
         self.share_drawings(o);
+        if let Some(ov) = self.overlays.get(o) {
+            let (g, here) = (ov.output.rect.to_f().top_left(), ov.rect());
+            self.overlays[o].trash = self.trash_rect().map(|t| t.translated(-g)).filter(|t| t.intersects(&here));
+        }
         let Some(ov) = self.overlays.get_mut(o) else { return Default::default() };
         ov.update_damage(&self.st);
         std::mem::take(&mut ov.damage)
@@ -403,7 +424,7 @@ impl Session {
                 return handle_cursor(h);
             }
             if self.st.tool == Tool::Select && !self.st.eyedropper {
-                return ov.cursor_pos.map_or(CursorShape::Arrow, |p| ov.selection.cursor(&ov.annotations, p, 1.0));
+                return ov.cursor_pos.map_or(CursorShape::Arrow, |p| self.select_cursor(o, p));
             }
             if self.st.tool == Tool::Text && !self.st.eyedropper { CursorShape::Text } else { CursorShape::Crosshair }
         };
@@ -419,9 +440,10 @@ impl Session {
         match float {
             None => canvas(),
             Some(Float::Toolbar) => match item {
-                Some("grip") => CursorShape::Move,
-                Some(id) if !id.starts_with("divider") => CursorShape::Hand,
-                _ => canvas(),
+                _ if ov.toolbar.as_ref().is_some_and(|t| t.grab.is_some()) => CursorShape::Move,
+                Some(id) if id != "grip" && !id.starts_with("divider") => CursorShape::Hand,
+                _ if self.pointer[o].zip(ov.toolbar.as_ref()).is_some_and(|(p, t)| t.on_grip(p)) => CursorShape::Move,
+                _ => CursorShape::Arrow,
             },
             Some(Float::Chip(_)) | Some(Float::Panel) => match item {
                 Some(id) if !id.starts_with("divider") => CursorShape::Hand,
@@ -483,6 +505,11 @@ impl Session {
                     self.schedule(Timer::Rainbow, RAINBOW_EVERY);
                 }
                 Timer::Scan => self.start_scan(),
+                Timer::Toolbar => {
+                    if self.st.toolbar_overlay.is_none() {
+                        self.activate(self.primary);
+                    }
+                }
             }
         }
     }
@@ -875,7 +902,9 @@ impl Session {
             return;
         }
         self.st.pointer_overlay = Some(o);
-        if self.st.cfg.toolbar_follows_mouse && !self.overlays.iter().any(|ov| ov.sel_rect.is_some() || ov.rec_rect.is_some()) {
+        // (one still waiting to know where the pointer is shows here, whatever is going on)
+        let waiting = self.st.toolbar_overlay.is_none();
+        if waiting || (self.st.cfg.toolbar_follows_mouse && !self.overlays.iter().any(|ov| ov.sel_rect.is_some() || ov.rec_rect.is_some())) {
             let moving = self.st.toolbar_overlay != Some(o);
             let picker_open = self.overlays.iter().any(|ov| ov.picker_open());
             self.st.toolbar_overlay = Some(o);
@@ -1027,12 +1056,16 @@ impl Session {
         if self.overlays.iter().any(|o| o.annotations.iter().any(|s| !s.hidden)) {
             let under = out.clone();
             let mut p = Painter::new(out.pixmap_mut(), scale);
+            let mut drawn: Vec<Shape> = Vec::new();
             for ov in &self.overlays {
                 let g = ov.output.rect;
                 let d = Point::new((g.x - area.x) as f32, (g.y - area.y) as f32);
-                for shape in ov.annotations.iter().filter(|s| !s.hidden) {
-                    shape.moved(d).paint(&mut p, &under, scale);
-                }
+                drawn.extend(ov.annotations.iter().filter(|s| !s.hidden).map(|s| s.moved(d)));
+            }
+            // (in the one stack all the monitors share)
+            drawn.sort_by_key(|s| s.order);
+            for shape in &drawn {
+                shape.paint(&mut p, &under, scale);
             }
         }
         out.force_opaque();
@@ -1436,8 +1469,13 @@ impl Session {
 
     // -- history -------------------------------------------------------------------------
 
-    /// Something was drawn on overlay `o`.
+    /// Something was drawn on overlay `o`: it goes on top of every
+    /// monitor's drawings.
     fn record(&mut self, o: usize) {
+        if let Some(s) = self.overlays[o].annotations.last_mut() {
+            self.stacked += 1;
+            s.order = self.stacked;
+        }
         self.history.push(o);
         for &r in &self.redo_stack {
             if let Some(ov) = self.overlays.get_mut(r) {
@@ -1470,18 +1508,21 @@ impl Session {
         self.overlays.iter().position(|ov| ov.output.rect.contains(at))
     }
 
-    /// Each overlay, topmost drawings first (the other overlays' are painted
-    /// over this one's own), with `pos` (on `o`) in its coordinates.
-    fn topmost_first(&self, o: usize, pos: Point) -> Vec<(usize, Point)> {
-        let mut order: Vec<usize> = (0..self.overlays.len()).filter(|&k| k != o).rev().collect();
-        order.push(o);
-        order.into_iter().map(|k| (k, self.to_overlay(o, k, pos))).collect()
+    /// The topmost drawing at `pos` on `o` that `at` finds on each overlay
+    /// (its topmost there), whichever monitor it was drawn on: (its
+    /// overlay, its index there, `pos` in that overlay's coordinates).
+    fn topmost(&self, o: usize, pos: Point, at: impl Fn(&Overlay, Point) -> Option<usize>) -> Option<(usize, usize, Point)> {
+        (0..self.overlays.len())
+            .filter_map(|k| {
+                let local = self.to_overlay(o, k, pos);
+                at(&self.overlays[k], local).map(|i| (k, i, local))
+            })
+            .max_by_key(|&(k, i, _)| self.overlays[k].annotations[i].order)
     }
 
-    /// The topmost text at `pos` on `o`, wherever it was typed: (its
-    /// overlay, its index there, `pos` in that overlay's coordinates).
+    /// The topmost text at `pos` on `o`, wherever it was typed.
     fn text_at_any(&self, o: usize, pos: Point) -> Option<(usize, usize, Point)> {
-        self.topmost_first(o, pos).into_iter().find_map(|(k, local)| self.overlays[k].text_at(local).map(|i| (k, i, local)))
+        self.topmost(o, pos, |ov, local| ov.text_at(local))
     }
 
     /// The overlay whose select tool takes a press at `pos` on `o`: the one
@@ -1494,7 +1535,41 @@ impl Session {
                 return k;
             }
         }
-        self.topmost_first(o, pos).into_iter().find(|(k, local)| !Selection::hits(&self.overlays[*k].annotations, *local, 1.0).is_empty()).map_or(o, |(k, _)| k)
+        self.topmost(o, pos, |ov, local| Selection::hits(&ov.annotations, local, 1.0).first().copied()).map_or(o, |(k, ..)| k)
+    }
+
+    /// The selected drawing's trash button (global logical), wherever it
+    /// was drawn; kept on a monitor.
+    fn trash_rect(&self) -> Option<Rect> {
+        if self.st.tool != Tool::Select {
+            return None;
+        }
+        let k = (0..self.overlays.len()).find(|&k| self.overlays[k].selection.current(&self.overlays[k].annotations).is_some())?;
+        let ov = &self.overlays[k];
+        let g = ov.output.rect.to_f().top_left();
+        let monitors: Vec<Rect> = self.overlays.iter().map(|m| m.output.rect.to_f().adjusted(4.0, 4.0, -4.0, -4.0)).collect();
+        let fits = |r: Rect| monitors.iter().any(|m| m.contains_rect(&r.translated(g)));
+        Some(ov.selection.trash_rect(&ov.annotations, 1.0, fits)?.translated(g))
+    }
+
+    /// Is `pos` on overlay `o` on the selected drawing's trash button?
+    fn on_trash(&self, o: usize, pos: Point) -> bool {
+        let g = self.overlays[o].output.rect.to_f().top_left();
+        self.trash_rect().is_some_and(|t| t.contains(pos + g))
+    }
+
+    /// The select tool's pointer at `pos` on `o`: as the overlay owning the
+    /// drawing there (or being dragged) says, wherever it was drawn.
+    fn select_cursor(&self, o: usize, pos: Point) -> CursorShape {
+        if self.on_trash(o, pos) {
+            return CursorShape::Hand;
+        }
+        let k = match self.drag_owner.filter(|&k| k < self.overlays.len() && self.overlays[k].selection.dragging()) {
+            Some(k) => k,
+            None => self.select_owner(o, pos),
+        };
+        let ov = &self.overlays[k];
+        ov.selection.cursor(&ov.annotations, self.to_overlay(o, k, pos), 1.0)
     }
 
     /// Bring overlay `o`'s copies of the other monitors' drawings up to date:
@@ -2272,7 +2347,9 @@ impl Session {
                 if let Some(tb) = &mut ov.toolbar {
                     match tb.item_at(pos) {
                         Some(it) if it.clickable() && it.enabled => tb.ptr.pressed = Some(it.id),
-                        _ => tb.grab = Some(pos - tb.pos), // (a disabled button drags the toolbar)
+                        // (only its grip drags it: the rest does nothing)
+                        _ if tb.on_grip(pos) => tb.grab = Some(pos - tb.pos),
+                        _ => {}
                     }
                 }
             }
@@ -2509,6 +2586,14 @@ impl Session {
             let n = self.next_number();
             self.commit_shape(o, Shape::counter(pos, self.st.color(), self.st.size, n));
         } else if tool == Tool::Select {
+            if self.on_trash(o, pos)
+                && let Some(so) = self.selected_on()
+            {
+                let len = self.overlays[so].annotations.len();
+                let ov = &mut self.overlays[so];
+                ov.selection.delete(&mut ov.annotations);
+                return self.selection_changed(so, len);
+            }
             // (a drawing reaching here from another monitor is picked up there)
             let k = self.select_owner(o, pos);
             let local = self.to_overlay(o, k, pos);

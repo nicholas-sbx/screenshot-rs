@@ -549,6 +549,11 @@ fn pointer_and_panels(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) ->
     // The toolbar, dragged by its grip, stays inside the screen (the press
     // closes the picker, as any press elsewhere does).
     let grip = toolbar_item(&s, 0, "grip")?;
+    // (not by the margin round its buttons)
+    let before = s.overlays[0].toolbar.as_ref().ok_or("no toolbar")?.rect();
+    let margin = Point::new(before.center().x, before.bottom() - 2.0);
+    drag(&mut s, 0, margin, margin + Point::new(-40.0, 60.0), 0);
+    check!(s.overlays[0].toolbar.as_ref().is_some_and(|t| t.rect() == before), "the toolbar was dragged by its margin");
     drag(&mut s, 0, grip, grip + Point::new(-40.0, 60.0), 0);
     let bar = s.overlays[0].toolbar.as_ref().ok_or("no toolbar")?.rect();
     check!(bar.y == 80.0 && !s.overlays[0].picker_open(), "{bar:?}");
@@ -767,6 +772,8 @@ fn multi_monitor(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     ];
     let mut s = session(test_config(tmp), Request::default(), screens, FakeRecorder { problem: None, span: true });
     check!(s.st.spans, "a selection can't cross monitors");
+    // (where the pointer is isn't known yet: no toolbar on the wrong monitor first)
+    check!(s.overlays.iter().all(|o| !o.toolbar_visible), "the toolbar showed before the pointer's monitor was known");
     s.pointer_enter(1, Point::new(400.0, 500.0));
     check!(s.st.toolbar_overlay == Some(1) && s.overlays[1].toolbar_visible && !s.overlays[0].toolbar_visible, "the toolbar didn't follow");
     // Draw on the left monitor, then select across both.
@@ -854,10 +861,62 @@ fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Imag
         }
         other => return Err(format!("capturing the right monitor gave {other:?}")),
     }
+    stacking_across_monitors(tmp, out)?;
     record_across_monitors(tmp)?;
     area_keys(tmp)?;
     text_fields(tmp)?;
     println!("self-test: drawings across monitors");
+    Ok(())
+}
+
+/// Drawings are stacked as they were drawn, whichever monitor they were
+/// drawn on: alike on each monitor, and for the select tool. Its handles
+/// and trash button work from the other monitor too.
+fn stacking_across_monitors(tmp: &Path, out: &Option<PathBuf>) -> R {
+    let screens = (0..2)
+        .map(|i| {
+            let picture = Arc::new(Image::filled(800, 600, 0xFF404040)?);
+            Ok(Screen { output: Output { name: format!("DP-{i}"), rect: IRect::new(800 * i, 0, 800, 600), scale: 1.0 }, picture, pointer: None })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut s = session(test_config(tmp), Request::default(), screens, FakeRecorder { problem: None, span: true });
+    // Without knowing where the pointer is, the toolbar shows on the primary monitor before long.
+    s.on_timer(Instant::now() + Duration::from_secs(1));
+    check!(s.overlays[0].toolbar_visible && !s.overlays[1].toolbar_visible, "the toolbar never showed");
+    s.pointer_enter(0, Point::new(400.0, 300.0));
+    tap(&mut s, 0, 0x46, "f", 0);
+    s.set_color(0);
+    let first = s.st.color().premul() | 0xFF00_0000;
+    drag(&mut s, 0, Point::new(700.0, 300.0), Point::new(900.0, 400.0), 0); // (left, reaching right)
+    s.set_color(2);
+    let second = s.st.color().premul() | 0xFF00_0000;
+    s.pointer_enter(1, Point::new(20.0, 320.0));
+    drag(&mut s, 1, Point::new(20.0, 320.0), Point::new(-40.0, 380.0), 0); // (right, reaching left)
+    let (l, r) = (frame(&mut s, 0)?, frame(&mut s, 1)?);
+    check!(first != second && l.pixel(790, 350) == second && r.pixel(10, 350) == second, "the later drawing isn't on top on both monitors");
+    check!(l.pixel(720, 395) == first && r.pixel(90, 395) == first);
+    // The select tool takes the top one, from either monitor.
+    tap(&mut s, 1, 0x53, "s", 0);
+    click(&mut s, 0, Point::new(790.0, 350.0), 0);
+    check!(s.overlays[1].selection.current(&s.overlays[1].annotations).is_some(), "the drawing under the top one was picked");
+    // The first one, picked from the right: its right edge's handle there resizes.
+    click(&mut s, 1, Point::new(80.0, 395.0), 0);
+    check!(s.overlays[0].selection.current(&s.overlays[0].annotations).is_some(), "the left monitor's drawing wasn't picked from the right");
+    let a = s.overlays[0].annotations.last().ok_or("no drawing")?;
+    let edge = Point::new(a.geometry().right() + a.reach() + 4.0 - 800.0, a.geometry().center().y);
+    s.pointer_motion(1, edge, 0, false);
+    check!(s.cursor(1) == CursorShape::ResizeEW, "{:?} over the handle on the other monitor", s.cursor(1));
+    // Its trash button deletes it (where it shows: just off its frame's top right).
+    let _ = frame(&mut s, 0)?;
+    save_png(&frame(&mut s, 1)?, out, "overlay-trash.png")?;
+    let trash = s.overlays[1].trash.ok_or("no trash button")?;
+    s.pointer_motion(1, trash.center(), 0, false);
+    check!(s.cursor(1) == CursorShape::Hand);
+    click(&mut s, 1, trash.center(), 0);
+    check!(s.overlays[0].annotations.last().is_some_and(|a| a.is_removed()), "the trash button didn't delete it");
+    let _ = frame(&mut s, 1)?;
+    check!(s.overlays[1].trash.is_none(), "the trash button stayed");
+    tap(&mut s, 0, key::ESCAPE, "", 0);
     Ok(())
 }
 

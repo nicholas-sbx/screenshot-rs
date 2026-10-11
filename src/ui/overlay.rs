@@ -119,6 +119,9 @@ pub struct Overlay {
     pub foreign_live: Vec<Shape>,
     /// another monitor's selected drawing (here), for its frame
     pub foreign_frame: Option<Shape>,
+    /// the selected drawing's trash button, where it reaches here (from
+    /// whichever monitor's drawing it is)
+    pub trash: Option<Rect>,
     /// the area being dragged out (Shift: square, Ctrl: from its middle,
     /// Alt: moved), as a rectangle's drag is
     pub sel_origin: Option<crate::ui::shapes::Drag>,
@@ -175,6 +178,7 @@ impl Overlay {
             foreign_key: 0,
             foreign_live: Vec::new(),
             foreign_frame: None,
+            trash: None,
             sel_origin: None,
             sel_rect: None,
             cursor_pos: None,
@@ -313,14 +317,21 @@ impl Overlay {
         self.annotations.iter().all(|s| s.hidden) && self.foreign.is_empty()
     }
 
+    /// The drawings done, this monitor's and the others' that reach it, in
+    /// the one stack all the monitors share: lowest first.
+    fn stacked(&self) -> Vec<&Shape> {
+        let mut drawn: Vec<&Shape> = self.annotations.iter().filter(|s| !s.hidden).chain(self.foreign.iter()).collect();
+        drawn.sort_by_key(|s| s.order);
+        drawn
+    }
+
     fn draw_annotations(&self, out: &mut Image, phys: IRect) {
         if self.undrawn() {
             return; // (the capture is opaque as it is)
         }
         {
             let mut p = Painter::for_region(out.pixmap_mut(), self.dpr, (phys.x, phys.y));
-            // (the other monitors' drawings that reach this one, over its own)
-            for shape in self.annotations.iter().filter(|s| !s.hidden).chain(self.foreign.iter()) {
+            for shape in self.stacked() {
                 shape.paint(&mut p, &self.base, self.dpr);
             }
         }
@@ -481,6 +492,11 @@ impl Overlay {
             let r = Selection::frame_bounds_of(s, 1.0);
             elements.push(Element { id: Id::ForeignFrame, bounds: self.dev(r, 2), key: hash(&(shape_key(s, 0), st.theme_key)) });
         }
+        if st.tool == Tool::Select
+            && let Some(t) = self.trash
+        {
+            elements.push(Element { id: Id::Trash, bounds: self.dev(t, 2), key: hash(&(rect_key(t), st.theme_key)) });
+        }
         if let Some((o, s)) = &st.text_edit
             && *o == self.index
         {
@@ -623,12 +639,15 @@ impl Overlay {
 
     /// Where a window's label goes: above its top left; else inside its top
     /// left, if the window is big enough; else below it, or beside it;
-    /// always on the screen. Faded while the pointer is near, so what's
-    /// under it shows (as the hint does).
+    /// always on the screen, kept `LABEL_MARGIN` from its edges (slid
+    /// along, where that's all it takes). Faded while the pointer is near,
+    /// so what's under it shows (as the hint does).
     fn window_label_box(&self, r: Rect, label: &str) -> (Rect, f32) {
         let size = pill_rect(label, Point::ZERO, PillStyle::small()).size();
         let (w, h) = size;
-        let screen = self.rect();
+        let m = LABEL_MARGIN;
+        let room = self.rect().adjusted(m, m, -m, -m);
+        let keep_in = |at: Point| Rect::new(at.x.min(room.right() - w).max(room.x), at.y.min(room.bottom() - h).max(room.y), w, h);
         let fits_inside = r.w >= w + 16.0 && r.h >= h + 16.0;
         let places = [
             (Point::new(r.x, r.y - h - 6.0), false),
@@ -639,15 +658,12 @@ impl Overlay {
         ];
         let bx = places
             .iter()
-            .map(|(at, inside)| (Rect::new(at.x, at.y, w, h), *inside))
-            .find(|(b, inside)| (fits_inside || !inside) && screen.contains_rect(b))
+            .map(|(at, inside)| (keep_in(*at), *inside))
+            // (one kept on the screen mustn't be pushed onto the window, or out of it)
+            .find(|(b, inside)| if *inside { fits_inside && r.contains_rect(b) } else { !b.intersects(&r) })
             .map(|b| b.0)
-            .unwrap_or_else(|| {
-                // (no room anywhere: as near as can be)
-                let x = (r.x + 8.0).min(screen.right() - w - 4.0).max(screen.x + 4.0);
-                let y = (r.y + 8.0).min(screen.bottom() - h - 4.0).max(screen.y + 4.0);
-                Rect::new(x, y, w, h)
-            });
+            // (no room anywhere: as near as can be)
+            .unwrap_or_else(|| keep_in(Point::new(r.x + 8.0, r.y + 8.0)));
         let near = self.cursor_pos.is_some_and(|c| bx.adjusted(-HINT_NEAR / 2.0, -HINT_NEAR / 2.0, HINT_NEAR / 2.0, HINT_NEAR / 2.0).contains(c));
         (bx, if near { 0.3 } else { 1.0 })
     }
@@ -741,10 +757,8 @@ impl Overlay {
         let dim = (rtool && st.dim.a > 0).then_some(st.dim);
         let hole = dim.and_then(|_| selection.or(self.rec_rect).or(hover.map(|h| h.0)).map(|f| self.hole_rect(f)));
         let drawn: Vec<&Shape> = self
-            .annotations
-            .iter()
-            .filter(|s| !s.hidden)
-            .chain(self.foreign.iter())
+            .stacked()
+            .into_iter()
             .chain(self.active.iter())
             .chain(self.selection.moving())
             .chain(self.foreign_live.iter())
@@ -769,6 +783,9 @@ impl Overlay {
             self.selection.paint_frame(&self.annotations, &mut p, 1.0);
             if let Some(s) = &self.foreign_frame {
                 Selection::paint_frame_of(s, &mut p, 1.0);
+            }
+            if let Some(t) = self.trash {
+                Selection::paint_trash(&mut p, t, 1.0);
             }
         }
         let picking = rtool && self.rec_rect.is_none();
@@ -1241,6 +1258,9 @@ pub fn pill(p: &mut Painter<'_>, label: &str, at: Point, s: PillStyle) {
 
 // -- hints --------------------------------------------------------------------------
 
+/// How far a window's label keeps from the screen's edges.
+const LABEL_MARGIN: f32 = 8.0;
+
 pub const HINT_REGION: &str = "Drag to capture  ·  Click for whole screen  ·  Esc to cancel";
 pub const HINT_CODES: &str = "Drag to capture  ·  {codes} hides detected codes  ·  Esc to cancel";
 pub const HINT_WINDOWS: &str = "Drag to capture  ·  Click a window to capture it  ·  Esc to cancel";
@@ -1427,6 +1447,7 @@ enum Id {
     Moving,
     SelectionFrame,
     ForeignFrame,
+    Trash,
     Foreign(usize),
     ForeignLive(usize),
     TextEdit,
@@ -1559,6 +1580,28 @@ mod tests {
         assert_eq!(row[3 * 4], 200);
         assert_eq!(row[6 * 4], 200);
         assert!(row[7 * 4] < 120);
+    }
+
+    #[test]
+    fn window_labels_keep_off_the_screen_edges() {
+        let picture = Arc::new(Image::filled(800, 600, 0xFF404040).unwrap());
+        let ov = Overlay::new(0, Output { name: "T".into(), rect: IRect::new(0, 0, 800, 600), scale: 1.0 }, picture, IPoint::new(0, 0));
+        let room = ov.rect().adjusted(LABEL_MARGIN, LABEL_MARGIN, -LABEL_MARGIN, -LABEL_MARGIN);
+        let label = "A window with a long enough title  ·  300 × 200";
+        for r in [
+            Rect::new(0.0, 0.0, 800.0, 600.0),
+            Rect::new(0.0, 0.0, 300.0, 200.0),
+            Rect::new(0.0, 2.0, 300.0, 200.0),
+            Rect::new(560.0, 10.0, 240.0, 30.0),
+            Rect::new(0.0, 580.0, 40.0, 20.0),
+            Rect::new(3.0, 300.0, 100.0, 100.0),
+        ] {
+            let (b, _) = ov.window_label_box(r, label);
+            assert!(room.contains_rect(&b), "{b:?} for {r:?}");
+        }
+        // With room above, it's there, not slid: at the window's left.
+        let (b, _) = ov.window_label_box(Rect::new(100.0, 100.0, 300.0, 200.0), label);
+        assert_eq!((b.x, b.bottom()), (100.0, 94.0));
     }
 
     #[test]

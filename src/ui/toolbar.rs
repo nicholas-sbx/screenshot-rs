@@ -1,6 +1,6 @@
 //! The floating toolbar over the capture: tools, colours, size, toggles,
-//! undo, pin, whole screen and cancel. Drag it by anything that isn't a
-//! button.
+//! undo, pin, whole screen and cancel. Drag it by its grip, at the left
+//! end.
 
 use crate::geom::{Point, Rect};
 use crate::keys::Keymap;
@@ -81,6 +81,14 @@ impl Toolbar {
     pub fn place(&mut self, width: f32) {
         self.pos = Point::new(((width - self.size.0) / 2.0).floor().max(8.0), 20.0);
         self.placed = true;
+    }
+
+    /// Is `at` on the grip it's dragged by: the left end, through the grip's
+    /// dots, its full height (the margin round the buttons isn't)?
+    pub fn on_grip(&self, at: Point) -> bool {
+        let Some(grip) = self.items.iter().find(|it| it.id == "grip") else { return false };
+        let local = at - self.pos;
+        self.rect().contains(at) && local.x < grip.rect.right()
     }
 
     pub fn item_at(&self, at: Point) -> Option<&Item> {

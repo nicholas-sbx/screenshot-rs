@@ -955,6 +955,16 @@ impl Editor {
         r
     }
 
+    /// The selected drawing's trash button (picture coordinates), kept in view.
+    fn trash_rect(&self) -> Option<Rect> {
+        if self.tool != Tool::Select {
+            return None;
+        }
+        let c = self.canvas_rect().adjusted(4.0, 4.0, -4.0, -4.0);
+        let view = Rect::from_points(self.to_picture(c.top_left()), self.to_picture(Point::new(c.right(), c.bottom())));
+        self.selection.trash_rect(&ShapesRef(&self.shapes), self.zoom, |r| view.contains_rect(&r))
+    }
+
     fn has_selection(&mut self) -> bool {
         self.tool == Tool::Select && self.with_selection(|sel, d| sel.index(d).is_some())
     }
@@ -1242,6 +1252,9 @@ impl Editor {
             CursorShape::Text
         } else if self.tool == Tool::Select && !self.eyedropper {
             let pic = self.to_picture(at);
+            if self.trash_rect().is_some_and(|t| t.contains(pic)) {
+                return CursorShape::Hand;
+            }
             self.selection.cursor(&ShapesRef(&self.shapes), pic, self.zoom)
         } else if self.tool == Tool::Crop && !self.eyedropper {
             self.cropper.cursor(self.to_picture(at), self.zoom)
@@ -1474,7 +1487,11 @@ impl Editor {
             }
             Tool::Select => {
                 let zoom = self.zoom;
-                self.with_selection(|sel, d| sel.press(d, pic, mods, zoom));
+                if self.trash_rect().is_some_and(|t| t.contains(pic)) {
+                    self.with_selection(|sel, d| sel.delete(d));
+                } else {
+                    self.with_selection(|sel, d| sel.press(d, pic, mods, zoom));
+                }
             }
             Tool::Crop => {
                 let mut c = std::mem::take(&mut self.cropper);
@@ -2101,6 +2118,9 @@ impl Editor {
             p.translate(area.x + self.offset.x, area.y + self.offset.y);
             p.scale_by(self.zoom, self.zoom);
             self.selection.paint_frame(&ShapesRef(&self.shapes), &mut p, self.zoom);
+            if let Some(t) = self.trash_rect() {
+                Selection::paint_trash(&mut p, t, self.zoom);
+            }
         }
         if self.tool == Tool::Crop {
             let mut p = Painter::for_region(target.pixmap_mut(), s, origin);
