@@ -56,6 +56,7 @@ pub fn query(all: bool) -> Option<Desktop> {
         }
         windows.push(found);
     }
+    windows.reverse(); // (the stacking list is bottom to top; the topmost come first)
     Some(Desktop { windows, active: active_window, cursor })
 }
 
