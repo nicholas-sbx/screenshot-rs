@@ -215,6 +215,9 @@ pub struct Shape {
     /// replaced by a changed copy, see `replaces`
     pub hidden: bool,
     pub replaces: Option<usize>,
+    /// where it is in the stack of drawings across every monitor: they're
+    /// painted (and picked) lowest first (0 until the session stamps it)
+    pub order: u64,
 }
 
 pub const TEXT_SIZES_PX: [f32; 3] = [18.0, 26.0, 38.0];
@@ -238,25 +241,32 @@ impl Shape {
             Tool::Blur => Kind::Blur(Drag::new(pos, false), CoverCache::default()),
             _ => return None,
         };
-        Some(Shape { kind, color, size, hidden: false, replaces: None })
+        Some(Shape { kind, color, size, hidden: false, replaces: None, order: 0 })
     }
 
     pub fn text(pos: Point, color: Color, size: usize) -> Shape {
-        Shape { kind: Kind::Text(TextShape { pos, edit: TextEdit::default(), editing: true, original: None }), color, size, hidden: false, replaces: None }
+        Shape {
+            kind: Kind::Text(TextShape { pos, edit: TextEdit::default(), editing: true, original: None }),
+            color,
+            size,
+            hidden: false,
+            replaces: None,
+            order: 0,
+        }
     }
 
     pub fn counter(pos: Point, color: Color, size: usize, number: u32) -> Shape {
-        Shape { kind: Kind::Counter { pos, number }, color, size, hidden: false, replaces: None }
+        Shape { kind: Kind::Counter { pos, number }, color, size, hidden: false, replaces: None, order: 0 }
     }
 
     /// A change to the editor's picture, as an undo step.
     pub fn step(step: std::rc::Rc<crate::ui::picture::Step>) -> Shape {
-        Shape { kind: Kind::Step(step), color: Color::BLACK, size: 0, hidden: false, replaces: None }
+        Shape { kind: Kind::Step(step), color: Color::BLACK, size: 0, hidden: false, replaces: None, order: 0 }
     }
 
     /// Nothing, in place of drawing `index` (deleted).
     pub fn removed(of: &Shape, index: usize) -> Shape {
-        Shape { kind: Kind::Removed, color: of.color, size: of.size, hidden: false, replaces: Some(index) }
+        Shape { kind: Kind::Removed, color: of.color, size: of.size, hidden: false, replaces: Some(index), order: 0 }
     }
 
     /// Nothing to see or pick up: a deleted drawing, or a step changing the picture.
@@ -741,6 +751,7 @@ pub fn copy_for_editing(s: &Shape, index: usize) -> Option<Shape> {
         size: s.size,
         hidden: false,
         replaces: Some(index),
+        order: 0,
     })
 }
 

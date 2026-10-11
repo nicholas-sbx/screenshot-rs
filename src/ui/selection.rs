@@ -8,14 +8,16 @@
 use crate::geom::{Point, Rect};
 use crate::keys::KeyPress;
 use crate::keyseq::{ALT, CTRL, SHIFT, key};
-use crate::render::Painter;
 use crate::render::paint::Pen;
 use crate::render::theme::{self, Color};
+use crate::render::{Painter, icons};
 use crate::ui::session::CursorShape;
 use crate::ui::shapes::{Kind, Shape};
 
 /// A handle's size on the screen.
 pub const HANDLE: f32 = 9.0;
+/// The trash button's size on the screen.
+pub const TRASH: f32 = 22.0;
 /// The arrow keys' steps, without and with Shift.
 const NUDGE: f32 = 1.0;
 const BIG_NUDGE: f32 = 10.0;
@@ -326,9 +328,7 @@ impl Selection {
         }
         let Some(i) = self.index(d) else { return false };
         if k.key == key::DELETE || k.key == key::BACKSPACE {
-            let gone = Shape::removed(d.get(i), i);
-            self.replace(d, i, gone);
-            return true;
+            return self.delete(d);
         }
         let step = if k.mods & SHIFT != 0 { BIG_NUDGE } else { NUDGE };
         let v = match k.key {
@@ -340,6 +340,18 @@ impl Selection {
         };
         let moved = d.get(i).moved(v);
         self.replace(d, i, moved);
+        true
+    }
+
+    /// Remove the selected drawing (Delete, or its trash button); true if
+    /// there was one.
+    pub fn delete(&mut self, d: &mut dyn DrawingsMut) -> bool {
+        if self.held.is_some() {
+            return false;
+        }
+        let Some(i) = self.index(d) else { return false };
+        let gone = Shape::removed(d.get(i), i);
+        self.replace(d, i, gone);
         true
     }
 
@@ -391,6 +403,38 @@ impl Selection {
         if let Some(shape) = self.framed(d) {
             Self::paint_frame_of(&shape, p, scale);
         }
+    }
+
+    /// The selected drawing's trash button (for a finger: there's no Delete
+    /// key), while it isn't being dragged. See `trash_rect_of`.
+    pub fn trash_rect(&self, d: &dyn Drawings, scale: f32, fits: impl Fn(Rect) -> bool) -> Option<Rect> {
+        if self.held.is_some() {
+            return None;
+        }
+        Some(Self::trash_rect_of(self.selected(d)?, scale, fits))
+    }
+
+    /// Where the trash button for `shape` goes: just off a corner of its
+    /// frame, clear of the handles; the first corner `fits` (on the screen),
+    /// starting at the top right.
+    pub fn trash_rect_of(shape: &Shape, scale: f32, fits: impl Fn(Rect) -> bool) -> Rect {
+        let f = Self::frame_bounds_of(shape, scale);
+        let (t, gap) = (TRASH / scale, 2.0 / scale);
+        let (left, right, top, bottom) = (f.left() - gap - t, f.right() + gap, f.top() - gap - t, f.bottom() + gap);
+        let places = [(right, top), (right, bottom), (left, top), (left, bottom)].map(|(x, y)| Rect::new(x, y, t, t));
+        places.iter().copied().find(|r| fits(*r)).unwrap_or(places[0])
+    }
+
+    /// The trash button: quiet, a little see-through, so it doesn't vie
+    /// with the drawing.
+    pub fn paint_trash(p: &mut Painter<'_>, r: Rect, scale: f32) {
+        let c = theme::c();
+        p.save();
+        p.set_opacity(0.85);
+        p.draw_rounded_rect(r, r.w / 2.0, Some(c.base), Some(Pen::new(c.line, 1.0 / scale)));
+        let inset = r.w * 0.2;
+        icons::paint(p, "trash", r.adjusted(inset, inset, -inset, -inset), c.soft);
+        p.restore();
     }
 
     /// The same around `shape` (another monitor's drawing, reaching here).
