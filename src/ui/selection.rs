@@ -341,35 +341,44 @@ impl Selection {
         self.held.as_ref().and_then(|h| h.preview.as_ref())
     }
 
+    /// The drawing the frame is around: the one selected, as it's being moved.
+    pub fn framed(&self, d: &dyn Drawings) -> Option<Shape> {
+        match self.moving() {
+            Some(s) => Some(s.clone()),
+            None => self.selected(d).cloned(),
+        }
+    }
+
     /// Where the frame and handles are drawn (logical), for repainting.
     pub fn frame_bounds(&self, d: &dyn Drawings, scale: f32) -> Option<Rect> {
-        let shape = match self.moving() {
-            Some(s) => s.clone(),
-            None => self.selected(d)?.clone(),
-        };
+        Some(Self::frame_bounds_of(&self.framed(d)?, scale))
+    }
+
+    /// Where the frame and handles around `shape` are drawn.
+    pub fn frame_bounds_of(shape: &Shape, scale: f32) -> Rect {
         let h = HANDLE / scale + 2.0;
-        let r = if shape.has_ends() { shape.geometry() } else { Self::frame(&shape, scale) };
-        Some(r.adjusted(-h, -h, h, h))
+        let r = if shape.has_ends() { shape.geometry() } else { Self::frame(shape, scale) };
+        r.adjusted(-h, -h, h, h)
     }
 
     /// The selected drawing's dashed frame and its handles. `scale`: screen
     /// pixels per unit of the painter (the editor's zoom).
     pub fn paint_frame(&self, d: &dyn Drawings, p: &mut Painter<'_>, scale: f32) {
-        let shape = match self.moving() {
-            Some(s) => s.clone(),
-            None => match self.selected(d) {
-                Some(s) => s.clone(),
-                None => return,
-            },
-        };
+        if let Some(shape) = self.framed(d) {
+            Self::paint_frame_of(&shape, p, scale);
+        }
+    }
+
+    /// The same around `shape` (another monitor's drawing, reaching here).
+    pub fn paint_frame_of(shape: &Shape, p: &mut Painter<'_>, scale: f32) {
         let c = theme::c();
         let pen = Pen::new(c.accent, 1.5 / scale).dashed();
         match shape.drag().filter(|_| shape.has_ends()) {
             Some(dr) => p.draw_line(dr.start, dr.end, pen),
-            None => p.stroke_rect(Self::frame(&shape, scale), pen),
+            None => p.stroke_rect(Self::frame(shape, scale), pen),
         }
         let h = HANDLE / scale;
-        for (_, at) in Self::handles(&shape, scale) {
+        for (_, at) in Self::handles(shape, scale) {
             p.draw_rounded_rect(Rect::new(at.x - h / 2.0, at.y - h / 2.0, h, h), 3.0 / scale, Some(c.text), Some(Pen::new(c.accent, 1.5 / scale)));
         }
     }

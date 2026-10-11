@@ -1509,12 +1509,16 @@ impl Session {
                 live.extend(moved_here(k, s));
             }
         }
+        // (the text being typed as it is: its box, caret and what's selected)
         if let Some((k, s)) = &self.st.text_edit
             && *k != o
         {
-            live.extend(moved_here(*k, s));
+            let s = s.shifted(offsets[*k]);
+            live.extend(s.bounds().intersects(&here).then_some(s));
         }
         self.overlays[o].foreign_live = live;
+        let frame = others.iter().find_map(|&k| self.overlays[k].selection.framed(&self.overlays[k].annotations).map(|s| s.shifted(offsets[k])));
+        self.overlays[o].foreign_frame = frame.filter(|s| Selection::frame_bounds_of(s, 1.0).intersects(&here));
     }
 
     // The select tool: one drawing selected at a time, on one monitor.
@@ -2397,9 +2401,7 @@ impl Session {
                 {
                     let i = t.index_at(local, size);
                     t.edit.place(i, mods & keyseq::SHIFT != 0);
-                    if eo == o {
-                        self.overlays[o].text_drag = Some((pos, t.pos));
-                    }
+                    self.overlays[o].text_drag = Some((pos, t.pos));
                     return;
                 }
             }
@@ -2433,9 +2435,7 @@ impl Session {
                     if let Some(t) = s.as_text_mut() {
                         let at = t.index_at(local, size);
                         t.edit.place(at, false);
-                        if k == o {
-                            self.overlays[o].text_drag = Some((pos, t.pos));
-                        }
+                        self.overlays[o].text_drag = Some((pos, t.pos));
                     }
                     (k, s)
                 }
@@ -2473,7 +2473,8 @@ impl Session {
         let snap = if selecting && self.st.snap_edges { Some(self.snapped(o, pos, mods)) } else { None };
         self.overlays[o].snap_point = snap;
         let bounds = self.drag_bounds(o);
-        let editing_here = self.st.text_edit.as_ref().is_some_and(|(eo, _)| *eo == o);
+        // (the text being typed can be another monitor's, reaching here)
+        let text_at = self.st.text_edit.as_ref().filter(|(eo, _)| *eo < self.overlays.len()).map(|(eo, _)| self.to_overlay(o, *eo, pos));
         let ov = &mut self.overlays[o];
         if let Some(origin) = ov.sel_origin {
             let end = snap.unwrap_or(pos);
@@ -2484,12 +2485,14 @@ impl Session {
             }
         } else if ov.rec_drag.is_some() {
             self.drag_area(o, pos, snap, mods & keyseq::CTRL != 0);
-        } else if ov.text_drag.is_some() && editing_here {
+        } else if ov.text_drag.is_some()
+            && let Some(local) = text_at
+        {
             // Dragging in the text selects (only the select tool moves text).
             if let Some((_, shape)) = &mut self.st.text_edit {
                 let size = shape.size;
                 if let Some(t) = shape.as_text_mut() {
-                    let i = t.index_at(pos, size);
+                    let i = t.index_at(local, size);
                     t.edit.place(i, true);
                 }
             }

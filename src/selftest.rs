@@ -814,6 +814,28 @@ fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Imag
     let moved = s.overlays[0].annotations.last().map(|a| a.geometry());
     check!(moved == Some(Rect::new(730.0, 300.0, 200.0, 100.0)), "{moved:?}");
     check!(s.overlays[1].annotations.is_empty(), "it changed hands");
+    let _ = frame(&mut s, 1)?;
+    check!(s.overlays[1].foreign_frame.is_some(), "the right monitor doesn't frame the selected drawing reaching it");
+    // A text typed on the left monitor reaching the right one: shown there
+    // as being typed, and its caret placed by a click there.
+    tap(&mut s, 1, 0x54, "t", 0);
+    click(&mut s, 0, Point::new(760.0, 700.0), 0);
+    for ch in "across the line".chars() {
+        tap(&mut s, 0, 0x41, &ch.to_string(), 0);
+    }
+    let _ = frame(&mut s, 1)?;
+    check!(
+        s.overlays[1].foreign_live.iter().any(|x| x.as_text().is_some_and(|t| t.editing)),
+        "the text being typed isn't shown as typed on the right monitor: {:?} {:?}",
+        s.st.text_edit.as_ref().map(|(o, x)| (*o, x.bounds())),
+        s.overlays[1].foreign_live.len()
+    );
+    let end = s.st.text_edit.as_ref().and_then(|(_, x)| x.as_text()).map(|t| t.edit.cursor);
+    let at = s.st.text_edit.as_ref().map(|(_, x)| x.bounds()).ok_or("no text being typed")?;
+    click(&mut s, 1, Point::new(at.right() - 800.0 - 30.0, at.center().y), 0);
+    let moved = s.st.text_edit.as_ref().and_then(|(_, x)| x.as_text()).map(|t| t.edit.cursor);
+    check!(s.st.text_edit.is_some() && moved != end && moved.is_some_and(|c| c > 0), "a click in the text on the right monitor: {end:?} {moved:?}");
+    tap(&mut s, 0, key::ESCAPE, "", 0);
     // A capture of the right monitor alone includes the part that reaches it.
     let _ = frame(&mut s, 1)?;
     tap(&mut s, 1, 0x52, "r", 0);

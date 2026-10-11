@@ -381,6 +381,13 @@ impl Shape {
         c
     }
 
+    /// The same moved by `d`, all as it is (a text being typed stays so).
+    pub fn shifted(&self, d: Point) -> Shape {
+        let mut c = self.clone();
+        c.map_points(|p| p + d);
+        c
+    }
+
     /// A copy stretched from the box `old` to `new`.
     pub fn fitted(&self, old: Rect, new: Rect) -> Shape {
         let sx = if old.w != 0.0 { new.w / old.w } else { 1.0 };
