@@ -155,6 +155,13 @@ impl LineEdit {
         }
     }
 
+    /// Where the caret is drawn.
+    pub fn caret_rect(&self) -> Rect {
+        let m = text::metrics(self.font);
+        let cx = self.text_x() + text::width(&self.edit.text[..self.edit.cursor], self.font);
+        Rect::new(cx.round(), self.rect.y + (self.rect.h - m.height) / 2.0, 1.0, m.height)
+    }
+
     pub fn index_at(&self, x: f32) -> usize {
         let m = |s: &str| text::width(s, self.font);
         self.edit.col_at(0, x - self.text_x(), &m)
@@ -200,9 +207,8 @@ impl LineEdit {
         } else {
             p.draw_text_at(Point::new(x, baseline), &self.edit.text, self.font, if enabled { c.text } else { c.muted });
         }
-        if self.focused {
-            let cx = x + text::width(&self.edit.text[..self.edit.cursor], self.font);
-            p.fill_rect(Rect::new(cx.round(), baseline - m.ascent, 1.0, m.height), c.text);
+        if self.focused && super::caret::shown() {
+            p.fill_rect(self.caret_rect(), c.text);
         }
         p.restore();
     }
@@ -274,6 +280,11 @@ impl ColorPicker {
 
     pub fn rect(&self) -> Rect {
         Rect::new(self.pos.x, self.pos.y, PICKER_SIZE.0, PICKER_SIZE.1)
+    }
+
+    /// The hex field's caret, while it's typed in.
+    pub fn caret_rect(&self) -> Option<Rect> {
+        self.hex.focused.then(|| self.hex.caret_rect().translated(self.pos))
     }
 
     pub fn color(&self) -> Color {

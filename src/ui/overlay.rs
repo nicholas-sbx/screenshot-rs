@@ -565,6 +565,7 @@ impl Overlay {
                 picker.hex.edit.cursor,
                 picker.hex.edit.anchor,
                 picker.hex.focused,
+                picker.hex.focused && crate::ui::caret::shown(),
                 &picker.ptr,
                 st.theme_key,
             ));
@@ -1470,6 +1471,7 @@ fn shape_key(s: &Shape, index: usize) -> u64 {
             t.edit.cursor.hash(&mut h);
             t.edit.anchor.hash(&mut h);
             t.editing.hash(&mut h);
+            (t.editing && crate::ui::caret::shown()).hash(&mut h);
             ((t.pos.x * 64.0) as i32, (t.pos.y * 64.0) as i32).hash(&mut h);
         }
         Kind::Counter { number, .. } => number.hash(&mut h),

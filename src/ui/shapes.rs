@@ -800,7 +800,7 @@ fn paint_text(p: &mut Painter<'_>, t: &TextShape, color: Color, size: usize) {
             }
         }
     }
-    if t.editing {
+    if t.editing && super::caret::shown() {
         p.fill_rect(t.caret_rect(size), palette.accent);
     }
 }

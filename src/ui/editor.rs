@@ -256,6 +256,8 @@ pub struct Editor {
     asking: Option<Option<Answer>>,
     closing: bool,
     dirty: bool,
+    /// parts to repaint (window logical), short of all of it
+    touched: Vec<Rect>,
     damaged: bool,
     layer: RefCell<Option<Layer>>,
     shapes_version: u64,
@@ -373,6 +375,7 @@ impl Editor {
             asking: None,
             closing: false,
             dirty: false,
+            touched: Vec::new(),
             damaged: true,
             layer: RefCell::new(None),
             shapes_version: 0,
@@ -446,7 +449,20 @@ impl Editor {
     }
 
     pub fn damage(&mut self) -> Damage {
-        if std::mem::take(&mut self.damaged) { Damage::full() } else { Damage::new() }
+        let touched = std::mem::take(&mut self.touched);
+        if std::mem::take(&mut self.damaged) {
+            return Damage::full();
+        }
+        let mut d = Damage::new();
+        for r in touched {
+            d.add_logical(r, self.scale);
+        }
+        d
+    }
+
+    /// Repaint `r` (window logical).
+    pub fn touch(&mut self, r: Rect) {
+        self.touched.push(r);
     }
 
     fn canvas_rect(&self) -> Rect {
@@ -1790,6 +1806,14 @@ impl Editor {
     /// Where the caret of the text being typed is (window logical), for
     /// the input method.
     pub fn text_input(&self) -> Option<Rect> {
+        if let Some(r) = self.picker.as_ref().and_then(|p| p.caret_rect()) {
+            return Some(r);
+        }
+        for f in [&self.width_field, &self.height_field, &self.panel.name] {
+            if f.focused {
+                return Some(f.caret_rect());
+            }
+        }
         let s = self.text_edit.as_ref()?;
         let r = s.as_text()?.caret_rect(s.size);
         let c = self.canvas_rect();

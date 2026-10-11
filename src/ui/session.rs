@@ -438,6 +438,9 @@ impl Session {
     /// Where the caret of the text being typed on overlay `o` is (for an
     /// input method's candidate window), if one is.
     pub fn text_input(&self, o: usize) -> Option<Rect> {
+        if let Some(p) = self.focused_picker() {
+            return if p == o { self.overlays[p].picker.as_ref()?.caret_rect() } else { None };
+        }
         let (eo, shape) = self.st.text_edit.as_ref()?;
         (*eo == o).then(|| shape.as_text().map(|t| t.caret_rect(shape.size)))?
     }

@@ -580,10 +580,7 @@ impl Settings {
         }
         let mut d = Damage::new();
         for r in touched {
-            let r = r.adjusted(-2.0, -2.0, 2.0, 2.0);
-            let (x0, y0) = ((r.x * self.scale).floor() as i32, (r.y * self.scale).floor() as i32);
-            let (x1, y1) = ((r.right() * self.scale).ceil() as i32, (r.bottom() * self.scale).ceil() as i32);
-            d.add(IRect::new(x0, y0, x1 - x0, y1 - y0));
+            d.add_logical(r, self.scale);
         }
         d
     }
@@ -880,9 +877,12 @@ impl Settings {
     pub fn text_input(&self) -> Option<Rect> {
         let (b, r) = self.focus?;
         let Control::Line { edit, .. } = &self.row(b, r)?.below else { return None };
-        let m = text::metrics(edit.font);
-        let x = edit.rect.x + 9.0 - edit.scroll + text::width(&edit.text()[..edit.edit.cursor], edit.font);
-        Some(Rect::new(x, edit.rect.y + (edit.rect.h - m.height) / 2.0, 1.0, m.height))
+        Some(edit.caret_rect())
+    }
+
+    /// Repaint `r` (window logical).
+    pub fn touch(&mut self, r: Rect) {
+        self.touched.push(r);
     }
 
     fn hit_at(&self, at: Point) -> Option<Hit> {

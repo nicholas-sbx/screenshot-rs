@@ -329,6 +329,7 @@ impl App {
         let Some((logical, scale)) = self.dpy.surface(Owner::Settings) else { return };
         w.s.set_view(logical.0 as f32, logical.1 as f32);
         w.s.set_scale(scale);
+        crate::ui::caret::set_shown(self.blink.shown_in(Owner::Settings));
         self.dpy.redraw(Owner::Settings, 0, &mut SettingsPaint(&mut w.s));
     }
 }

@@ -284,6 +284,7 @@ impl App {
             if let Some(w) = self.editors.iter_mut().find(|e| e.id == id) {
                 w.ed.set_view(logical.0 as f32, logical.1 as f32);
                 w.ed.set_scale(scale);
+                crate::ui::caret::set_shown(self.blink.shown_in(owner));
                 self.dpy.redraw(owner, 0, &mut EditorPaint(&mut w.ed));
             }
         }

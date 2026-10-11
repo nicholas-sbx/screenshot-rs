@@ -3,6 +3,7 @@
 //! the session's outcome to delivery.
 
 mod capture;
+mod caret;
 mod editor;
 mod finish;
 mod pins;
@@ -22,7 +23,7 @@ use calloop_wayland_source::WaylandSource;
 
 use crate::cli::Args;
 use crate::config::{self, Config};
-use crate::geom::{Damage, IRect, Point};
+use crate::geom::{Damage, IRect, Point, Rect};
 use crate::image::Canvas;
 use crate::keys::KeyPress;
 use crate::platform::{Display, Monitor, Output, Owner, Painted, TRAY_MENU};
@@ -93,6 +94,8 @@ pub struct App {
     quit_after_recording: bool,
     /// the tray app starts again once it has quit
     restarting: bool,
+    /// the text caret's blink
+    blink: caret::Blink,
 }
 
 impl Painted for Session {
@@ -243,8 +246,10 @@ impl App {
     fn timeout(&self) -> Option<Duration> {
         let session = self.session.as_ref().and_then(|s| s.next_deadline());
         let taken = self.taken.as_ref().map(|t| t.wait_until);
-        let deadline =
-            [session, self.hold_until, taken, self.editors_deadline(), self.recording_deadline(), self.dpy.next_deadline()].into_iter().flatten().min()?;
+        let deadline = [session, self.hold_until, taken, self.editors_deadline(), self.recording_deadline(), self.dpy.next_deadline(), self.blink.deadline()]
+            .into_iter()
+            .flatten()
+            .min()?;
         Some(deadline.saturating_duration_since(Instant::now()))
     }
 
@@ -294,6 +299,7 @@ impl App {
         if let Some(outcome) = self.session.as_mut().and_then(|s| s.take_outcome()) {
             self.finish(outcome);
         }
+        self.blink_caret();
         self.redraw();
         self.update_cursor();
         self.update_text_input();
@@ -323,6 +329,7 @@ impl App {
         let mut drawn = false;
         for owner in self.dpy.owners() {
             if let Owner::Overlay(o) = owner {
+                crate::ui::caret::set_shown(self.blink.shown_in(owner));
                 drawn |= self.dpy.redraw(owner, o, s);
             }
         }
@@ -352,14 +359,50 @@ impl App {
         self.dpy.set_cursor(owner, shape);
     }
 
+    /// The caret of the text being typed: in which window, and where
+    /// (window logical).
+    fn caret(&self) -> Option<(Owner, Rect)> {
+        match self.dpy.keyboard_owner()? {
+            owner @ Owner::Editor(id) => {
+                self.editors.iter().find(|e| e.id == id).filter(|e| e.ed.wants_text()).and_then(|e| e.ed.text_input()).map(|r| (owner, r))
+            }
+            Owner::Settings => self.settings.as_ref().filter(|w| w.s.wants_text()).and_then(|w| w.s.text_input()).map(|r| (Owner::Settings, r)),
+            Owner::Overlay(_) => {
+                let s = self.session.as_ref()?;
+                (0..s.overlays.len()).find_map(|o| s.text_input(o).map(|r| (Owner::Overlay(o), r)))
+            }
+            _ => None,
+        }
+    }
+
     fn update_text_input(&mut self) {
-        let caret = match (&self.session, self.dpy.keyboard_owner()) {
-            (_, Some(Owner::Editor(id))) => self.editors.iter().find(|e| e.id == id).filter(|e| e.ed.wants_text()).and_then(|e| e.ed.text_input()),
-            (_, Some(Owner::Settings)) => self.settings.as_ref().filter(|w| w.s.wants_text()).and_then(|w| w.s.text_input()),
-            (Some(s), Some(Owner::Overlay(o))) => s.text_input(o),
+        let caret = match (self.caret(), self.dpy.keyboard_owner()) {
+            (Some((owner, r)), Some(k)) if owner == k => Some(r),
             _ => None,
         };
         self.dpy.set_text_input(caret);
+    }
+
+    /// Blink the caret: repaint it where it went on or off.
+    fn blink_caret(&mut self) {
+        let focus = self.dpy.keyboard_owner();
+        let caret = self.caret();
+        for (owner, r) in self.blink.update(Instant::now(), focus, caret) {
+            match owner {
+                Owner::Editor(id) => {
+                    if let Some(e) = self.editors.iter_mut().find(|e| e.id == id) {
+                        e.ed.touch(r);
+                    }
+                }
+                Owner::Settings => {
+                    if let Some(w) = &mut self.settings {
+                        w.s.touch(r);
+                    }
+                }
+                // (the overlays repaint what looks different by themselves)
+                _ => {}
+            }
+        }
     }
 }
 
@@ -437,6 +480,7 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         recording: None,
         quit_after_recording: false,
         restarting: false,
+        blink: caret::Blink::default(),
     };
     match queue {
         Some(mut queue) => {
