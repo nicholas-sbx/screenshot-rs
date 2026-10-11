@@ -670,6 +670,10 @@ impl Session {
         if self.done {
             return;
         }
+        for ov in &mut self.overlays {
+            let ov = &mut *ov;
+            ov.selection.modifiers(&mut ov.annotations, mods);
+        }
         let spans = self.st.spans;
         let mut moved = None;
         for o in 0..self.overlays.len() {

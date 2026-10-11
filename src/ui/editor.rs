@@ -1576,6 +1576,10 @@ impl Editor {
             s.extend(at, m);
             self.damaged = true;
         }
+        if self.selection.dragging() {
+            self.with_selection(|sel, d| sel.modifiers(d, mods));
+            self.damaged = true;
+        }
     }
 
     pub fn key(&mut self, k: &KeyPress) {

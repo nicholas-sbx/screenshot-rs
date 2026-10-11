@@ -86,6 +86,8 @@ impl Grip {
 struct Held {
     grip: Grip,
     start: Point,
+    /// where the pointer is now
+    at: Point,
     /// the drawing's index, and its box then
     index: usize,
     geometry: Rect,
@@ -176,11 +178,22 @@ impl Selection {
         shape.geometry().adjusted(-pad, -pad, pad, pad)
     }
 
-    /// The selected drawing's handle at `pos`, if any.
+    /// The selected drawing's handle at `pos`, if any: the nearest. On a
+    /// drawing too small for its handles' reach to leave room to take it
+    /// by (a finger can't see which it's on), only a handle itself counts
+    /// inside it; elsewhere in it, it's moved.
     pub fn handle_at(&self, d: &dyn Drawings, pos: Point, scale: f32) -> Option<Grip> {
         let shape = self.selected(d)?;
         let grab = (HANDLE / 2.0 + 4.0) / scale;
-        Self::handles(shape, scale).into_iter().find(|(_, at)| (pos.x - at.x).abs() <= grab && (pos.y - at.y).abs() <= grab).map(|(g, _)| g)
+        let frame = Self::frame(shape, scale);
+        let crowded = frame.w < 4.0 * grab || frame.h < 4.0 * grab;
+        let reach = if crowded && frame.contains(pos) && shape.contains(pos, 0.0) { HANDLE / 2.0 / scale } else { grab };
+        Self::handles(shape, scale)
+            .into_iter()
+            .map(|(g, at)| (g, (pos.x - at.x).abs().max((pos.y - at.y).abs())))
+            .filter(|(_, dist)| *dist <= reach)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(g, _)| g)
     }
 
     /// Is `pos` on the selected drawing (a handle, or the drawing itself)?
@@ -223,13 +236,14 @@ impl Selection {
             }
         };
         let Some(index) = self.index else { return false };
-        self.held = Some(Held { grip, start: pos, index, geometry: d.get(index).geometry(), preview: None });
+        self.held = Some(Held { grip, start: pos, at: pos, index, geometry: d.get(index).geometry(), preview: None });
         true
     }
 
     /// The pointer moved with the button held; true if a drag is on.
     pub fn motion(&mut self, d: &mut dyn DrawingsMut, pos: Point, mods: i32) -> bool {
         let Some(h) = &mut self.held else { return false };
+        h.at = pos;
         let keep_ratio = mods & SHIFT != 0;
         let center = mods & CTRL != 0;
         if h.preview.is_none() && (pos - h.start).manhattan() < 2.0 {
@@ -263,6 +277,16 @@ impl Selection {
         h.preview = Some(preview);
         d.get_mut(h.index).hidden = true; // (the copy shows meanwhile)
         true
+    }
+
+    /// Shift or Ctrl pressed or let go mid-drag: the drag as they say now.
+    pub fn modifiers(&mut self, d: &mut dyn DrawingsMut, mods: i32) {
+        if let Some(h) = &self.held
+            && h.preview.is_some()
+        {
+            let at = h.at;
+            self.motion(d, at, mods);
+        }
     }
 
     /// Let go: the changed copy replaces the drawing (one undo step).
@@ -527,6 +551,30 @@ mod tests {
         assert!(sel.restyle(&mut d, Some(Color::rgb(0xFF0000)), Some(2)));
         let last = d.last().unwrap();
         assert_eq!((last.color, last.size), (Color::rgb(0xFF0000), 2));
+    }
+
+    #[test]
+    fn small_drawings_are_moved_not_resized() {
+        // So small its handles' reach covers it: taken by its line, it moves.
+        let mut d: Vec<Shape> = vec![rect_shape(Rect::new(10.0, 10.0, 16.0, 16.0))];
+        let mut sel = Selection::default();
+        sel.press(&mut d, Point::new(10.0, 18.0), 0, 1.0);
+        sel.release(&mut d);
+        assert_eq!(sel.handle_at(&d, Point::new(10.0, 18.0), 1.0), None);
+        sel.press(&mut d, Point::new(10.0, 18.0), 0, 1.0);
+        sel.motion(&mut d, Point::new(30.0, 28.0), 0);
+        sel.release(&mut d);
+        assert_eq!(d.last().unwrap().geometry(), Rect::new(30.0, 20.0, 16.0, 16.0));
+        // Its handles themselves still resize it; the nearest one wins.
+        let frame = Selection::frame(d.last().unwrap(), 1.0);
+        let corner = Point::new(frame.right(), frame.bottom());
+        assert_eq!(sel.handle_at(&d, corner, 1.0), Some(Grip::Edges { left: false, right: true, top: false, bottom: true }));
+        // Shift pressed mid-drag applies at once.
+        sel.press(&mut d, corner, 0, 1.0);
+        sel.motion(&mut d, corner + Point::new(20.0, 4.0), 0);
+        sel.modifiers(&mut d, SHIFT);
+        let g = sel.moving().unwrap().geometry();
+        assert!((g.w - g.h).abs() < 0.01, "{g:?}");
     }
 
     #[test]
