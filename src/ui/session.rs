@@ -1966,11 +1966,15 @@ impl Session {
     fn set_windows(&mut self, o: usize) {
         let g = self.overlays[o].output.rect;
         let bounds = Rect::new(0.0, 0.0, g.w as f32, g.h as f32);
+        let monitors: Vec<IRect> = self.overlays.iter().map(|ov| ov.output.rect).collect();
         let list = self
             .st
             .windows
             .iter()
             .enumerate()
+            // (Flatshot's own capture overlay, a whole monitor's worth, isn't
+            // one to pick: its other windows, pins too, are)
+            .filter(|(_, w)| !(w.own && monitors.iter().any(|m| w.rect.contains_rect(m))))
             .filter_map(|(i, w)| {
                 let r = w.rect.translated(-g.x, -g.y).to_f().intersected(&bounds);
                 (r.w >= 8.0 && r.h >= 8.0).then_some((r, i))
@@ -2716,5 +2720,5 @@ fn clip_selection(r: Rect, bounds: Rect) -> Rect {
 
 /// The window the capture is of, as `Window`.
 pub fn window(rect: IRect, title: &str, app: &str) -> Window {
-    Window { rect, title: title.to_string(), app: app.to_string() }
+    Window { rect, title: title.to_string(), app: app.to_string(), own: false }
 }

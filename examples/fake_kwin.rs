@@ -54,6 +54,15 @@ fn results(w: u32, h: u32, format: u32) -> HashMap<String, OwnedValue> {
     m
 }
 
+/// As KWin does: without hide-caller-windows false, the caller's own
+/// windows would be left out of the picture (refused here, to be noticed).
+fn shows_caller(options: &HashMap<String, OwnedValue>) -> zbus::fdo::Result<()> {
+    match options.get("hide-caller-windows").and_then(|v| bool::try_from(&**v).ok()) {
+        Some(false) => Ok(()),
+        _ => Err(zbus::fdo::Error::InvalidArgs("the caller's own windows would be hidden".into())),
+    }
+}
+
 fn cursor(options: &HashMap<String, OwnedValue>) -> bool {
     options.get("include-cursor").and_then(|v| bool::try_from(&**v).ok()).unwrap_or(false)
 }
@@ -61,6 +70,7 @@ fn cursor(options: &HashMap<String, OwnedValue>) -> bool {
 #[zbus::interface(name = "org.kde.KWin.ScreenShot2")]
 impl FakeKWin {
     fn capture_screen(&self, name: &str, options: HashMap<String, OwnedValue>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedValue>> {
+        shows_caller(&options)?;
         let Some(i) = self.screens.iter().position(|s| s.0 == name) else {
             return Err(zbus::fdo::Error::InvalidArgs(format!("no screen {name}")));
         };
@@ -71,6 +81,7 @@ impl FakeKWin {
     }
 
     fn capture_active_window(&self, options: HashMap<String, OwnedValue>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedValue>> {
+        shows_caller(&options)?;
         let flag = |k: &str| options.get(k).and_then(|v| bool::try_from(&**v).ok()).unwrap_or(false);
         println!("window: cursor {} decoration {} shadow {}", flag("include-cursor"), flag("include-decoration"), flag("include-shadow"));
         let (w, h) = (300u32, 200u32);
@@ -85,7 +96,8 @@ impl FakeKWin {
         Ok(results(w, h, 6))
     }
 
-    fn capture_workspace(&self, _options: HashMap<String, OwnedValue>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedValue>> {
+    fn capture_workspace(&self, options: HashMap<String, OwnedValue>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedValue>> {
+        shows_caller(&options)?;
         send(pipe, pixels(1500, 900, 0x5A));
         Ok(results(1500, 900, 4))
     }

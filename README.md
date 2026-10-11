@@ -130,7 +130,7 @@ The keys can be changed in Settings → Shortcuts → Keys in Flatshot RS (so ca
 ### Captures and the tray
 
 - **The active window on KDE** is KWin's picture of the window itself: nothing covering it shows up, parts off screen are kept, and its rounded corners and shadow come out transparent (JPEG fills them in white). Settings → Capture → Window capture turns the title bar and borders, and the shadow, on or off. Clicking a window in the overlay still takes it from the frozen screen, as you see it.
-- **Window capture** includes panels, docks, notifications, menus and tooltips (Settings → Capture → Include panels and popups), on KDE and X11.
+- **Window capture** includes panels, docks, notifications, menus and tooltips (Settings → Capture → Include panels and popups), on KDE and X11. Flatshot RS's own windows (the editor, the settings, pins) are in the picture and can be picked like any other; only the capture overlay itself is left out.
 - **QR codes** are looked for while they're shown (<kbd>Q</kbd>); hidden at the start, the capture isn't looked through until you show them.
 - **Tray icon styles** (Settings → General → Tray icon): the app's colours, your theme's, a plain white or black outline for panels with symbolic icons, or Auto (white or black, following the desktop's light or dark scheme). The tray menu has every capture with its key, **Restart Flatshot RS** (after an upgrade) and **Quit Flatshot RS**.
 

@@ -102,6 +102,9 @@ fn capture_one(conn: &zbus::blocking::Connection, ask: &Ask<'_>, started: Instan
     let (read_end, write_end) = big_pipe().map_err(|e| format!("pipe: {e}"))?;
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
     options.insert("native-resolution", Value::Bool(true));
+    // KWin leaves the caller's windows out unless told not to: Flatshot's
+    // own (an editor, the settings, a pin) are on the screen as any other.
+    options.insert("hide-caller-windows", Value::Bool(false));
     let fd = Fd::from(write_end.as_fd());
     let reply = match ask {
         Ask::Screen(want) => {
