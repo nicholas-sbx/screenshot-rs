@@ -802,6 +802,7 @@ fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Imag
     s.pointer_enter(0, Point::new(400.0, 500.0));
     tap(&mut s, 0, 0x46, "f", 0); // (a filled box: its pixels are plain to check)
     drag(&mut s, 0, Point::new(700.0, 300.0), Point::new(900.0, 400.0), 0);
+    check!(s.st.toolbar_overlay == Some(1), "the toolbar didn't follow the drag onto the right monitor: {:?}", s.st.toolbar_overlay);
     let color = s.st.color().premul() | 0xFF00_0000;
     let f = frame(&mut s, 1)?;
     check!(s.overlays[1].foreign.len() == 1, "the right monitor doesn't have the left one's drawing");

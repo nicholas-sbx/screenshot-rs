@@ -1459,6 +1459,13 @@ impl Session {
         p + Point::new((a.x - b.x) as f32, (a.y - b.y) as f32)
     }
 
+    /// The overlay whose monitor `pos` (on overlay `o`) is over.
+    fn overlay_under(&self, o: usize, pos: Point) -> Option<usize> {
+        let g = self.overlays[o].output.rect;
+        let at = IPoint::new(pos.x.floor() as i32 + g.x, pos.y.floor() as i32 + g.y);
+        self.overlays.iter().position(|ov| ov.output.rect.contains(at))
+    }
+
     /// Each overlay, topmost drawings first (the other overlays' are painted
     /// over this one's own), with `pos` (on `o`) in its coordinates.
     fn topmost_first(&self, o: usize, pos: Point) -> Vec<(usize, Point)> {
@@ -2501,7 +2508,10 @@ impl Session {
 
     fn canvas_motion(&mut self, o: usize, pos: Point, mods: i32) {
         self.overlays[o].cursor_pos = Some(pos);
-        self.activate(o);
+        // (a drag keeps the pointer on the overlay it started on, wherever
+        // it goes: the toolbar follows it onto the monitor it's over)
+        let under = self.overlay_under(o, pos).unwrap_or(o);
+        self.activate(under);
         if let Some(k) = self.drag_owner.filter(|&k| k < self.overlays.len() && self.overlays[k].selection.dragging()) {
             let local = self.to_overlay(o, k, pos);
             let ov = &mut self.overlays[k];
