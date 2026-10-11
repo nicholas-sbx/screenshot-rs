@@ -136,14 +136,20 @@ fn sound_folder(current: &str) -> PathBuf {
 impl App {
     /// Open the settings window (or keep the one open).
     pub(super) fn show_settings(&mut self) {
+        let token = self.tray.tray.as_ref().and_then(|t| t.take_activation_token());
         if self.settings.is_some() {
-            return; // (Wayland has no raising a window without the desktop's token)
+            self.dpy.activate(Owner::Settings, token);
+            self.dpy.flush();
+            return;
         }
         if let Err(e) = self.dpy.add_window(Owner::Settings, TITLE, SIZE, true) {
             self.report_failure("Can't show the settings", &e);
             return;
         }
         self.dpy.set_min_size(Owner::Settings, MIN_SIZE);
+        if token.is_some() {
+            self.dpy.activate(Owner::Settings, token);
+        }
         let (kde, jobs) = mpsc::channel();
         let (answers_tx, answers) = mpsc::channel();
         let waker = self.waker.clone();

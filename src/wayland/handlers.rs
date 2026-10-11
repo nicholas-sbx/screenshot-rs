@@ -425,5 +425,16 @@ impl ProvidesRegistryState for App {
     registry_handlers![OutputState, SeatState];
 }
 
+impl smithay_client_toolkit::activation::ActivationHandler for App {
+    type RequestUdata = crate::platform::Owner;
+
+    fn new_token(&mut self, token: String, data: &smithay_client_toolkit::activation::RequestData<crate::platform::Owner>) {
+        let wl = self.wl();
+        if let (Some(a), Some(surface)) = (&wl.activation, wl.surf(data.udata).map(|s| s.wl.clone())) {
+            a.activate::<App>(&surface, token);
+        }
+    }
+}
+
 delegate_registry!(App);
 delegate_dispatch2!(App);

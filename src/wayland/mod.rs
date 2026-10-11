@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use smithay_client_toolkit::activation::{ActivationState, RequestData};
 use smithay_client_toolkit::compositor::{CompositorState, FrameCallbackData};
 use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::registry::RegistryState;
@@ -166,6 +167,8 @@ pub struct Wayland {
     pub buffer_released: bool,
     pub captures: Vec<screencopy::Grab>,
     pub clipboard: clipboard::Clipboard,
+    /// to bring a window to the front (xdg-activation)
+    pub activation: Option<ActivationState>,
 }
 
 impl Wayland {
@@ -207,6 +210,7 @@ impl Wayland {
             buffer_released: false,
             captures: Vec::new(),
             clipboard: clipboard::Clipboard::bind(&globals, &qh),
+            activation: ActivationState::bind(&globals, &qh).ok(),
             conn,
             qh,
         };
@@ -660,6 +664,22 @@ impl Wayland {
             && p.set_cursor(&self.conn, icon).is_ok()
         {
             self.surfaces[i].cursor = Some(icon);
+        }
+    }
+
+    /// Bring `owner`'s window to the front, focused: with `token` (from
+    /// the desktop, for the click that asked), else one asked for with our
+    /// latest input.
+    pub fn activate(&mut self, owner: Owner, token: Option<String>) {
+        let (Some(a), Some(surface)) = (&self.activation, self.surf(owner).map(|s| s.wl.clone())) else { return };
+        match token {
+            Some(token) => a.activate::<App>(&surface, token),
+            None => {
+                let from =
+                    self.keyboard_on.as_ref().or(self.pointer_on.as_ref()).and_then(|id| self.surfaces.iter().find(|s| &s.wl.id() == id)).map(|s| s.wl.clone());
+                let seat = self.seats.seats().next().map(|s| (s, self.serial));
+                a.request_token(&self.qh, RequestData { app_id: Some(crate::APP_ID.to_string()), seat_and_serial: seat, surface: from, udata: owner });
+            }
         }
     }
 
