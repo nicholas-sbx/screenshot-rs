@@ -850,7 +850,40 @@ fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Imag
     }
     record_across_monitors(tmp)?;
     area_keys(tmp)?;
+    text_fields(tmp)?;
     println!("self-test: drawings across monitors");
+    Ok(())
+}
+
+/// Texts: with the text tool, a click away from the one being typed
+/// finishes it and starts another there; one left blank goes.
+fn text_fields(tmp: &Path) -> R {
+    let picture = Arc::new(Image::filled(800, 600, 0xFF404040)?);
+    let screen = Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 800, 600), scale: 1.0 }, picture, pointer: None };
+    let mut s = session(test_config(tmp), Request::default(), vec![screen], FakeRecorder { problem: None, span: false });
+    s.pointer_enter(0, Point::new(300.0, 300.0));
+    tap(&mut s, 0, 0x54, "t", 0);
+    click(&mut s, 0, Point::new(100.0, 100.0), 0);
+    for ch in "hi".chars() {
+        tap(&mut s, 0, 0x41, &ch.to_string(), 0);
+    }
+    click(&mut s, 0, Point::new(400.0, 300.0), 0);
+    let typing_at = s.st.text_edit.as_ref().and_then(|(_, t)| t.as_text()).map(|t| t.pos);
+    check!(s.overlays[0].annotations.len() == 1, "the first text wasn't kept");
+    check!(typing_at.is_some_and(|p| p.distance(Point::new(400.0, 300.0)) < 40.0), "no new text where clicked: {typing_at:?}");
+    // Left blank: gone when another is begun, and when finished.
+    click(&mut s, 0, Point::new(500.0, 400.0), 0);
+    check!(s.overlays[0].annotations.len() == 1 && s.st.text_edit.is_some(), "a blank text was kept");
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    check!(s.overlays[0].annotations.len() == 1 && s.st.text_edit.is_none());
+    // Typed again and emptied: it goes (a step undo brings back).
+    let at = s.overlays[0].annotations[0].bounds().center();
+    click(&mut s, 0, at, 0);
+    check!(s.st.text_edit.as_ref().is_some_and(|(_, t)| t.replaces == Some(0)), "not editing the text again");
+    tap(&mut s, 0, 0x41, "a", CTRL);
+    tap(&mut s, 0, key::BACKSPACE, "", 0);
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    check!(s.overlays[0].annotations.iter().all(|a| a.hidden || a.is_removed()), "an emptied text stayed");
     Ok(())
 }
 

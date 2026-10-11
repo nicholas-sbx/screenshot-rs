@@ -1635,7 +1635,15 @@ impl Session {
             t.editing = false;
         }
         if o < self.overlays.len() {
-            if shape.is_valid() && shape.text_changed() {
+            // A text left blank goes (one typed again: deleted, as a step undo brings back).
+            if shape.is_blank_text() {
+                if let Some(i) = replaces
+                    && let Some(orig) = self.overlays[o].annotations.get(i)
+                {
+                    let gone = Shape::removed(orig, i);
+                    self.commit_shape(o, gone);
+                }
+            } else if shape.is_valid() && shape.text_changed() {
                 self.commit_shape(o, shape);
             } else if let Some(i) = replaces
                 && let Some(orig) = self.overlays[o].annotations.get_mut(i)
@@ -2457,9 +2465,9 @@ impl Session {
                 }
             }
         }
-        if self.commit_text() && self.st.tool == Tool::Text && self.text_at_any(o, pos).is_none() {
-            return; // the first click just finishes the text being typed
-        }
+        // (with the text tool, a click elsewhere finishes the text being
+        // typed and starts another there)
+        self.commit_text();
         let tool = self.st.tool;
         if tool == Tool::Record && self.st.countdown.is_some() {
             return;

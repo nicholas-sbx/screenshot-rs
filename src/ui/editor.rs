@@ -1089,7 +1089,15 @@ impl Editor {
         if let Some(t) = shape.as_text_mut() {
             t.editing = false;
         }
-        if shape.is_valid() && shape.text_changed() {
+        // A text left blank goes (one typed again: deleted, as a step undo brings back).
+        if shape.is_blank_text() {
+            if let Some(i) = replaces
+                && let Some((_, orig)) = self.shapes.get(i)
+            {
+                let gone = Shape::removed(orig, i);
+                self.commit(gone);
+            }
+        } else if shape.is_valid() && shape.text_changed() {
             self.commit(shape);
         } else if let Some(i) = replaces
             && let Some((_, orig)) = self.shapes.get_mut(i)
@@ -1439,9 +1447,9 @@ impl Editor {
             self.damaged = true;
             return;
         }
-        if self.commit_text() && self.tool == Tool::Text && self.text_at(pic).is_none() {
-            return; // (the first click finishes the text being typed)
-        }
+        // (with the text tool, a click elsewhere finishes the text being
+        // typed and starts another there)
+        self.commit_text();
         match self.tool {
             Tool::Text => {
                 let shape = match self.text_at(pic) {

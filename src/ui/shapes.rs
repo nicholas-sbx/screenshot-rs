@@ -486,6 +486,11 @@ impl Shape {
         }
     }
 
+    /// A text with nothing (but spaces) in it.
+    pub fn is_blank_text(&self) -> bool {
+        matches!(&self.kind, Kind::Text(t) if t.edit.text.trim().is_empty())
+    }
+
     /// For an edited copy of a text: is it any different from the original?
     pub fn text_changed(&self) -> bool {
         let Kind::Text(t) = &self.kind else { return true };
