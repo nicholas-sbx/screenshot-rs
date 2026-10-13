@@ -282,6 +282,14 @@ impl ColorPicker {
         Rect::new(self.pos.x, self.pos.y, PICKER_SIZE.0, PICKER_SIZE.1)
     }
 
+    /// No eyedropper (with no screen to take a colour from): the hex field
+    /// takes its place.
+    pub fn without_dropper(mut self) -> ColorPicker {
+        self.dropper.rect = Rect::default();
+        self.hex.rect.w = SHADES.w;
+        self
+    }
+
     /// The hex field's caret, while it's typed in.
     pub fn caret_rect(&self) -> Option<Rect> {
         self.hex.focused.then(|| self.hex.caret_rect().translated(self.pos))
@@ -332,7 +340,7 @@ impl ColorPicker {
 
     pub fn press(&mut self, at: Point, shift: bool) -> PickerEvent {
         let pos = self.local(at);
-        if self.dropper.rect.contains(pos) {
+        if !self.dropper.rect.is_empty() && self.dropper.rect.contains(pos) {
             self.ptr.pressed = Some("dropper");
             return PickerEvent::None;
         }
@@ -351,7 +359,7 @@ impl ColorPicker {
 
     pub fn motion(&mut self, at: Point, buttons_down: bool) -> PickerEvent {
         let pos = self.local(at);
-        self.ptr.hovered = self.dropper.rect.contains(pos).then_some("dropper");
+        self.ptr.hovered = (!self.dropper.rect.is_empty() && self.dropper.rect.contains(pos)).then_some("dropper");
         if buttons_down && self.hex.focused && self.dragging.is_none() && self.ptr.pressed.is_none() {
             self.hex.drag_to(pos);
             return PickerEvent::None;
@@ -451,7 +459,9 @@ impl ColorPicker {
         let mut hex = self.hex.clone();
         hex.rect = hex.rect.translated(o);
         hex.paint(p, true);
-        paint_item(p, &self.dropper, o, &self.ptr);
+        if !self.dropper.rect.is_empty() {
+            paint_item(p, &self.dropper, o, &self.ptr);
+        }
         let _ = c;
     }
 }

@@ -234,7 +234,8 @@ pub const OUTLINE_DARK: Color = Color::rgb(0x121218);
 /// frame around the area being recorded. The same red in every theme.
 pub const REC: Color = Color::rgb(0xFF4747);
 
-/// Annotation colours, in toolbar order (keys 1-7).
+/// The toolbar's colours to start with, in order (keys 1-7); the
+/// settings can change them (`config::DEFAULT_PALETTE`, as hex).
 pub const SWATCHES: [Color; 7] = [
     Color::rgb(0xFF6A3D), // ember
     Color::rgb(0xFFC53D), // amber
@@ -271,6 +272,12 @@ mod tests {
         assert!(l.g > 0x6A && l.b > 0x3D);
         let d = Color::rgb(0xFF4747).darker(115);
         assert!(d.r < 255);
+    }
+
+    #[test]
+    fn default_swatches() {
+        let hex: Vec<String> = SWATCHES.iter().map(|c| c.hex()).collect();
+        assert_eq!(hex, crate::config::DEFAULT_PALETTE);
     }
 
     #[test]

@@ -24,7 +24,7 @@ use crate::ui::panels::{CodeChip, ColorPicker, PickerEvent, RecordPanel, RecordV
 use crate::ui::selection::Selection;
 use crate::ui::shapes::{self, Mods, Shape, Tool, copy_for_editing};
 use crate::ui::snapping::{self, EdgeMaps, py_round};
-use crate::ui::state::{CUSTOM, Desktop, State};
+use crate::ui::state::{CUSTOM, Desktop, State, color_for_key, swatch_index};
 use crate::ui::textedit::KeyResult;
 use crate::ui::toolbar::{CodeScan, Toolbar, View};
 use crate::ui::widgets::Look;
@@ -1138,11 +1138,12 @@ impl Session {
         if self.st.tool == Tool::Record {
             return;
         }
+        let index = if index < self.st.palette.len() { index } else { CUSTOM };
         if self.st.tool == Tool::Select
             && let Some(so) = self.selected_on()
         {
             // (it changes the selected drawing)
-            self.st.color_index = index.min(CUSTOM);
+            self.st.color_index = index;
             let color = self.st.color();
             self.restyle_selected(so, Some(color), None);
             return;
@@ -1150,7 +1151,7 @@ impl Session {
         if !self.st.tool.uses_color() {
             self.st.tool = self.st.colour_tool;
         }
-        self.st.color_index = index.min(CUSTOM);
+        self.st.color_index = index;
         let color = self.st.color();
         if let Some((_, shape)) = &mut self.st.text_edit {
             shape.color = color;
@@ -1743,8 +1744,10 @@ impl Session {
             _ => {
                 if let Some(t) = action.strip_prefix("tool.").and_then(Tool::from_id) {
                     self.set_tool(t);
-                } else if let Some(i) = action.strip_prefix("color.").and_then(|n| n.parse::<usize>().ok()) {
-                    self.set_color(i.saturating_sub(1));
+                } else if let Some(i) =
+                    action.strip_prefix("color.").and_then(|n| n.parse::<usize>().ok()).and_then(|n| color_for_key(n, self.st.palette.len()))
+                {
+                    self.set_color(i);
                 }
             }
         }
@@ -2503,8 +2506,8 @@ impl Session {
             "screen" => self.whole_screen(o),
             "close" => self.cancel(),
             _ => {
-                if let Some(i) = id.strip_prefix("color.").and_then(|n| n.parse::<usize>().ok()) {
-                    self.set_color(i.saturating_sub(1));
+                if let Some(i) = swatch_index(id) {
+                    self.set_color(i);
                 } else if let Some(t) = Tool::from_id(id) {
                     self.set_tool(t);
                 }
@@ -2756,6 +2759,7 @@ fn toolbar_view(st: &State, codes: CodeScan, can_undo: bool, can_redo: bool) -> 
     View {
         tool: st.tool,
         can_record: st.can_record,
+        palette: &st.palette,
         color_index: st.color_index,
         custom_color: st.custom_color,
         size: st.size,
