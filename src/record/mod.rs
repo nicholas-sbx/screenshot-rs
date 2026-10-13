@@ -93,13 +93,19 @@ pub fn method() -> Method {
 pub struct Options {
     /// see [`FORMATS`]
     pub format: String,
-    pub fps: u32,
+    /// frames a second; None: native, as the stream gives them
+    pub fps: Option<u32>,
     pub mic: bool,
     pub system_audio: bool,
     pub cursor: bool,
 }
 
 impl Options {
+    /// The frame rate the bitrate is worked out for (native: as for 60).
+    fn budget_fps(&self) -> u32 {
+        self.fps.unwrap_or(60)
+    }
+
     /// The PulseAudio sources to record (none for a GIF).
     pub fn audio(&self) -> Vec<&'static str> {
         if self.format == "gif" {
@@ -127,6 +133,9 @@ pub struct Target {
     pub scale: f64,
     /// every monitor, by name (for an area across them)
     pub monitors: Vec<(String, IRect)>,
+    /// how often the monitor shows a new picture, if it says (for a native
+    /// frame rate where there's no stream to give it: X11)
+    pub refresh: Option<f64>,
 }
 
 impl Target {
@@ -390,7 +399,7 @@ fn gst_audio_encoder(fmt: &str) -> Option<Vec<&'static str>> {
 pub fn gst_pipeline(source: &[String], frame: (u32, u32), crop: IRect, opts: &Options, path: &Path) -> Result<Vec<String>, String> {
     let fmt = if opts.format == "webm" { "webm" } else { "mp4" };
     let encoder = gst_video_encoder(fmt).ok_or_else(|| problem(Method::TestGst, fmt).unwrap_or_else(|| "no GStreamer video encoder".into()))?;
-    let kbps = bitrate(crop.w, crop.h, opts.fps);
+    let kbps = bitrate(crop.w, crop.h, opts.budget_fps());
     let (w, h) = (frame.0 as i32, frame.1 as i32);
     let (right, bottom) = ((w - crop.x - crop.w).max(0), (h - crop.y - crop.h).max(0));
     let mut a: Vec<String> = source.to_vec();
@@ -417,11 +426,15 @@ pub fn gst_pipeline(source: &[String], frame: (u32, u32), crop: IRect, opts: &Op
         "!".into(),
         caps(crop.w, crop.h),
         "!".into(),
-        "videorate".into(),
-        "!".into(),
-        format!("video/x-raw,framerate={}/1", opts.fps),
-        "!".into(),
-        "videoconvert".into(),
+    ] {
+        a.push(word);
+    }
+    // At the rate chosen, else (native) the frames as the stream gives them.
+    if let Some(fps) = opts.fps {
+        a.extend(["videorate".to_string(), "!".into(), format!("video/x-raw,framerate={fps}/1"), "!".into()]);
+    }
+    for word in [
+        "videoconvert".to_string(),
         "!".into(),
         "video/x-raw,format=I420".into(),
         "!".into(),
@@ -500,10 +513,16 @@ pub fn launch(how: Method, target: &Target, opts: &Options, path: &Path, cast: O
     }
     let audio = opts.audio();
     let ext = segment_extension(&opts.format);
-    let fps = opts.fps.to_string();
     let int = rustix::process::Signal::INT;
     match how {
         Method::X11 | Method::Test => {
+            // (x11grab takes the screen as often as it's asked: native is as
+            // often as the monitor shows a new picture)
+            let fps = match (opts.fps, how) {
+                (Some(f), _) => f.to_string(),
+                (None, Method::X11) => format!("{:.2}", target.refresh.filter(|r| (1.0..=500.0).contains(r)).unwrap_or(60.0)),
+                (None, _) => "30".to_string(),
+            };
             let video = if how == Method::X11 {
                 // X11's screen is in device pixels.
                 let g = target.shown_area();
@@ -529,7 +548,7 @@ pub fn launch(how: Method, target: &Target, opts: &Options, path: &Path, cast: O
             argv.extend(video);
             argv.extend(inputs);
             argv.extend(mapping);
-            argv.extend(ffmpeg_codecs(ext, crop, opts.fps, !audio.is_empty()));
+            argv.extend(ffmpeg_codecs(ext, crop, opts.budget_fps(), !audio.is_empty()));
             argv.extend(["-r".to_string(), fps.clone(), path.display().to_string()]);
             Ok(Launch { argv, stream: None, stop: int, about: format!("{}x{}+{}+{} with {}", crop.w, crop.h, crop.x, crop.y, how.label()) })
         }
@@ -538,7 +557,11 @@ pub fn launch(how: Method, target: &Target, opts: &Options, path: &Path, cast: O
             // -D: frames all the time, not only when the area changes: a
             // steady rate, and a stop is heard at once (with no new frame
             // it would wait, and be killed with its file unfinished).
-            let mut argv = strings(&["wf-recorder", "-y", "-D", "-g", &format!("{},{} {}x{}", r.x, r.y, r.w, r.h), "-r", &fps, "-x", "yuv420p", "-f"]);
+            let mut argv = strings(&["wf-recorder", "-y", "-D", "-g", &format!("{},{} {}x{}", r.x, r.y, r.w, r.h)]);
+            if let Some(fps) = opts.fps {
+                argv.extend(["-r".to_string(), fps.to_string()]); // (else as the compositor gives them)
+            }
+            argv.extend(strings(&["-x", "yuv420p", "-f"]));
             argv.push(path.display().to_string());
             if ext == "webm" {
                 argv.extend(strings(&["-c", "libvpx", "-p", "deadline=realtime", "-p", "cpu-used=8"]));
@@ -674,9 +697,10 @@ pub fn join(segments: &[std::path::PathBuf], out: &Path) -> Result<(), String> {
     result
 }
 
-/// A GIF with a palette of its own (far better than the default one).
-pub fn to_gif(video: &Path, out: &Path, fps: u32) -> Result<(), String> {
-    let rate = fps.min(30);
+/// A GIF with a palette of its own (far better than the default one), at
+/// `fps` (native: as for 30, which is as fast as a GIF goes here).
+pub fn to_gif(video: &Path, out: &Path, fps: Option<u32>) -> Result<(), String> {
+    let rate = fps.unwrap_or(30).min(30);
     let filter = format!("fps={rate},split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle");
     ffmpeg(&strings(&["-i", &video.display().to_string(), "-vf", &filter, "-loop", "0", &out.display().to_string()]), Duration::from_secs(1800))
 }
@@ -716,7 +740,7 @@ mod tests {
 
     fn target(rect: IRect, scale: f64) -> Target {
         let monitors = vec![("DP-1".to_string(), IRect::new(0, 0, 1920, 1080)), ("DP-2".to_string(), IRect::new(1920, 0, 1280, 1024))];
-        Target { rect, monitor: monitors[0].1, monitor_name: "DP-1".into(), scale, monitors }
+        Target { rect, monitor: monitors[0].1, monitor_name: "DP-1".into(), scale, monitors, refresh: Some(59.94) }
     }
 
     #[test]
@@ -754,7 +778,7 @@ mod tests {
     #[test]
     fn recorders_are_set_up() {
         let t = target(IRect::new(100, 100, 640, 480), 1.0);
-        let opts = Options { format: "mp4".into(), fps: 30, mic: false, system_audio: false, cursor: true };
+        let opts = Options { format: "mp4".into(), fps: Some(30), mic: false, system_audio: false, cursor: true };
         let l = launch(Method::Test, &t, &opts, Path::new("/tmp/x/part-001.mp4"), None).unwrap();
         assert_eq!(l.argv[0], "ffmpeg");
         assert!(l.argv.windows(2).any(|w| w[0] == "-i" && w[1] == "testsrc2=size=640x480:rate=30"));
@@ -768,6 +792,21 @@ mod tests {
         let (inputs, map) = ffmpeg_audio(&[MIC, SYSTEM], 1);
         assert_eq!(inputs.iter().filter(|a| *a == "-i").count(), 2);
         assert!(map.iter().any(|m| m.starts_with("[1:a][2:a]amix=inputs=2")));
+        // Native: as the stream gives them (no rate forced), or on X11 as
+        // often as the monitor refreshes.
+        let native = Options { fps: None, ..opts.clone() };
+        let l = launch(Method::WfRecorder, &t, &native, Path::new("/tmp/n.mp4"), None).unwrap();
+        assert!(!l.argv.contains(&"-r".to_string()));
+        let l = launch(Method::X11, &t, &native, Path::new("/tmp/n.mp4"), None).unwrap();
+        assert!(l.argv.windows(2).any(|w| w[0] == "-framerate" && w[1] == "59.94"));
+        let gst = gst_pipeline(&["videotestsrc".to_string()], (1920, 1080), IRect::new(0, 0, 640, 480), &native, Path::new("/tmp/n.mp4"));
+        if let Ok(gst) = gst {
+            assert!(!gst.iter().any(|w| w == "videorate" || w.contains("framerate=")), "{gst:?}");
+        }
+        let gst = gst_pipeline(&["videotestsrc".to_string()], (1920, 1080), IRect::new(0, 0, 640, 480), &opts, Path::new("/tmp/n.mp4"));
+        if let Ok(gst) = gst {
+            assert!(gst.iter().any(|w| w == "video/x-raw,framerate=30/1"), "{gst:?}");
+        }
         assert_eq!(clock(Duration::from_secs(65)), "01:05");
         assert_eq!(clock(Duration::from_secs(3723)), "1:02:03");
     }

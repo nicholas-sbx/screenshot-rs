@@ -515,7 +515,7 @@ impl RecordPanel {
         };
         let mut fps = Item::new(
             "fps",
-            Look::Chip { text: format!("{} fps", v.fps), icon: None, primary: false, key: String::new(), on: None },
+            Look::Chip { text: if v.fps == 0 { "Native".into() } else { format!("{} fps", v.fps) }, icon: None, primary: false, key: String::new(), on: None },
             "Frames per second  ·  click to change",
         );
         fps.enabled = true;

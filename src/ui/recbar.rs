@@ -82,6 +82,11 @@ impl RecBar {
         ((self.size.0 * self.scale).ceil() as u32, (self.size.1 * self.scale).ceil() as u32)
     }
 
+    /// Draw all of it again (on a surface of its own).
+    pub fn invalidate(&mut self) {
+        self.damaged = true;
+    }
+
     pub fn set_scale(&mut self, scale: f32) {
         if (scale - self.scale).abs() > 1e-3 {
             self.scale = scale;

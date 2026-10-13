@@ -23,8 +23,8 @@ pub struct Monitor {
     pub name: String,
     /// where it is in the desktop, in logical pixels
     pub rect: IRect,
-    /// its integer scale (the real one may be fractional)
-    pub scale: i32,
+    /// its scale: device pixels per logical pixel (fractional, as 1.25)
+    pub scale: f32,
 }
 
 /// The display server's own handle on a monitor.
@@ -51,6 +51,10 @@ pub enum Owner {
     Overlay(usize),
     /// a pinned capture, by id
     Pin(u32),
+    /// a pin's copy on another monitor it reaches over onto (by the pin's
+    /// id, and a number of its own): a layer surface shows only on the
+    /// monitor it was made on
+    PinPart(u32, u8),
     /// a popup menu, by id
     Menu(u32),
     /// an annotation editor's window, by id
@@ -184,9 +188,14 @@ impl Display {
         each!(self, d => d.remove_overlays())
     }
 
+    /// How many times a second `monitor` shows a new picture, if it says.
+    pub fn refresh_rate(&self, monitor: &Monitor) -> Option<f64> {
+        each!(self, d => d.refresh_rate(monitor))
+    }
+
     /// Move a placed surface (logical, from its monitor's top left) and size it.
-    pub fn place_layer(&mut self, owner: Owner, at: (i32, i32), size: (u32, u32)) {
-        each!(self, d => d.place_layer(owner, at, size))
+    pub fn place_layer(&mut self, owner: Owner, monitor: &Monitor, at: (i32, i32), size: (u32, u32)) {
+        each!(self, d => d.place_layer(owner, monitor, at, size))
     }
 
     /// The size `owner`'s surface is shown at (logical), ahead of the

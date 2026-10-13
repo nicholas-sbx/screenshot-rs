@@ -23,7 +23,7 @@ use crate::clipboard::TEXT_MIMES;
 use crate::config::{self, Config};
 use crate::deliver;
 use crate::desktop::notify;
-use crate::geom::{Damage, IRect, Point};
+use crate::geom::{Damage, IPoint, IRect, Point};
 use crate::image::{Canvas, Image};
 use crate::platform::{Monitor, Owner, Painted};
 use crate::record::portal::{Failure, ScreenCast};
@@ -223,7 +223,8 @@ fn place(src: &Path, target: &Path) -> Result<PathBuf, String> {
 }
 
 impl Recording {
-    pub fn new(job: RecordJob, monitors: &[Monitor], cfg: Config, waker: Waker) -> Result<Recording, String> {
+    /// `refresh`: how often the area's monitor shows a new picture, if known.
+    pub fn new(job: RecordJob, monitors: &[Monitor], refresh: Option<f64>, cfg: Config, waker: Waker) -> Result<Recording, String> {
         let RecordJob { area, output, scale, shot, thumbnail, format, fps, mic, system_audio, cursor } = job;
         let target = Target {
             rect: area,
@@ -231,8 +232,10 @@ impl Recording {
             monitor_name: output.name,
             scale: scale as f64,
             monitors: monitors.iter().map(|m| (m.name.clone(), m.rect)).collect(),
+            refresh,
         };
-        let opts = Options { format, fps: fps.clamp(1, 120) as u32, mic, system_audio, cursor };
+        // (0: native)
+        let opts = Options { format, fps: (fps > 0).then(|| fps.clamp(1, 120) as u32), mic, system_audio, cursor };
         Ok(Recording {
             state: State::Starting,
             target,
@@ -657,7 +660,8 @@ impl App {
             return false;
         }
         let monitors = self.dpy.monitors();
-        let rec = match Recording::new(job, &monitors, self.cfg.clone(), self.waker.clone()) {
+        let refresh = monitors.iter().find(|m| m.name == job.output.name).and_then(|m| self.dpy.refresh_rate(m));
+        let rec = match Recording::new(job, &monitors, refresh, self.cfg.clone(), self.waker.clone()) {
             Ok(r) => r,
             Err(e) => {
                 self.report_failure("Recording failed", &e);
@@ -878,6 +882,7 @@ impl App {
         let Some(bar) = &mut r.bar else { return };
         let p = |at: (f64, f64)| Point::new(at.0 as f32, at.1 as f32);
         let mut action = None;
+        let mut dropped = false;
         match ev {
             Input::Enter(at) | Input::Motion(at, _) => {
                 bar.pointer_motion(Some(p(at)));
@@ -901,9 +906,7 @@ impl App {
                 }
             }
             Input::Button(0x110, pressed, at) => {
-                if !pressed {
-                    r.bar_drag = None;
-                }
+                dropped = !pressed && r.bar_drag.take().is_some();
                 action = bar.button(pressed, p(at));
             }
             _ => {}
@@ -913,6 +916,9 @@ impl App {
             Some(BarAction::Stop) => r.rec.stop(),
             Some(BarAction::Discard) => r.rec.discard(),
             None => {}
+        }
+        if dropped {
+            self.rehome_recbar();
         }
         self.serve_recording();
     }
@@ -926,17 +932,53 @@ impl App {
         true
     }
 
-    /// Put the dragged bar where the pointer took it (on its monitor).
+    /// Put the dragged bar where the pointer took it: on the monitor its
+    /// middle is over, whichever that is (it's that monitor's once let go:
+    /// see `rehome_recbar`).
     fn place_recbar(&mut self) {
+        let monitors = self.dpy.monitors();
         let Some(r) = &mut self.recording else { return };
         let (Some(d), Some((m, at))) = (r.bar_drag, &mut r.bar_place) else { return };
         let size = r.bar.as_ref().map(|b| b.size()).unwrap_or((1, 1));
-        let x = ((d.from.0 as f64 + d.moved.0).round() as i32).clamp(0, (m.rect.w - size.0 as i32).max(0));
-        let y = ((d.from.1 as f64 + d.moved.1).round() as i32).clamp(0, (m.rect.h - size.1 as i32).max(0));
+        let (w, h) = (size.0 as i32, size.1 as i32);
+        let home = m.rect;
+        let x = home.x + (d.from.0 as f64 + d.moved.0).round() as i32;
+        let y = home.y + (d.from.1 as f64 + d.moved.1).round() as i32;
+        let middle = IPoint::new(x + w / 2, y + h / 2);
+        let on = monitors.iter().find(|m| m.rect.contains(middle)).map_or(home, |m| m.rect);
+        let x = x.clamp(on.x, (on.x2() - w).max(on.x)) - home.x;
+        let y = y.clamp(on.y, (on.y2() - h).max(on.y)) - home.y;
         if (x, y) != *at {
             *at = (x, y);
-            self.dpy.place_layer(Owner::RecBar, (x, y), size);
+            self.dpy.place_layer(Owner::RecBar, m, (x, y), size);
         }
+    }
+
+    /// The bar let go over another monitor is that monitor's now (a layer
+    /// surface stays on the monitor it was made on: one of its own there).
+    fn rehome_recbar(&mut self) {
+        let monitors = self.dpy.monitors();
+        let Some(r) = &mut self.recording else { return };
+        let (Some(bar), Some((m, at))) = (&mut r.bar, &mut r.bar_place) else { return };
+        let size = bar.size();
+        let g = IRect::new(m.rect.x + at.0, m.rect.y + at.1, size.0 as i32, size.1 as i32);
+        let Some(to) = monitors.iter().find(|n| n.rect.contains(g.center())).cloned() else { return };
+        if to.name == m.name && to.rect == m.rect {
+            return;
+        }
+        let place = (g.x - to.rect.x, g.y - to.rect.y);
+        *m = to.clone();
+        *at = place;
+        bar.invalidate();
+        if self.dpy.is_x11() {
+            self.dpy.place_layer(Owner::RecBar, &to, place, size);
+        } else {
+            self.dpy.remove(Owner::RecBar);
+            if !self.dpy.add_control(Owner::RecBar, &to, place, size, &super::layer_namespace(), false) {
+                crate::warn!("the recording's controls could not go over to {}", to.name);
+            }
+        }
+        self.dpy.flush();
     }
 
     /// Draw the bar and the marks, if they changed.

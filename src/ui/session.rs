@@ -230,7 +230,12 @@ pub struct Session {
     redo_stack: Vec<usize>,
     /// Esc went down here; it acts when it comes up
     escape_down: bool,
-    countdown_overlay: Option<usize>,
+    /// the window the area to record is, if one was clicked
+    rec_window: Option<usize>,
+    /// The area to record being moved or resized: on which overlay (the
+    /// pointer stays on it), by which handle, from where (its coordinates),
+    /// and the area then (also its coordinates).
+    rec_drag: Option<(usize, Handle, Point, Rect)>,
     /// a selection may cross monitors (the setting, and more than one)
     may_span: bool,
     /// all the monitors (global logical)
@@ -287,6 +292,7 @@ impl Session {
             overlays.push(ov);
         }
         let n = overlays.len();
+        st.monitors = overlays.iter().map(|o| (o.output.rect, o.dpr)).collect();
         let (tx, rx) = mpsc::channel();
         let may_span = st.cfg.span_monitors && !request.image && n > 1;
         let mut s = Session {
@@ -304,7 +310,8 @@ impl Session {
             stacked: 0,
             redo_stack: Vec::new(),
             escape_down: false,
-            countdown_overlay: None,
+            rec_window: None,
+            rec_drag: None,
             may_span,
             virtual_rect,
             primary: primary.min(n.saturating_sub(1)),
@@ -410,7 +417,7 @@ impl Session {
     pub fn cursor(&self, o: usize) -> CursorShape {
         let Some(ov) = self.overlays.get(o) else { return CursorShape::Arrow };
         let canvas = || {
-            if let Some((h, ..)) = ov.rec_drag {
+            if let Some((_, h, ..)) = self.rec_drag.filter(|d| d.0 == o) {
                 return handle_cursor(h);
             }
             // (text being selected by dragging)
@@ -419,7 +426,8 @@ impl Session {
             }
             if self.st.tool == Tool::Record
                 && ov.sel_origin.is_none()
-                && let Some(h) = ov.cursor_pos.and_then(|p| ov.handle_at(p))
+                && self.st.countdown.is_none()
+                && let Some(h) = ov.cursor_pos.and_then(|p| ov.handle_at(&self.st, p))
             {
                 return handle_cursor(h);
             }
@@ -581,8 +589,9 @@ impl Session {
         self.pointer[o] = None;
         let ov = &mut self.overlays[o];
         ov.cursor_pos = None;
-        ov.hover_window = None;
         ov.snap_point = None;
+        // (the other monitors stop showing the window it was over, too)
+        self.update_hover(o);
         self.set_hover(o, Hover::default());
     }
 
@@ -727,7 +736,7 @@ impl Session {
         if let Some(o) = moved
             && spans
         {
-            self.selection_moved(o, None);
+            self.selection_moved(o, None, None);
         }
     }
 
@@ -802,9 +811,10 @@ impl Session {
         }
         let save_keys = ctrl && (press.key == key::S || press.key == key::C);
         if self.st.tool == Tool::Record && enter {
-            match (0..self.overlays.len()).find(|&i| self.overlays[i].rec_rect.is_some()) {
-                Some(armed) => self.start_countdown(armed),
-                None => self.whole_screen(target),
+            if self.st.rec_area.is_some() {
+                self.start_countdown();
+            } else {
+                self.whole_screen(target);
             }
         } else if self.st.tool == Tool::Record && save_keys {
         } else if let Some(action) = self.st.keymap.action(press, Where::Capture) {
@@ -827,7 +837,7 @@ impl Session {
             self.close_picker(); // (its hint says Esc stops it)
         } else {
             self.close_picker(); // it closes, and Esc still does what it does
-            if !(0..self.overlays.len()).any(|o| self.cancel_gesture(o)) {
+            if !((0..self.overlays.len()).any(|o| self.cancel_gesture(o)) || self.cancel_area()) {
                 self.cancel();
             }
         }
@@ -904,7 +914,7 @@ impl Session {
         self.st.pointer_overlay = Some(o);
         // (one still waiting to know where the pointer is shows here, whatever is going on)
         let waiting = self.st.toolbar_overlay.is_none();
-        if waiting || (self.st.cfg.toolbar_follows_mouse && !self.overlays.iter().any(|ov| ov.sel_rect.is_some() || ov.rec_rect.is_some())) {
+        if waiting || (self.st.cfg.toolbar_follows_mouse && self.st.rec_area.is_none() && !self.overlays.iter().any(|ov| ov.sel_rect.is_some())) {
             let moving = self.st.toolbar_overlay != Some(o);
             let picker_open = self.overlays.iter().any(|ov| ov.picker_open());
             self.st.toolbar_overlay = Some(o);
@@ -956,25 +966,14 @@ impl Session {
         if self.st.spans { self.virtual_rect.translated(-g.x, -g.y).to_f() } else { self.overlays[o].rect() }
     }
 
-    /// The area to record, chosen on `origin`, changed: show its part on
-    /// the other monitors.
-    fn area_moved(&mut self, origin: usize) {
-        let g = self.overlays[origin].output.rect.to_f();
-        let area = self.overlays[origin].rec_rect.map(|r| r.translated(g.top_left()));
-        for (i, ov) in self.overlays.iter_mut().enumerate() {
-            if i != origin {
-                let og = ov.output.rect.to_f();
-                ov.span_rect = area.filter(|a| a.intersects(&og)).map(|a| a.translated(-og.top_left()));
-            }
-        }
-    }
-
     /// `origin`'s selection changed: show its part on the other monitors,
-    /// and the crosshair and magnifier where the pointer is.
-    fn selection_moved(&mut self, origin: usize, pointer: Option<Point>) {
+    /// and the crosshair and magnifier where the pointer is (and where it
+    /// snaps: `snap`, in `origin`'s coordinates too).
+    fn selection_moved(&mut self, origin: usize, pointer: Option<Point>, snap: Option<Point>) {
         let g = self.overlays[origin].output.rect.to_f();
         let sel = self.overlays[origin].sel_rect.map(|r| r.translated(g.top_left()));
         let at = pointer.map(|p| p + g.top_left());
+        let snap = snap.map(|p| p + g.top_left());
         for (i, ov) in self.overlays.iter_mut().enumerate() {
             if i == origin {
                 continue;
@@ -983,6 +982,7 @@ impl Session {
             let ogf = og.to_f();
             ov.span_rect = sel.filter(|s| s.intersects(&ogf)).map(|s| s.translated(-ogf.top_left()));
             ov.span_pointer = at.filter(|a| og.contains(a.round())).map(|a| a - ogf.top_left());
+            ov.snap_point = snap.filter(|_| ov.span_pointer.is_some()).map(|s| s - ogf.top_left());
         }
     }
 
@@ -1019,9 +1019,9 @@ impl Session {
     }
 
     /// `area` (global logical) of the whole desktop with the drawings, at
-    /// the highest of the monitors' scales.
+    /// the highest of the scales of the monitors it's on.
     fn render_desktop(&self, area: IRect) -> Result<Image, String> {
-        let scale = self.overlays.iter().map(|o| o.dpr).fold(1.0f32, f32::max);
+        let scale = self.st.scale_for(area.to_f());
         let (w, h) = ((area.w as f32 * scale).round().max(1.0) as u32, (area.h as f32 * scale).round().max(1.0) as u32);
         let mut out = Image::filled(w, h, 0xFF00_0000)?;
         for ov in &self.overlays {
@@ -1090,13 +1090,8 @@ impl Session {
         }
         self.update_spans();
         if self.st.tool != Tool::Record {
-            for ov in &mut self.overlays {
-                ov.rec_rect = None;
-                ov.rec_window = None;
-                ov.rec_drag = None;
-            }
+            self.disarm();
         }
-        self.st.any_armed = self.overlays.iter().any(|o| o.rec_rect.is_some());
         self.st.record_problem = if self.st.tool == Tool::Record { self.record_problem() } else { None };
         self.sync_toolbars();
         self.refresh_toolbars();
@@ -1358,13 +1353,12 @@ impl Session {
         self.refresh();
     }
 
-    /// Forget the area chosen for recording (on every monitor).
+    /// Forget the area chosen for recording.
     fn disarm(&mut self) {
-        for ov in &mut self.overlays {
-            ov.rec_rect = None;
-            ov.rec_window = None;
-            ov.span_rect = None;
-        }
+        self.st.rec_area = None;
+        self.rec_window = None;
+        self.rec_drag = None;
+        self.st.area_moving = false;
     }
 
     /// The toolbar's screen button: capture, or choose the screen to record.
@@ -1378,8 +1372,8 @@ impl Session {
         }
     }
 
-    fn start_countdown(&mut self, o: usize) {
-        if self.done || self.overlays[o].rec_rect.is_none() || self.st.countdown.is_some() {
+    fn start_countdown(&mut self) {
+        if self.done || self.st.rec_area.is_none() || self.st.countdown.is_some() {
             return;
         }
         if let Some(problem) = self.record_problem() {
@@ -1387,11 +1381,14 @@ impl Session {
             return;
         }
         if self.st.cfg.record_countdown <= 0 {
-            self.start_recording(o);
+            self.start_recording();
             return;
         }
         self.st.countdown = Some(self.st.cfg.record_countdown);
-        self.countdown_overlay = Some(o);
+        // (nothing is chosen any more: the window that was under the pointer goes)
+        for o in 0..self.overlays.len() {
+            self.update_hover(o);
+        }
         self.schedule(Timer::Countdown, Duration::from_secs(1));
         self.refresh();
     }
@@ -1402,7 +1399,6 @@ impl Session {
         }
         self.timers.retain(|t| t.1 != Timer::Countdown);
         self.st.countdown = None;
-        self.countdown_overlay = None;
         self.refresh();
         true
     }
@@ -1415,25 +1411,23 @@ impl Session {
             self.refresh();
             return;
         }
-        let o = self.countdown_overlay.take();
         self.st.countdown = None;
-        if let Some(o) = o {
-            self.start_recording(o);
-        }
+        self.start_recording();
     }
 
-    /// Close the overlays and hand the area chosen on `o` to the recorder.
-    fn start_recording(&mut self, o: usize) {
-        let Some(rect) = self.overlays.get(o).and_then(|ov| ov.rec_rect) else { return };
+    /// Close the overlays and hand the area chosen to the recorder, as on
+    /// the monitor with most of it.
+    fn start_recording(&mut self) {
+        let Some(chosen) = self.st.rec_area else { return };
+        let Some(ov) = self.overlays.get(self.st.rec_home) else { return };
         if self.done {
             return;
         }
-        let ov = &self.overlays[o];
         let g = ov.output.rect;
-        let local = rect.aligned();
-        let area = local.translated(g.x, g.y);
-        let window = ov.rec_window;
-        let full = local == IRect::new(0, 0, g.w, g.h);
+        let area = chosen.aligned();
+        let rect = chosen.translated(-g.to_f().top_left());
+        let window = self.rec_window;
+        let full = area == g;
         let mut shot = Shot::new(if window.is_some() {
             "window"
         } else if full {
@@ -1462,7 +1456,8 @@ impl Session {
             system_audio: cfg.record_system_audio,
             cursor: cfg.record_cursor,
         };
-        self.clock.step("recording area chosen", format!("{} × {}, {}, {} fps", area.w, area.h, job.format, job.fps));
+        let rate = if job.fps > 0 { format!("{} fps", job.fps) } else { "native frame rate".into() };
+        self.clock.step("recording area chosen", format!("{} × {}, {}, {rate}", area.w, area.h, job.format));
         self.close_overlays();
         self.finish(Outcome::Record(Box::new(job)));
     }
@@ -1775,7 +1770,6 @@ impl Session {
         self.st.text_edit = None;
         self.st.pointer_overlay = None;
         self.st.toolbar_overlay = None;
-        self.countdown_overlay = None;
         self.codes.clear();
     }
 
@@ -1807,7 +1801,15 @@ impl Session {
         // whole screen with nothing drawn is handed over without a copy.
         let ov = self.overlays.swap_remove(o);
         self.close_overlays();
-        let image = match ov.into_render(rect) {
+        // A pin sits on whole logical pixels: it shows the screen's pixels
+        // under where it goes, exactly (at a fractional scale, a selection's
+        // own pixels can be a pixel off from those, and would be resampled).
+        let pinned = rect.filter(|_| pin && !self.request.image).map(|r| r.aligned().device_edges(ov.dpr));
+        let rendered = match pinned {
+            Some(px) => ov.into_render_px(px),
+            None => ov.into_render(rect),
+        };
+        let image = match rendered {
             Ok(img) => img,
             Err(e) => return self.fail(&e),
         };
@@ -1917,19 +1919,23 @@ impl Session {
         });
     }
 
-    /// `pos` moved onto nearby edges in the picture, if any (Ctrl: as is).
+    /// `pos` (on overlay `o`) moved onto nearby edges in the picture, if
+    /// any (Ctrl: as is): that of the monitor it's over, which a drag that
+    /// began on `o` may have gone on to.
     fn snapped(&mut self, o: usize, pos: Point, mods: i32) -> Point {
         if !self.st.snap_edges || mods & keyseq::CTRL != 0 {
             return pos;
         }
-        let ov = &self.overlays[o];
+        let k = self.overlay_under(o, pos).unwrap_or(o);
+        let local = self.to_overlay(o, k, pos);
+        let ov = &self.overlays[k];
         let Some(maps) = &ov.edge_maps else {
-            self.snap_changed(o); // still being built: place freely until then
+            self.snap_changed(k); // still being built: place freely until then
             return pos;
         };
         let cfg = &self.st.cfg;
-        let (x, y) = snapping::snap(maps, pos.x, pos.y, ov.dpr, cfg.snap_distance, cfg.snap_sensitivity);
-        Point::new(x, y)
+        let (x, y) = snapping::snap(maps, local.x, local.y, ov.dpr, cfg.snap_distance, cfg.snap_sensitivity);
+        self.to_overlay(k, o, Point::new(x, y))
     }
 
     // -- one overlay ---------------------------------------------------------------------------
@@ -1949,13 +1955,10 @@ impl Session {
         self.place_panel(o);
     }
 
-    /// Under the area chosen for recording, else above it, else inside.
+    /// Under the area chosen for recording, else above it, else inside: on
+    /// the monitor with most of it.
     fn place_panel(&mut self, o: usize) {
-        let show = {
-            let ov = &self.overlays[o];
-            ov.rec_rect.is_some() && ov.rec_drag.is_none() && self.st.countdown.is_none()
-        };
-        if !show {
+        if self.st.rec_area.is_none() || o != self.st.rec_home || self.st.area_moving || self.st.countdown.is_some() {
             return;
         }
         let formats: Vec<(String, String, bool)> = RECORD_FORMATS.iter().map(|(v, l)| (v.to_string(), l.to_string(), self.problem_for(v).is_none())).collect();
@@ -1970,9 +1973,9 @@ impl Session {
             formats,
             problem,
         };
+        let Some(r) = self.overlays[o].area(&self.st) else { return };
         let ov = &mut self.overlays[o];
         let (w, h) = (ov.width(), ov.height());
-        let Some(r) = ov.rec_rect else { return };
         let panel = ov.panel.get_or_insert_with(RecordPanel::default);
         panel.refresh(&view);
         let (pw, ph) = panel.size;
@@ -1984,6 +1987,8 @@ impl Session {
         } else {
             r.bottom() - ph - 60.0
         };
+        // (on the screen, wherever the area reaches)
+        let y = y.min(h - ph - 8.0).max(8.0);
         panel.pos = Point::new(py_round(x) as f32, py_round(y) as f32);
     }
 
@@ -2067,11 +2072,11 @@ impl Session {
         }
         let ov = &self.overlays[o];
         let mut hover = None;
-        if matches!(self.st.tool, Tool::Region | Tool::Record)
+        // (also while an area to record is chosen, on any monitor: another can be)
+        if ov.picking(&self.st)
             && ov.sel_rect.is_none()
-            && ov.rec_rect.is_none()
             && let Some(pos) = ov.cursor_pos
-            && !ov.over_floating(0.0, shown)
+            && !ov.over_floating(&self.st, 0.0)
         {
             hover = ov.windows.iter().find(|(r, _)| r.contains(pos)).copied();
         }
@@ -2081,77 +2086,91 @@ impl Session {
         }
     }
 
+    /// Stop what's being done on overlay `o`: a drawing selected, an area
+    /// or a shape being dragged out, the area to record being moved.
     fn cancel_gesture(&mut self, o: usize) -> bool {
         let ov = &mut self.overlays[o];
         if ov.selection.clear(&mut ov.annotations) {
             self.refresh();
             return true;
         }
-        if ov.sel_rect.is_some() || ov.active.is_some() || ov.rec_drag.is_some() {
+        let moving = self.rec_drag.is_some_and(|d| d.0 == o);
+        if ov.sel_rect.is_some() || ov.active.is_some() || moving {
             let spanned = ov.sel_rect.is_some() && self.st.spans;
             ov.sel_origin = None;
             ov.sel_rect = None;
             ov.active = None;
-            ov.rec_drag = None;
             ov.text_drag = None;
-            if spanned {
-                self.selection_moved(o, None);
+            if moving {
+                self.rec_drag = None;
+                self.st.area_moving = false;
             }
-            self.refresh();
-            return true;
-        }
-        if ov.rec_rect.is_some() {
-            ov.rec_rect = None;
-            ov.rec_window = None;
-            self.area_moved(o);
+            if spanned {
+                self.selection_moved(o, None, None);
+            }
             self.refresh();
             return true;
         }
         false
     }
 
+    /// Forget the area chosen to record; true if there was one.
+    fn cancel_area(&mut self) -> bool {
+        if self.st.rec_area.is_none() {
+            return false;
+        }
+        self.disarm();
+        self.refresh();
+        true
+    }
+
     /// Choose `rect` (logical, overlay `o`'s coordinates) to record. It may
     /// cross onto other monitors where the recorder can take that.
     fn arm(&mut self, o: usize, rect: Rect, window: Option<usize>) {
-        let bounds = self.drag_bounds(o);
-        self.overlays[o].rec_rect = Some(rect.intersected(&bounds));
-        self.overlays[o].rec_window = window;
+        let g = self.overlays[o].output.rect.to_f().top_left();
+        self.st.rec_home = o;
+        self.st.rec_area = Some(rect.translated(g).intersected(&self.area_bounds()));
+        self.rec_window = window;
         if self.st.spans {
-            self.selection_moved(o, None); // (the drag that chose it is over)
+            self.selection_moved(o, None, None); // (the drag that chose it is over)
         }
-        self.area_moved(o);
+        self.rehome_area();
         self.refresh();
     }
 
-    /// The recording area on `o`, moved over onto another monitor: it's that
-    /// monitor's now (most of it is there), with its handles and panel.
-    fn rehome_area(&mut self, o: usize) {
-        let Some(r) = self.overlays[o].rec_rect else { return };
-        let g = self.overlays[o].output.rect.to_f();
-        let area = r.translated(g.top_left());
+    /// Where the area to record may reach (global logical): the whole
+    /// desktop where the recorder can take an area across monitors, else
+    /// the monitor it's on.
+    fn area_bounds(&self) -> Rect {
+        match self.overlays.get(self.st.rec_home) {
+            Some(ov) if !self.st.spans => ov.output.rect.to_f(),
+            _ => self.virtual_rect.to_f(),
+        }
+    }
+
+    /// The recording panel goes to the monitor with most of the area (when
+    /// it's moved over onto another).
+    fn rehome_area(&mut self) {
+        let Some(area) = self.st.rec_area else { return };
         let size = |k: usize| {
             let i = area.intersected(&self.overlays[k].output.rect.to_f());
             i.w.max(0.0) * i.h.max(0.0)
         };
-        let Some(k) = (0..self.overlays.len()).max_by(|&a, &b| size(a).total_cmp(&size(b))).filter(|&k| k != o && size(k) > size(o)) else { return };
-        let to = self.overlays[k].output.rect.to_f();
-        let from = &mut self.overlays[o];
-        from.rec_rect = None;
-        from.rec_window = None;
-        from.panel = None;
-        let ov = &mut self.overlays[k];
-        ov.rec_rect = Some(area.translated(-to.top_left()));
-        ov.span_rect = None;
-        self.area_moved(k);
+        let home = self.st.rec_home.min(self.overlays.len().saturating_sub(1));
+        let Some(k) = (0..self.overlays.len()).max_by(|&a, &b| size(a).total_cmp(&size(b))).filter(|&k| k != home && size(k) > size(home)) else { return };
+        self.overlays[home].panel = None;
+        self.st.rec_home = k;
     }
 
-    /// Move or resize the recording area; a resized edge goes to `snapped`
-    /// when snapping found an edge there. `center` (Ctrl): the opposite edge
+    /// Move or resize the recording area, from overlay `o` (whichever
+    /// monitor the handle was on); a resized edge goes to `snapped` when
+    /// snapping found an edge there. `center` (Ctrl): the opposite edge
     /// moves the other way, so the area stays centred.
     fn drag_area(&mut self, o: usize, pos: Point, snapped: Option<Point>, center: bool) {
-        let Some((handle, start, r0)) = self.overlays[o].rec_drag else { return };
+        let Some((_, handle, start, r0)) = self.rec_drag.filter(|d| d.0 == o) else { return };
         let d = pos - start;
-        let bounds = self.drag_bounds(o);
+        let g = self.overlays[o].output.rect.to_f().top_left();
+        let bounds = self.area_bounds().translated(-g);
         let r = match handle {
             Handle::Move => {
                 let mut r = r0.translated(d);
@@ -2196,9 +2215,8 @@ impl Session {
                 r.normalized().intersected(&bounds)
             }
         };
-        self.overlays[o].rec_rect = Some(r);
-        self.overlays[o].rec_window = None;
-        self.area_moved(o);
+        self.st.rec_area = Some(r.translated(g));
+        self.rec_window = None;
     }
 
     // -- the pointer on the panels -----------------------------------------------------------------
@@ -2210,7 +2228,7 @@ impl Session {
         if ov.picker_open() && ov.picker.as_ref().is_some_and(|p| p.rect().contains(pos)) {
             return Some(Float::Picker);
         }
-        if ov.rec_rect.is_some() && ov.rec_drag.is_none() && self.st.countdown.is_none() && ov.panel.as_ref().is_some_and(|p| p.rect().contains(pos)) {
+        if ov.panel_shown(&self.st) && ov.panel.as_ref().is_some_and(|p| p.rect().contains(pos)) {
             return Some(Float::Panel);
         }
         if ov.toolbar_visible && ov.toolbar.as_ref().is_some_and(|t| t.rect().contains(pos)) {
@@ -2458,7 +2476,7 @@ impl Session {
                     clicked = Some(id);
                 }
                 if let Some(id) = clicked {
-                    self.panel_click(o, id);
+                    self.panel_click(id);
                 }
             }
             Grab::Picker => {
@@ -2494,10 +2512,10 @@ impl Session {
         }
     }
 
-    fn panel_click(&mut self, o: usize, id: &str) {
+    fn panel_click(&mut self, id: &str) {
         let cfg = &self.st.cfg;
         match id {
-            "record" => self.start_countdown(o),
+            "record" => self.start_countdown(),
             "mic" => self.set_record_option(RecordOption::Mic(!cfg.record_mic)),
             "system" => self.set_record_option(RecordOption::SystemAudio(!cfg.record_system_audio)),
             "cursor" => self.set_record_option(RecordOption::Cursor(!cfg.record_cursor)),
@@ -2507,7 +2525,7 @@ impl Session {
                 self.set_record_option(RecordOption::Fps(next));
             }
             "close" => {
-                self.cancel_gesture(o);
+                self.cancel_area();
             }
             _ => {}
         }
@@ -2517,7 +2535,7 @@ impl Session {
 
     fn canvas_press(&mut self, o: usize, button: Button, pos: Point, mods: i32) {
         if button == Button::Right {
-            if !(self.cancel_countdown() || self.close_picker() || self.cancel_gesture(o)) {
+            if !(self.cancel_countdown() || self.close_picker() || self.cancel_gesture(o) || self.cancel_area()) {
                 self.cancel();
             }
             return;
@@ -2553,11 +2571,13 @@ impl Session {
         if tool == Tool::Record && self.st.countdown.is_some() {
             return;
         }
-        let handle = if tool == Tool::Record { self.overlays[o].handle_at(pos) } else { None };
+        // (the area's handles and inside, from whichever monitor they're on)
+        let handle = if tool == Tool::Record { self.overlays[o].handle_at(&self.st, pos) } else { None };
         if let Some(h) = handle
-            && let Some(r) = self.overlays[o].rec_rect
+            && let Some(r) = self.overlays[o].area(&self.st)
         {
-            self.overlays[o].rec_drag = Some((h, pos, r));
+            self.rec_drag = Some((o, h, pos, r));
+            self.st.area_moving = true;
             self.refresh();
         } else if matches!(tool, Tool::Region | Tool::Record) {
             self.disarm();
@@ -2630,11 +2650,11 @@ impl Session {
         if let Some(d) = &mut ov.sel_origin {
             d.extend(snap.unwrap_or(pos), Mods::from_keys(mods));
             ov.sel_rect = Some(clip_selection(d.rect(), bounds));
-            ov.hover_window = None;
             if self.st.spans {
-                self.selection_moved(o, Some(pos));
+                self.selection_moved(o, Some(pos), snap);
             }
-        } else if ov.rec_drag.is_some() {
+            self.update_hover(o); // (none while dragging: on the other monitors too)
+        } else if self.rec_drag.is_some_and(|d| d.0 == o) {
             self.drag_area(o, pos, snap, mods & keyseq::CTRL != 0);
         } else if ov.text_drag.is_some()
             && let Some(local) = text_at
@@ -2709,12 +2729,13 @@ impl Session {
             } else {
                 self.capture(o, rect, window);
             }
-        } else if self.overlays[o].rec_drag.is_some() {
-            self.overlays[o].rec_drag = None;
-            if self.overlays[o].rec_rect.is_some_and(|r| r.w < 8.0 || r.h < 8.0) {
-                self.overlays[o].rec_rect = None;
+        } else if self.rec_drag.is_some_and(|d| d.0 == o) {
+            self.rec_drag = None;
+            self.st.area_moving = false;
+            if self.st.rec_area.is_some_and(|r| r.w < 8.0 || r.h < 8.0) {
+                self.disarm();
             }
-            self.rehome_area(o);
+            self.rehome_area();
             self.refresh();
         } else if let Some(shape) = self.overlays[o].active.take()
             && shape.is_valid()

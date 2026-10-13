@@ -227,28 +227,38 @@ impl Wayland {
         let mut out = Vec::new();
         for output in self.outputs.outputs() {
             let Some(info) = self.outputs.info(&output) else { continue };
-            let scale = info.scale_factor.max(1);
+            let int_scale = info.scale_factor.max(1);
             let (x, y) = info.logical_position.unwrap_or(info.location);
-            let (w, h) = match info.logical_size {
-                Some(s) => s,
-                None => {
-                    // No xdg-output: the mode in pixels, over the scale, turned.
-                    let Some(m) = info.modes.iter().find(|m| m.current).or(info.modes.first()) else { continue };
-                    let (mw, mh) = (m.dimensions.0 / scale, m.dimensions.1 / scale);
-                    use wl_output::Transform as T;
-                    match info.transform {
-                        T::_90 | T::_270 | T::Flipped90 | T::Flipped270 => (mh, mw),
-                        _ => (mw, mh),
-                    }
+            // The mode in pixels, turned as the monitor is.
+            let mode = info.modes.iter().find(|m| m.current).or(info.modes.first()).map(|m| {
+                use wl_output::Transform as T;
+                match info.transform {
+                    T::_90 | T::_270 | T::Flipped90 | T::Flipped270 => (m.dimensions.1, m.dimensions.0),
+                    _ => m.dimensions,
                 }
+            });
+            let (w, h) = match (info.logical_size, mode) {
+                (Some(s), _) => s,
+                // No xdg-output: the mode over the scale.
+                (None, Some((mw, mh))) => (mw / int_scale, mh / int_scale),
+                (None, None) => continue,
             };
             if w <= 0 || h <= 0 {
                 continue;
             }
+            let scale = real_scale(mode, (w, h), int_scale);
             let name = info.name.clone().unwrap_or_else(|| format!("{}-{}", info.make, info.id));
             out.push(Monitor { output: Output::Wayland(output), name, rect: IRect::new(x, y, w, h), scale });
         }
         out
+    }
+
+    /// How many times a second `monitor` shows a new picture (its mode's
+    /// refresh rate), if it says.
+    pub fn refresh_rate(&self, monitor: &Monitor) -> Option<f64> {
+        let info = self.outputs.info(monitor.wl_output()?)?;
+        let mode = info.modes.iter().find(|m| m.current)?;
+        (mode.refresh_rate > 0).then(|| mode.refresh_rate as f64 / 1000.0)
     }
 
     /// A fullscreen surface over `monitor` for the capture overlay: a
@@ -289,7 +299,7 @@ impl Wayland {
         surf.window = window;
         surf.viewport = viewport;
         surf.fractional = fractional;
-        surf.int_scale = monitor.scale;
+        surf.int_scale = monitor.scale.ceil() as i32;
         self.surfaces.push(surf);
         Ok(())
     }
@@ -321,7 +331,7 @@ impl Wayland {
         surf.layer = Some(l);
         surf.viewport = viewport;
         surf.fractional = fractional;
-        surf.int_scale = monitor.scale;
+        surf.int_scale = monitor.scale.ceil() as i32;
         self.surfaces.push(surf);
         true
     }
@@ -349,7 +359,7 @@ impl Wayland {
         surf.layer = Some(l);
         surf.viewport = viewport;
         surf.fractional = fractional;
-        surf.int_scale = monitor.scale;
+        surf.int_scale = monitor.scale.ceil() as i32;
         surf.transparent = true;
         self.surfaces.push(surf);
         true
@@ -433,7 +443,9 @@ impl Wayland {
     }
 
     /// Move a layer surface (logical, from its monitor's top left) and size it.
-    pub fn place_layer(&mut self, owner: Owner, at: (i32, i32), size: (u32, u32)) {
+    /// (`at` from `monitor`'s top left: the one the layer surface is on,
+    /// which can't change: another monitor's is a surface of its own)
+    pub fn place_layer(&mut self, owner: Owner, _monitor: &Monitor, at: (i32, i32), size: (u32, u32)) {
         if let Some(s) = self.surfaces.iter_mut().find(|s| s.owner == owner)
             && let Some(l) = &s.layer
         {
@@ -736,6 +748,16 @@ impl Wayland {
 }
 
 /// A buffer of `w` x `h` in its own shared memory.
+/// A monitor's real scale: its pixels (`mode`, turned) over its logical
+/// size, where a fractional scale (125%: 1.25) shows, in the steps the
+/// compositor scales by (1/120); else its integer scale.
+fn real_scale(mode: Option<(i32, i32)>, logical: (i32, i32), int_scale: i32) -> f32 {
+    match mode {
+        Some((mw, _)) if mw > 0 && logical.0 > 0 => ((mw as f32 / logical.0 as f32) * 120.0).round().max(1.0) / 120.0,
+        _ => int_scale as f32,
+    }
+}
+
 fn new_buffer(shm: &wl_shm::WlShm, qh: &QueueHandle<App>, w: u32, h: u32, transparent: bool) -> Result<Buf, String> {
     let img = Image::shared(w, h)?;
     let fd = img.fd().ok_or("not shared memory")?;
@@ -747,4 +769,18 @@ fn new_buffer(shm: &wl_shm::WlShm, qh: &QueueHandle<App>, w: u32, h: u32, transp
     let buffer = pool.create_buffer(0, w as i32, h as i32, (w * 4) as i32, format, qh, BufferData(busy.clone()));
     pool.destroy(); // (the buffer keeps the memory)
     Ok(Buf { img, buffer, busy, stale: Damage::full(), drawn: 0 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::real_scale;
+
+    #[test]
+    fn fractional_scales() {
+        assert_eq!(real_scale(Some((2560, 1600)), (2048, 1280), 2), 1.25);
+        assert_eq!(real_scale(Some((1920, 1080)), (1371, 771), 2), 1.4);
+        assert_eq!(real_scale(Some((3840, 2160)), (1920, 1080), 2), 2.0);
+        assert_eq!(real_scale(Some((1920, 1080)), (1920, 1080), 1), 1.0);
+        assert_eq!(real_scale(None, (1920, 1080), 2), 2.0);
+    }
 }

@@ -718,8 +718,8 @@ fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     check!(s.st.tool == Tool::Record && s.st.can_record);
     s.pointer_enter(0, Point::new(300.0, 300.0));
     drag(&mut s, 0, Point::new(200.0, 200.0), Point::new(700.0, 500.0), 0);
-    check!(!s.done && s.overlays[0].rec_rect == Some(Rect::new(200.0, 200.0, 500.0, 300.0)), "{:?}", s.overlays[0].rec_rect);
-    check!(s.st.any_armed && s.overlays[0].panel.is_some(), "no recording panel");
+    check!(!s.done && s.overlays[0].area(&s.st) == Some(Rect::new(200.0, 200.0, 500.0, 300.0)), "{:?}", s.overlays[0].area(&s.st));
+    check!(s.st.rec_area.is_some() && s.overlays[0].panel.is_some(), "no recording panel");
     save_png(&frame(&mut s, 0)?, out, "overlay-record.png")?;
     // The panel's options are remembered; GIF can't be chosen here.
     let panel = s.overlays[0].panel.as_ref().ok_or("no panel")?;
@@ -733,16 +733,16 @@ fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     check!(s.st.cfg.record_fps == 60, "{}", s.st.cfg.record_fps);
     // Resize by the bottom right handle.
     drag(&mut s, 0, Point::new(700.0, 500.0), Point::new(800.0, 560.0), 0);
-    check!(s.overlays[0].rec_rect == Some(Rect::new(200.0, 200.0, 600.0, 360.0)), "{:?}", s.overlays[0].rec_rect);
+    check!(s.overlays[0].area(&s.st) == Some(Rect::new(200.0, 200.0, 600.0, 360.0)), "{:?}", s.overlays[0].area(&s.st));
     // Ctrl resizes about the centre (500, 380): grabbed 2 px inside the right
     // edge, the edge keeps that offset and the left one mirrors it.
     drag(&mut s, 0, Point::new(798.0, 380.0), Point::new(818.0, 380.0), CTRL);
-    check!(s.overlays[0].rec_rect == Some(Rect::new(180.0, 200.0, 640.0, 360.0)), "{:?}", s.overlays[0].rec_rect);
+    check!(s.overlays[0].area(&s.st) == Some(Rect::new(180.0, 200.0, 640.0, 360.0)), "{:?}", s.overlays[0].area(&s.st));
     drag(&mut s, 0, Point::new(500.0, 560.0), Point::new(500.0, 540.0), CTRL);
-    check!(s.overlays[0].rec_rect == Some(Rect::new(180.0, 220.0, 640.0, 320.0)), "{:?}", s.overlays[0].rec_rect);
+    check!(s.overlays[0].area(&s.st) == Some(Rect::new(180.0, 220.0, 640.0, 320.0)), "{:?}", s.overlays[0].area(&s.st));
     // Esc goes back to choosing; Enter on the whole screen otherwise.
     tap(&mut s, 0, key::ESCAPE, "", 0);
-    check!(!s.done && s.overlays[0].rec_rect.is_none() && !s.st.any_armed);
+    check!(!s.done && s.overlays[0].area(&s.st).is_none() && !s.st.rec_area.is_some());
     drag(&mut s, 0, Point::new(200.0, 200.0), Point::new(700.0, 500.0), 0);
     tap(&mut s, 0, key::RETURN, "", 0);
     check!(s.st.countdown == Some(2), "{:?}", s.st.countdown);
@@ -830,6 +830,12 @@ fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Imag
     check!(s.overlays[1].annotations.is_empty(), "it changed hands");
     let _ = frame(&mut s, 1)?;
     check!(s.overlays[1].foreign_frame.is_some(), "the right monitor doesn't frame the selected drawing reaching it");
+    // Resized by its right handle, which is on the right monitor.
+    s.pointer_motion(1, Point::new(130.0, 350.0), 0, false);
+    check!(s.cursor(1) == CursorShape::ResizeEW, "no handle on the right monitor: {:?}", s.cursor(1));
+    drag(&mut s, 1, Point::new(130.0, 350.0), Point::new(180.0, 350.0), 0);
+    let resized = s.overlays[0].annotations.last().map(|a| a.geometry());
+    check!(resized == Some(Rect::new(730.0, 300.0, 250.0, 100.0)), "resized from the right monitor: {resized:?}");
     // A text typed on the left monitor reaching the right one: shown there
     // as being typed, and its caret placed by a click there.
     tap(&mut s, 1, 0x54, "t", 0);
@@ -863,6 +869,8 @@ fn drawings_across_monitors(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Imag
     }
     stacking_across_monitors(tmp, out)?;
     record_across_monitors(tmp)?;
+    windows_across_monitors(tmp)?;
+    snapping_across_monitors(tmp, desktop.clone())?;
     area_keys(tmp)?;
     text_fields(tmp)?;
     println!("self-test: drawings across monitors");
@@ -974,10 +982,10 @@ fn area_keys(tmp: &Path) -> R {
     let mut s = session(test_config(tmp), Request { record: true, ..Default::default() }, vec![screen], FakeRecorder { problem: None, span: false });
     s.pointer_enter(0, Point::new(300.0, 300.0));
     drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(300.0, 200.0), keyseq::SHIFT);
-    check!(s.overlays[0].rec_rect == Some(Rect::new(100.0, 100.0, 200.0, 200.0)), "Shift: {:?}", s.overlays[0].rec_rect);
+    check!(s.overlays[0].area(&s.st) == Some(Rect::new(100.0, 100.0, 200.0, 200.0)), "Shift: {:?}", s.overlays[0].area(&s.st));
     tap(&mut s, 0, key::ESCAPE, "", 0);
     drag(&mut s, 0, Point::new(400.0, 300.0), Point::new(450.0, 340.0), CTRL);
-    check!(s.overlays[0].rec_rect == Some(Rect::new(350.0, 260.0, 100.0, 80.0)), "Ctrl: {:?}", s.overlays[0].rec_rect);
+    check!(s.overlays[0].area(&s.st) == Some(Rect::new(350.0, 260.0, 100.0, 80.0)), "Ctrl: {:?}", s.overlays[0].area(&s.st));
     tap(&mut s, 0, key::ESCAPE, "", 0);
     // Alt held for the last stretch: the area so far moves with the pointer.
     s.pointer_motion(0, Point::new(100.0, 100.0), 0, false);
@@ -985,7 +993,7 @@ fn area_keys(tmp: &Path) -> R {
     s.pointer_motion(0, Point::new(200.0, 150.0), 0, false);
     s.pointer_motion(0, Point::new(260.0, 170.0), keyseq::ALT, false);
     s.button(0, Button::Left, false, Point::new(260.0, 170.0), keyseq::ALT);
-    check!(s.overlays[0].rec_rect == Some(Rect::new(160.0, 120.0, 100.0, 50.0)), "Alt: {:?}", s.overlays[0].rec_rect);
+    check!(s.overlays[0].area(&s.st) == Some(Rect::new(160.0, 120.0, 100.0, 50.0)), "Alt: {:?}", s.overlays[0].area(&s.st));
     // Shift pressed mid-drag squares it there and then.
     tap(&mut s, 0, key::ESCAPE, "", 0);
     s.pointer_motion(0, Point::new(100.0, 100.0), 0, false);
@@ -996,8 +1004,10 @@ fn area_keys(tmp: &Path) -> R {
     Ok(())
 }
 
-/// A recording area moved from one monitor onto another goes with its
-/// handles and panel.
+/// The area to record is the desktop's, not one monitor's: each monitor it
+/// reaches shows its part with its handles, and moves and resizes it; the
+/// panel goes with most of it. While it's chosen, another area or a window
+/// can be chosen on any monitor, and nothing is shaded.
 fn record_across_monitors(tmp: &Path) -> R {
     let picture = Arc::new(Image::filled(800, 600, 0xFF404040)?);
     let screens = vec![
@@ -1005,14 +1015,111 @@ fn record_across_monitors(tmp: &Path) -> R {
         Screen { output: Output { name: "DP-2".into(), rect: IRect::new(800, 0, 800, 600), scale: 1.0 }, picture, pointer: None },
     ];
     let mut s = session(test_config(tmp), Request { record: true, ..Default::default() }, screens, FakeRecorder { problem: None, span: true });
+    s.desktop_found(Desktop { windows: vec![crate::ui::session::window(IRect::new(100, 300, 300, 200), "Left", "left")], active: None, cursor: None });
     s.pointer_enter(0, Point::new(300.0, 300.0));
     drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(300.0, 250.0), 0);
-    check!(s.overlays[0].rec_rect.is_some() && s.overlays[0].panel.is_some(), "no area to record");
+    check!(s.st.rec_area.is_some() && s.overlays[0].panel_shown(&s.st), "no area to record");
     // Moved by its middle, most of the way onto the right monitor.
     drag(&mut s, 0, Point::new(200.0, 175.0), Point::new(850.0, 175.0), 0);
-    check!(s.overlays[0].rec_rect.is_none() && s.overlays[0].span_rect == Some(Rect::new(750.0, 100.0, 200.0, 150.0)), "{:?}", s.overlays[0].span_rect);
-    check!(s.overlays[1].rec_rect == Some(Rect::new(-50.0, 100.0, 200.0, 150.0)), "the area didn't go over: {:?}", s.overlays[1].rec_rect);
-    check!(s.overlays[1].panel.is_some(), "its panel stayed behind");
+    check!(s.st.rec_area == Some(Rect::new(750.0, 100.0, 200.0, 150.0)), "{:?}", s.st.rec_area);
+    check!(
+        s.overlays[0].area(&s.st) == Some(Rect::new(750.0, 100.0, 200.0, 150.0)) && s.overlays[1].area(&s.st) == Some(Rect::new(-50.0, 100.0, 200.0, 150.0))
+    );
+    check!(s.st.rec_home == 1 && s.overlays[1].panel_shown(&s.st) && !s.overlays[0].panel_shown(&s.st), "its panel stayed behind");
+    // Its right edge is on the right monitor: resized from there.
+    s.pointer_leave(0);
+    s.pointer_enter(1, Point::new(150.0, 175.0));
+    s.pointer_motion(1, Point::new(150.0, 175.0), 0, false);
+    check!(s.cursor(1) == CursorShape::ResizeEW, "{:?}", s.cursor(1));
+    drag(&mut s, 1, Point::new(150.0, 175.0), Point::new(250.0, 175.0), 0);
+    check!(s.st.rec_area == Some(Rect::new(750.0, 100.0, 300.0, 150.0)), "resized from the right monitor: {:?}", s.st.rec_area);
+    // Its part on the left monitor moves it too.
+    s.pointer_leave(1);
+    s.pointer_enter(0, Point::new(780.0, 175.0));
+    s.pointer_motion(0, Point::new(780.0, 175.0), 0, false);
+    check!(s.cursor(0) == CursorShape::Move, "{:?}", s.cursor(0));
+    drag(&mut s, 0, Point::new(780.0, 175.0), Point::new(680.0, 195.0), 0);
+    check!(s.st.rec_area == Some(Rect::new(650.0, 120.0, 300.0, 150.0)), "moved from the left monitor: {:?}", s.st.rec_area);
+    // Nothing is shaded, and the windows still light up, on either monitor.
+    let f = frame(&mut s, 0)?;
+    check!(f.pixel(20, 590) == 0xFF404040, "shaded: {:08X}", f.pixel(20, 590));
+    s.pointer_motion(0, Point::new(200.0, 400.0), 0, false);
+    check!(s.overlays[0].hover_window.is_some_and(|h| h.1 == 0), "no window under the pointer while an area is chosen");
+    // A click there chooses the window instead.
+    click(&mut s, 0, Point::new(200.0, 400.0), 0);
+    check!(s.st.rec_area == Some(Rect::new(100.0, 300.0, 300.0, 200.0)) && s.st.rec_home == 0, "{:?}", s.st.rec_area);
+    // Counting down, nothing else is chosen.
+    let mut cfg = s.st.cfg.clone();
+    cfg.record_countdown = 3;
+    s.st.cfg = cfg;
+    s.pointer_motion(0, Point::new(600.0, 100.0), 0, false);
+    tap(&mut s, 0, key::RETURN, "", 0);
+    s.pointer_motion(0, Point::new(200.0, 400.0), 0, false);
+    check!(
+        s.st.countdown.is_some() && s.overlays[0].hover_window.is_none() && s.overlays[0].loupe_at(&s.st).is_none(),
+        "something can be chosen during the countdown"
+    );
+    Ok(())
+}
+
+/// A window across monitors, the pointer on one: each monitor marks only
+/// its edges there (none down the middle), and only one shows its label.
+fn windows_across_monitors(tmp: &Path) -> R {
+    let picture = Arc::new(Image::filled(800, 600, 0xFF404040)?);
+    let screens = vec![
+        Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 800, 600), scale: 1.0 }, picture: picture.clone(), pointer: None },
+        Screen { output: Output { name: "DP-2".into(), rect: IRect::new(800, 0, 800, 600), scale: 1.0 }, picture, pointer: None },
+    ];
+    let mut s = session(test_config(tmp), Request::default(), screens, FakeRecorder { problem: None, span: true });
+    s.desktop_found(Desktop { windows: vec![crate::ui::session::window(IRect::new(600, 100, 400, 300), "Wide", "wide")], active: None, cursor: None });
+    s.pointer_enter(1, Point::new(100.0, 200.0));
+    s.pointer_motion(1, Point::new(100.0, 200.0), 0, false);
+    check!(s.overlays[1].hover_window.is_some() && s.overlays[0].span_hover.is_some());
+    let f = frame(&mut s, 0)?;
+    let inside = f.pixel(700, 250);
+    check!(f.pixel(799, 250) == inside, "an edge down the middle: {:08X}", f.pixel(799, 250));
+    check!(f.pixel(700, 100) != inside, "no top edge");
+    // (no label on this monitor: above the window's corner is only the shading)
+    let shade = f.pixel(50, 85);
+    check!((600..790).all(|x| (70..98).all(|y| f.pixel(x, y) == shade)), "a second label");
+    // Back on the other monitor, away from it: it's forgotten.
+    s.pointer_leave(1);
+    s.pointer_enter(0, Point::new(100.0, 500.0));
+    s.pointer_motion(0, Point::new(100.0, 500.0), 0, false);
+    check!(s.overlays[0].span_hover.is_none() && s.overlays[0].hover_window.is_none(), "the window stays lit");
+    Ok(())
+}
+
+/// Snapping in a drag that goes over onto another monitor: to the edges there.
+fn snapping_across_monitors(tmp: &Path, desktop: Arc<Image>) -> R {
+    let left = Arc::new(desktop.crop(IRect::new(0, 0, 800, 1000))?);
+    let right = Arc::new(desktop.crop(IRect::new(800, 0, 800, 1000))?);
+    let screens = vec![
+        Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 800, 1000), scale: 1.0 }, picture: left, pointer: None },
+        Screen { output: Output { name: "DP-2".into(), rect: IRect::new(800, 0, 800, 1000), scale: 1.0 }, picture: right, pointer: None },
+    ];
+    let mut cfg = test_config(tmp);
+    cfg.snap_edges = true;
+    let mut s = session(cfg, Request::default(), screens, FakeRecorder { problem: None, span: true });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while s.overlays.iter().any(|o| o.edge_maps.is_none()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+        s.poll();
+    }
+    check!(s.overlays.iter().all(|o| o.edge_maps.is_some()), "no edge maps");
+    s.pointer_enter(0, Point::new(124.0, 145.0));
+    // From the fake window's top left, on the left monitor, to near its
+    // bottom right, on the right one (still the left one's pointer).
+    s.pointer_motion(0, Point::new(124.0, 145.0), 0, false);
+    s.button(0, Button::Left, true, Point::new(124.0, 145.0), 0);
+    s.pointer_motion(0, Point::new(600.0, 500.0), 0, false);
+    s.pointer_motion(0, Point::new(936.0, 696.0), 0, false);
+    check!(s.overlays[1].snap_point == Some(Point::new(140.0, 700.0)), "the right monitor's crosshair: {:?}", s.overlays[1].snap_point);
+    s.button(0, Button::Left, false, Point::new(936.0, 696.0), 0);
+    match s.take_outcome() {
+        Some(Outcome::Image { image, at, .. }) => check!(image.size() == (820, 560) && at == Some(IRect::new(120, 140, 820, 560)), "{:?} {at:?}", image.size()),
+        other => return Err(format!("snapped capture across monitors gave {other:?}")),
+    }
     Ok(())
 }
 

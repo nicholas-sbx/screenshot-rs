@@ -169,7 +169,7 @@ impl App {
             // Its sizes as they look on the screen it came from.
             let scale = match at {
                 Some(a) if a.w > 0 => image.width() as f32 / a.w as f32,
-                _ => self.dpy.monitors().first().map_or(1.0, |m| m.scale as f32),
+                _ => self.dpy.monitors().first().map_or(1.0, |m| m.scale),
             };
             match crate::beautify::render(&image, &crate::beautify::Style::from_map(&self.cfg.beautify_style), scale) {
                 Ok(out) => {

@@ -344,7 +344,7 @@ impl App {
             .iter()
             .zip(pictures)
             .map(|(mon, (picture, pointer))| Screen {
-                output: Output { name: mon.name.clone(), rect: mon.rect, scale: mon.scale as f32 },
+                output: Output { name: mon.name.clone(), rect: mon.rect, scale: mon.scale },
                 picture: Arc::new(picture),
                 pointer,
             })

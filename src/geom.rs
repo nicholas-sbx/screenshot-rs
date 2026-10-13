@@ -294,6 +294,13 @@ impl IRect {
     pub fn x2(&self) -> i32 {
         self.x + self.w
     }
+
+    /// The device pixels this (logical) rectangle covers at `scale`, as
+    /// compositors place a surface: each edge on the nearest one.
+    pub fn device_edges(&self, scale: f32) -> IRect {
+        let d = |v: i32| (v as f32 * scale).round() as i32;
+        IRect::from_ltrb(d(self.x), d(self.y), d(self.x2()), d(self.y2()))
+    }
     pub fn y2(&self) -> i32 {
         self.y + self.h
     }

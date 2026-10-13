@@ -82,7 +82,7 @@ impl App {
             }
         };
         let monitors = self.dpy.monitors();
-        let (mon, dpr) = monitors.first().map(|m| ((m.rect.w as f32, m.rect.h as f32), m.scale as f32)).unwrap_or(((1920.0, 1080.0), 1.0));
+        let (mon, dpr) = monitors.first().map(|m| ((m.rect.w as f32, m.rect.h as f32), m.scale)).unwrap_or(((1920.0, 1080.0), 1.0));
         let target = save_to.unwrap_or_else(|| path.to_path_buf());
         let ed = Editor::new(image, dpr, target, crate::config::load());
         let min = ed.min_size();
