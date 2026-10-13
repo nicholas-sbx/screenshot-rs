@@ -5,7 +5,7 @@
 use crate::geom::{Point, Rect};
 use crate::render::paint::{Align, Pen};
 use crate::render::text::{self, DEMIBOLD, MEDIUM};
-use crate::render::theme::{self, Color, SWATCHES};
+use crate::render::theme::{self, Color};
 use crate::render::{Painter, icons};
 
 /// What a control is and how it looks.
@@ -16,8 +16,8 @@ pub enum Look {
         icon: &'static str,
         size: f32,
     },
-    /// One of the toolbar's colours (0-6).
-    Swatch(usize),
+    /// One of the toolbar's colours.
+    Swatch(Color),
     /// Your own colour, with a rainbow dot.
     CustomSwatch(Color),
     /// The three stroke sizes as dots, `0..=2` selected.
@@ -218,8 +218,7 @@ pub fn paint_item(p: &mut Painter<'_>, it: &Item, origin: Point, ptr: &Pointer) 
                 p.set_opacity(0.3);
             }
             let color = match &it.look {
-                Look::Swatch(i) => SWATCHES[(*i).min(6)],
-                Look::CustomSwatch(c) => *c,
+                Look::Swatch(c) | Look::CustomSwatch(c) => *c,
                 _ => unreachable!(),
             };
             let bx = centred_boxes(p, r.center());

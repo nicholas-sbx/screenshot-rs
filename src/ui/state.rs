@@ -5,12 +5,35 @@
 use crate::config::Config;
 use crate::geom::{IRect, Point, Rect};
 use crate::keys::Keymap;
-use crate::render::theme::{self, Color, SWATCHES};
+use crate::render::theme::{self, Color};
 use crate::ui::overlay::Window;
 use crate::ui::shapes::{Shape, Tool};
 
-/// The colour index of your own colour, after the toolbar's others.
-pub const CUSTOM: usize = SWATCHES.len();
+/// The colour index of your own colour (the toolbar's others are 0..).
+pub const CUSTOM: usize = usize::MAX;
+
+/// The toolbar's colours from the settings' hex.
+pub fn palette(hex: &[String]) -> Vec<Color> {
+    let colors: Vec<Color> = hex.iter().filter_map(|h| Color::parse(h)).map(|c| Color { a: 255, ..c }).collect();
+    if colors.is_empty() { theme::SWATCHES.to_vec() } else { colors }
+}
+
+/// The colour index key `color.N` picks with `n` colours on the toolbar:
+/// 1-7 the toolbar's first seven, 8 your own; None if there's no such one.
+pub fn color_for_key(n: usize, colors: usize) -> Option<usize> {
+    match n {
+        8 => Some(CUSTOM),
+        1..=7 if n <= colors => Some(n - 1),
+        _ => None,
+    }
+}
+
+/// The colour index `default_color` (from the settings) gives with `n`
+/// colours on the toolbar: past them, your own.
+pub fn default_color_index(default: i64, colors: usize) -> usize {
+    let i = default.max(0) as usize;
+    if i < colors { i } else { CUSTOM }
+}
 
 /// What the compositor said about the desktop: its windows (topmost
 /// first, global logical pixels), the active one, and where the pointer is.
@@ -27,6 +50,9 @@ pub struct State {
     pub tool: Tool,
     /// the last tool used that draws in a colour
     pub colour_tool: Tool,
+    /// the toolbar's colours (the settings')
+    pub palette: Vec<Color>,
+    /// an index into `palette`, or CUSTOM
     pub color_index: usize,
     pub custom_color: Color,
     pub size: usize,
@@ -84,11 +110,13 @@ impl State {
         let mut dim = theme::c().dim;
         dim.a = ((cfg.dim_opacity.clamp(0, 100) as f32) * 2.55).round_ties_even() as u8;
         let custom = Color::parse(&cfg.custom_color).unwrap_or(Color::rgb(0xFF4FA3));
+        let palette = palette(&cfg.palette);
         State {
             keymap,
             tool,
             colour_tool: if tool.uses_color() { tool } else { Tool::Pen },
-            color_index: (cfg.default_color.max(0) as usize).min(CUSTOM),
+            color_index: default_color_index(cfg.default_color, palette.len()),
+            palette,
             custom_color: Color { a: 255, ..custom },
             size: (cfg.default_size.max(0) as usize).min(theme::SIZES.len() - 1),
             dim,
@@ -132,8 +160,39 @@ impl State {
 
     /// The colour drawn with now.
     pub fn color(&self) -> Color {
-        if self.color_index >= CUSTOM { self.custom_color } else { SWATCHES[self.color_index] }
+        self.palette.get(self.color_index).copied().unwrap_or(self.custom_color)
     }
+}
+
+/// The toolbar's colour swatches (ids `swatch.N`, from 0) and your own
+/// colour's (`color.8`), as the capture toolbar and the editor show them.
+pub fn swatch_items(km: &Keymap, palette: &[Color], color_index: usize, custom_color: Color, enabled: bool) -> Vec<crate::ui::widgets::Item> {
+    use crate::ui::widgets::{Item, Look};
+    let mut items: Vec<Item> = palette
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let hint = if i < 7 { km.hint("Colour", &format!("color.{}", i + 1)) } else { "Colour".to_string() };
+            let mut s = Item::new(SWATCH_IDS.get(i).copied().unwrap_or("swatch.x"), Look::Swatch(*c), hint);
+            s.selected = color_index == i;
+            s.enabled = enabled;
+            s
+        })
+        .collect();
+    let mut custom = Item::new("color.8", Look::CustomSwatch(custom_color), km.hint("Your own colour", "color.8") + "  ·  click to choose it");
+    custom.selected = color_index == CUSTOM;
+    custom.enabled = enabled;
+    items.push(custom);
+    items
+}
+
+/// The toolbar's colours' item ids (as many as it can hold).
+const SWATCH_IDS: [&str; crate::config::MAX_PALETTE] =
+    ["swatch.0", "swatch.1", "swatch.2", "swatch.3", "swatch.4", "swatch.5", "swatch.6", "swatch.7", "swatch.8", "swatch.9", "swatch.10", "swatch.11"];
+
+/// The colour index of a swatch's item id.
+pub fn swatch_index(id: &str) -> Option<usize> {
+    id.strip_prefix("swatch.")?.parse().ok()
 }
 
 fn theme_key(name: &str) -> u64 {

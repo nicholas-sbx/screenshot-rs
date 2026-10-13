@@ -90,7 +90,9 @@ pub struct Config {
     /// The pointer when picking a region: hidden | shown | toggle
     pub region_pointer: String,
     pub default_tool: String,
-    /// 0-6 the toolbar's colours, 7 your own (custom_color)
+    /// the toolbar's colours (#RRGGBB, in order: keys 1-7 for the first seven)
+    pub palette: Vec<String>,
+    /// an index into `palette`; at or past its end, your own (custom_color)
     pub default_color: i64,
     /// #RRGGBB
     pub custom_color: String,
@@ -184,6 +186,11 @@ impl Config {
             Some(c) if is_hex_color(&c) => c.to_uppercase(),
             _ => "#FF4FA3".into(),
         };
+        let palette: Vec<String> = match data.get("palette") {
+            Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str()).filter(|c| is_hex_color(c)).map(|c| c.to_uppercase()).take(MAX_PALETTE).collect(),
+            _ => Vec::new(),
+        };
+        let palette = if palette.is_empty() { default_palette() } else { palette };
         let keys = match data.get("keys") {
             Some(Value::Object(m)) => m.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect(),
             _ => BTreeMap::new(),
@@ -233,6 +240,7 @@ impl Config {
             include_pointer: b("include_pointer", false),
             region_pointer: one_of(get_str(data, "region_pointer"), REGION_POINTER, "hidden"),
             default_tool: s("default_tool", "region"),
+            palette,
             default_color: i("default_color", 0),
             custom_color,
             keys,
@@ -291,6 +299,7 @@ impl Config {
         put("include_pointer", self.include_pointer.into());
         put("region_pointer", self.region_pointer.clone().into());
         put("default_tool", self.default_tool.clone().into());
+        put("palette", Value::Array(self.palette.iter().map(|c| Value::String(c.clone())).collect()));
         put("default_color", self.default_color.into());
         put("custom_color", self.custom_color.clone().into());
         put("keys", Value::Object(self.keys.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect()));
@@ -319,6 +328,16 @@ impl Config {
     pub fn dump(&self) -> String {
         serde_json::to_string_pretty(&Value::Object(self.to_map())).unwrap_or_default()
     }
+}
+
+/// The toolbar's colours to start with: ember, amber, mint, sky, violet, bone, ink.
+pub const DEFAULT_PALETTE: [&str; 7] = ["#FF6A3D", "#FFC53D", "#3DDC97", "#3DB2FF", "#9B7BFF", "#F2EEE6", "#121218"];
+
+/// The most colours the toolbar holds (more and it outgrows small screens).
+pub const MAX_PALETTE: usize = 12;
+
+pub fn default_palette() -> Vec<String> {
+    DEFAULT_PALETTE.iter().map(|c| c.to_string()).collect()
 }
 
 pub fn is_hex_color(s: &str) -> bool {
@@ -600,8 +619,20 @@ mod tests {
     }
 
     #[test]
+    fn palettes_are_cleaned_up() {
+        assert_eq!(Config::default().palette, default_palette());
+        let c = cfg(json!({"palette": ["#abcdef", "red", 3, "#123456"]}));
+        assert_eq!(c.palette, ["#ABCDEF", "#123456"]);
+        // Nothing usable, or not a list: the defaults.
+        assert_eq!(cfg(json!({"palette": ["nope"]})).palette, default_palette());
+        assert_eq!(cfg(json!({"palette": "#ABCDEF"})).palette, default_palette());
+        let many: Vec<&str> = vec!["#000000"; 40];
+        assert_eq!(cfg(json!({ "palette": many })).palette.len(), MAX_PALETTE);
+    }
+
+    #[test]
     fn round_trip() {
-        let c = cfg(json!({"theme": "dusk", "keys": {"tool.pen": "J"}, "save_dir": "/x/y"}));
+        let c = cfg(json!({"theme": "dusk", "keys": {"tool.pen": "J"}, "save_dir": "/x/y", "palette": ["#010203"]}));
         let again = Config::from_map(&c.to_map());
         assert_eq!(c, again);
     }

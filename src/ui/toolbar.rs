@@ -7,12 +7,15 @@ use crate::keys::Keymap;
 use crate::render::Painter;
 use crate::render::theme::{Color, REC};
 use crate::ui::shapes::{TOOLS, Tool};
+use crate::ui::state::swatch_items;
 use crate::ui::widgets::{Item, Look, Pointer, layout_row, paint_item, paint_panel};
 
 /// What the toolbar shows: the session's state, as far as the toolbar cares.
 pub struct View<'a> {
     pub tool: Tool,
     pub can_record: bool,
+    /// the toolbar's colours
+    pub palette: &'a [Color],
     pub color_index: usize,
     pub custom_color: Color,
     pub size: usize,
@@ -49,8 +52,6 @@ pub struct Toolbar {
     /// where it was grabbed (relative to its top left), while dragged
     pub grab: Option<Point>,
 }
-
-const SWATCH_COUNT: usize = 7;
 
 impl Toolbar {
     pub fn new(view: &View<'_>) -> Toolbar {
@@ -131,17 +132,7 @@ fn build(v: &View<'_>) -> Vec<Item> {
         }
     }
     items.push(Item::new("divider.tools", Look::Divider, ""));
-    const SWATCH_IDS: [&str; 8] = ["color.1", "color.2", "color.3", "color.4", "color.5", "color.6", "color.7", "color.8"];
-    for (i, id) in SWATCH_IDS.iter().enumerate().take(SWATCH_COUNT) {
-        let mut s = Item::new(id, Look::Swatch(i), km.hint("Colour", id));
-        s.selected = v.color_index == i;
-        s.enabled = !recording;
-        items.push(s);
-    }
-    let mut custom = Item::new("color.8", Look::CustomSwatch(v.custom_color), km.hint("Your own colour", "color.8") + "  ·  click to choose it");
-    custom.selected = v.color_index == SWATCH_COUNT;
-    custom.enabled = !recording;
-    items.push(custom);
+    items.extend(swatch_items(km, v.palette, v.color_index, v.custom_color, !recording));
     let keys: Vec<String> = [km.label("size.down"), km.label("size.up")].into_iter().filter(|k| !k.is_empty()).collect();
     let mut size =
         Item::new("size", Look::Size(v.size), if keys.is_empty() { "Stroke size".to_string() } else { format!("Stroke size  ·  {}", keys.join(" ")) });
@@ -219,10 +210,11 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn view(km: &Keymap) -> View<'_> {
+    fn view<'a>(km: &'a Keymap, palette: &'a [Color]) -> View<'a> {
         View {
             tool: Tool::Region,
             can_record: true,
+            palette,
             color_index: 0,
             custom_color: Color::rgb(0xFF4FA3),
             size: 1,
@@ -242,7 +234,7 @@ mod tests {
     #[test]
     fn layout_like_qt() {
         let km = Keymap::new(&BTreeMap::new());
-        let t = Toolbar::new(&view(&km));
+        let t = Toolbar::new(&view(&km, &crate::render::theme::SWATCHES));
         // grip 18, 14 tools of 36, 4 dividers of 13, 8 swatches of 26,
         // size 40, codes + snap + undo + redo + beautify + pin + screen + close (8 x 36)
         let widths = 18.0 + 14.0 * 36.0 + 4.0 * 13.0 + 8.0 * 26.0 + 40.0 + 8.0 * 36.0;
@@ -252,5 +244,20 @@ mod tests {
         assert!(!undo.enabled);
         assert!(t.items.iter().find(|i| i.id == "region").unwrap().active);
         assert_eq!(t.items.iter().find(|i| i.id == "codes").unwrap().hint, "Show QR / barcodes  ·  Q  ·  on  ·  2 codes found");
+        assert_eq!(t.items.iter().find(|i| i.id == "swatch.2").unwrap().hint, "Colour  ·  3");
+    }
+
+    #[test]
+    fn as_wide_as_its_colours() {
+        let km = Keymap::new(&BTreeMap::new());
+        let seven = Toolbar::new(&view(&km, &crate::render::theme::SWATCHES)).size.0;
+        let ten = [Color::rgb(0x112233); 10];
+        let t = Toolbar::new(&view(&km, &ten));
+        // three more swatches of 26, with their gaps of 2
+        assert_eq!(t.size.0, seven + 3.0 * 28.0);
+        assert_eq!(t.items.iter().filter(|i| matches!(i.look, Look::Swatch(_))).count(), 10);
+        assert_eq!(t.items.iter().find(|i| i.id == "swatch.9").unwrap().hint, "Colour");
+        let two = Toolbar::new(&view(&km, &ten[..2])).size.0;
+        assert_eq!(two, seven - 5.0 * 28.0);
     }
 }

@@ -20,7 +20,7 @@ use crate::render::paint::{Align, Pen};
 use crate::render::text::{self, DEMIBOLD, MEDIUM, NORMAL};
 use crate::render::theme::{self, Color, THEMES};
 use crate::template::{self, Shot};
-use crate::ui::panels::LineEdit;
+use crate::ui::panels::{ColorPicker, LineEdit, PICKER_SIZE, PickerEvent};
 use crate::ui::session::{Button, CursorShape};
 use crate::ui::textedit::KeyResult;
 
@@ -86,6 +86,8 @@ enum Control {
         options: Vec<(String, String)>,
         value: String,
     },
+    /// the toolbar's colours, a line each, and a button to add one
+    Palette(Vec<Color>),
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +150,11 @@ enum Part {
     FieldButton(usize),
     /// a shortcut's ×
     Clear,
+    /// a colour of the palette (it opens the picker), its ×, and the
+    /// button that adds one
+    Swatch(usize),
+    Remove(usize),
+    Add,
 }
 
 /// What's laid out where, this frame.
@@ -202,7 +209,31 @@ fn control_size(c: &Control) -> (f32, f32) {
         Control::Text(_) => (0.0, 0.0),
         Control::Shortcut { .. } => (200.0, 30.0),
         Control::Combo { .. } => (180.0, 32.0),
+        Control::Palette(colors) => (0.0, colors.len() as f32 * PALETTE_LINE + 30.0),
     }
+}
+
+/// A palette's line: its height, gap included.
+const PALETTE_LINE: f32 = 38.0;
+const PALETTE_W: f32 = 340.0;
+const ADD_COLOUR: &str = "Add colour";
+
+/// Where a palette's parts go in its `rect`: each colour's line and its ×,
+/// then the add button.
+fn palette_parts(rect: Rect, n: usize) -> (Vec<(Rect, Rect)>, Rect) {
+    let w = rect.w.min(PALETTE_W);
+    let lines = (0..n)
+        .map(|i| {
+            let line = Rect::new(rect.x, rect.y + i as f32 * PALETTE_LINE, w, PALETTE_LINE - 6.0);
+            (line, Rect::new(line.right() - 30.0, line.y + 3.0, 26.0, 26.0))
+        })
+        .collect();
+    (lines, Rect::new(rect.x, rect.y + n as f32 * PALETTE_LINE, button_width(ADD_COLOUR), 30.0))
+}
+
+/// A colour to add to `colors`: a default one not there yet, else a new hue.
+fn next_colour(colors: &[Color]) -> Color {
+    theme::SWATCHES.iter().copied().find(|c| !colors.contains(c)).unwrap_or_else(|| Color::from_hsv((colors.len() as f32 * 0.618_034) % 1.0, 0.75, 1.0))
 }
 
 fn fmt_percent_off(v: i64) -> String {
@@ -268,6 +299,23 @@ pub struct Settings {
     requests: Vec<Request>,
     /// KDE's shortcut service is there (None: still finding out)
     global_shortcuts: Option<bool>,
+    /// the picker open for a palette colour: which one, and whether a
+    /// press on it is held (dragging)
+    picker: Option<(usize, ColorPicker)>,
+    picker_held: bool,
+    /// a palette colour pressed, to be dragged up or down the list
+    reorder: Option<Reorder>,
+}
+
+/// A palette colour held: where it is in the list now, where the press
+/// was, and whether it's moved far enough to be dragged (not a click).
+#[derive(Clone, Copy, Debug)]
+struct Reorder {
+    b: usize,
+    r: usize,
+    at: usize,
+    start: Point,
+    moving: bool,
 }
 
 impl Settings {
@@ -294,6 +342,9 @@ impl Settings {
             touched: Vec::new(),
             requests: Vec::new(),
             global_shortcuts: None,
+            picker: None,
+            picker_held: false,
+            reorder: None,
             cfg,
         };
         s.pages = s.build();
@@ -363,6 +414,18 @@ impl Settings {
                         "Selections, clicked windows and drawings can span several monitors.",
                         Control::Toggle(c.span_monitors),
                     ),
+                ],
+            },
+            Block::Card {
+                heading: "Toolbar colours".into(),
+                rows: vec![
+                    Row::new(
+                        "palette",
+                        "Drawing colours",
+                        "On the toolbar and in the editor, in this order: keys 1 to 7 pick the first seven. Click one to change it, drag it to move it.",
+                        Control::Button("Reset to default"),
+                    )
+                    .below(Control::Palette(crate::ui::state::palette(&c.palette))),
                 ],
             },
             Block::Card {
@@ -643,6 +706,7 @@ impl Settings {
 
     /// Show page `index` (0 General ... 4 Shortcuts).
     pub fn show_page(&mut self, index: usize) {
+        self.close_picker();
         self.leave_field();
         self.stop_recording();
         self.page = index.min(self.pages.len() - 1);
@@ -840,6 +904,14 @@ impl Settings {
                                 }
                             }
                         }
+                        if let (Control::Palette(colors), Some(bel)) = (&row.below, parts.below) {
+                            let (lines, add) = palette_parts(at(bel), colors.len());
+                            for (i, (line, remove)) in lines.into_iter().enumerate() {
+                                hits.push((Hit::Row(b, r, Part::Remove(i)), remove));
+                                hits.push((Hit::Row(b, r, Part::Swatch(i)), line));
+                            }
+                            hits.push((Hit::Row(b, r, Part::Add), add));
+                        }
                         if let (Control::Line { buttons, .. }, Some(bel)) = (&row.below, parts.below) {
                             let (field, button_rects) = line_parts(at(bel), buttons);
                             for (i, rect) in button_rects.into_iter().enumerate() {
@@ -891,6 +963,9 @@ impl Settings {
     /// Where the caret of the field being typed in is (window logical),
     /// for the input method.
     pub fn text_input(&self) -> Option<Rect> {
+        if let Some((_, picker)) = &self.picker {
+            return picker.caret_rect();
+        }
         let (b, r) = self.focus?;
         let Control::Line { edit, .. } = &self.row(b, r)?.below else { return None };
         Some(edit.caret_rect())
@@ -927,6 +1002,7 @@ impl Settings {
 
     fn set_scroll(&mut self, to: f32) {
         self.combo = None;
+        self.close_picker();
         self.scroll = to;
         self.clamp_scroll();
         self.place_fields();
@@ -941,7 +1017,13 @@ impl Settings {
     // -- input -----------------------------------------------------------------------------
 
     pub fn cursor(&self) -> CursorShape {
+        if let (Some((_, picker)), Some(at)) = (&self.picker, self.pointer)
+            && picker.rect().contains(at)
+        {
+            return CursorShape::Arrow;
+        }
         match self.hovered {
+            _ if self.reorder.is_some_and(|d| d.moving) => CursorShape::Move,
             Some(Hit::Row(_, _, Part::Field)) if self.is_line_hovered() => CursorShape::Text,
             Some(_) => CursorShape::Hand,
             None => CursorShape::Arrow,
@@ -963,6 +1045,29 @@ impl Settings {
         if let Some(grab) = self.bar_drag {
             self.drag_thumb(at.y - grab);
             return;
+        }
+        if let Some((_, picker)) = &mut self.picker {
+            let over = picker.rect().contains(at);
+            if self.picker_held || over {
+                let ev = picker.motion(at, self.picker_held);
+                self.picker_event(ev);
+                self.hover(None);
+                return;
+            }
+        }
+        if let Some(mut d) = self.reorder {
+            if !d.moving && (at.y - d.start.y).abs() > 4.0 {
+                d.moving = true;
+                self.pressed = None;
+                self.hover(None);
+            }
+            if d.moving {
+                self.drag_colour(&mut d, at);
+            }
+            self.reorder = Some(d);
+            if d.moving {
+                return;
+            }
         }
         if let Some((start, scroll0, panning)) = self.pan {
             let d = at - start;
@@ -1010,6 +1115,7 @@ impl Settings {
 
     pub fn scroll_by(&mut self, steps: f32) {
         self.combo = None;
+        self.close_picker();
         self.scroll -= steps * 48.0;
         self.clamp_scroll();
         self.place_fields();
@@ -1026,8 +1132,22 @@ impl Settings {
             return;
         }
         if !pressed {
+            if std::mem::take(&mut self.picker_held) {
+                if let Some((_, picker)) = &mut self.picker {
+                    let ev = picker.release(at);
+                    self.picker_event(ev);
+                }
+                return;
+            }
             if self.bar_drag.take().is_some() {
                 self.damaged = true;
+                return;
+            }
+            if let Some(d) = self.reorder.take()
+                && d.moving
+            {
+                self.pressed = None;
+                self.save_palette();
                 return;
             }
             if let Some((_, _, panning)) = self.pan.take() {
@@ -1068,8 +1188,26 @@ impl Settings {
             self.drag_thumb(at.y - grab);
             return;
         }
+        // The picker takes presses on it; one elsewhere closes it (one on
+        // its colour's line only that).
+        if let Some((i, picker)) = &mut self.picker {
+            if picker.rect().contains(at) {
+                self.picker_held = true;
+                let ev = picker.press(at, mods & keyseq::SHIFT != 0);
+                self.picker_event(ev);
+                return;
+            }
+            let i = *i;
+            self.close_picker();
+            if matches!(self.hit_at(at), Some(Hit::Row(_, _, Part::Swatch(j))) if j == i) {
+                return;
+            }
+        }
         let hit = self.hit_at(at);
-        if self.finger {
+        if let Some(Hit::Row(b, r, Part::Swatch(i))) = hit {
+            // (held: dragged up or down it moves, else it's a click)
+            self.reorder = Some(Reorder { b, r, at: i, start: at, moving: false });
+        } else if self.finger {
             self.pan = Some((at, self.scroll, false));
         }
         // A press elsewhere: the dropdown closes, the field being typed in is done.
@@ -1183,6 +1321,25 @@ impl Settings {
                     crate::deliver::open_file(dir);
                 }
             }
+            (Part::Control, Control::Button(_), Control::Palette(colors)) => {
+                *colors = theme::SWATCHES.to_vec();
+                self.save_palette();
+            }
+            (Part::Swatch(i), _, Control::Palette(_)) => self.open_picker(b, r, i),
+            (Part::Remove(i), _, Control::Palette(colors)) => {
+                if colors.len() > 1 && i < colors.len() {
+                    colors.remove(i);
+                    self.save_palette();
+                }
+            }
+            (Part::Add, _, Control::Palette(colors)) => {
+                if colors.len() < config::MAX_PALETTE {
+                    let n = colors.len();
+                    colors.push(next_colour(colors));
+                    self.save_palette();
+                    self.open_picker(b, r, n);
+                }
+            }
             (Part::Control, Control::Combo { .. }, _) => {
                 self.combo = Some((b, r));
             }
@@ -1208,6 +1365,72 @@ impl Settings {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The palette's colours, as the settings window has them.
+    fn palette_mut(&mut self) -> Option<&mut Vec<Color>> {
+        match &mut self.find_mut("palette")?.below {
+            Control::Palette(colors) => Some(colors),
+            _ => None,
+        }
+    }
+
+    fn save_palette(&mut self) {
+        let Some(colors) = self.palette_mut() else { return };
+        let hex: Vec<Value> = colors.iter().map(|c| Value::from(c.hex())).collect();
+        self.set("palette", Value::Array(hex));
+    }
+
+    /// The colour held is dragged to `at`: it moves to the line there.
+    fn drag_colour(&mut self, d: &mut Reorder, at: Point) {
+        let Some(first) = self.layout().hits.into_iter().find(|(h, _)| *h == Hit::Row(d.b, d.r, Part::Swatch(0))).map(|h| h.1) else { return };
+        let Some(Row { below: Control::Palette(colors), .. }) = self.row_mut(d.b, d.r) else { return };
+        let to = (((at.y - first.y) / PALETTE_LINE).floor().max(0.0) as usize).min(colors.len().saturating_sub(1));
+        if to != d.at && d.at < colors.len() {
+            let c = colors.remove(d.at);
+            colors.insert(to, c);
+            d.at = to;
+            self.damaged = true;
+        }
+    }
+
+    /// The picker for palette colour `i` (row (b, r)), under its line, or
+    /// over it where there's no room below.
+    fn open_picker(&mut self, b: usize, r: usize, i: usize) {
+        let Some(line) = self.layout().hits.into_iter().find(|(h, _)| *h == Hit::Row(b, r, Part::Swatch(i))).map(|h| h.1) else { return };
+        let Some(color) = self.palette_mut().and_then(|c| c.get(i).copied()) else { return };
+        let mut picker = ColorPicker::new(color).without_dropper();
+        let y = if line.bottom() + 4.0 + PICKER_SIZE.1 <= self.view.1 - 8.0 { line.bottom() + 4.0 } else { line.y - 4.0 - PICKER_SIZE.1 };
+        let x = line.x.clamp(NAV_W + 8.0, (self.view.0 - PICKER_SIZE.0 - 8.0).max(NAV_W + 8.0));
+        picker.pos = Point::new(x.round(), y.max(8.0).round());
+        self.leave_field();
+        self.picker = Some((i, picker));
+        self.damaged = true;
+    }
+
+    /// Done with the picker: the colour it chose is saved.
+    fn close_picker(&mut self) {
+        self.picker_held = false;
+        if self.picker.take().is_some() {
+            self.save_palette();
+            self.damaged = true;
+        }
+    }
+
+    fn picker_event(&mut self, ev: PickerEvent) {
+        self.damaged = true;
+        match ev {
+            PickerEvent::Color(color) => {
+                let Some(i) = self.picker.as_ref().map(|p| p.0) else { return };
+                if let Some(c) = self.palette_mut().and_then(|c| c.get_mut(i)) {
+                    *c = Color { a: 255, ..color };
+                }
+            }
+            PickerEvent::Close => self.close_picker(),
+            PickerEvent::Copy(s) => self.requests.push(Request::CopyText(s)),
+            PickerEvent::Paste => self.requests.push(Request::Paste),
+            PickerEvent::None | PickerEvent::Eyedropper => {}
         }
     }
 
@@ -1349,6 +1572,15 @@ impl Settings {
     }
 
     pub fn key(&mut self, k: &KeyPress) {
+        if let Some((_, picker)) = &mut self.picker {
+            if picker.hex.focused {
+                let ev = picker.key(k);
+                self.picker_event(ev);
+            } else if k.key == key::ESCAPE || k.key == key::RETURN || k.key == key::ENTER {
+                self.close_picker();
+            }
+            return;
+        }
         if let Some((b, r)) = self.recording {
             const MODIFIER_KEYS: [i32; 6] = [0x0100_0020, 0x0100_0021, 0x0100_0022, 0x0100_0023, 0x0100_1103, 0x0100_0053];
             if MODIFIER_KEYS.contains(&k.key) {
@@ -1394,6 +1626,11 @@ impl Settings {
     }
 
     pub fn paste(&mut self, s: &str) {
+        if let Some((_, picker)) = &mut self.picker {
+            let ev = picker.paste(s);
+            self.picker_event(ev);
+            return;
+        }
         self.place_fields();
         if let Some((b, r)) = self.focus
             && let Some(Row { below: Control::Line { edit, .. }, .. }) = self.row_mut(b, r)
@@ -1405,12 +1642,13 @@ impl Settings {
     }
 
     pub fn wants_text(&self) -> bool {
-        self.focus.is_some()
+        self.focus.is_some() || self.picker.as_ref().is_some_and(|(_, p)| p.hex.focused)
     }
 
     /// Before the window closes: the field being typed in is saved, and
     /// KDE's shortcuts work again.
     pub fn closing(&mut self) {
+        self.close_picker();
         self.leave_field();
         self.stop_recording();
     }
@@ -1511,6 +1749,10 @@ impl Settings {
                     p.draw_text(rect.adjusted(10.0, 0.0, 0.0, 0.0), Align::Left, label, control_font(), c.text);
                 }
             }
+        }
+        // The colour picker, over everything.
+        if let Some((_, picker)) = &self.picker {
+            picker.paint(&mut p);
         }
     }
 
@@ -1627,6 +1869,39 @@ impl Settings {
                 } else {
                     p.draw_text(text_r, Align::Left, "None", control_font(), c.muted);
                 }
+            }
+            Control::Palette(colors) => {
+                let (lines, add) = palette_parts(rect, colors.len());
+                let keymap = keys::Keymap::new(&self.cfg.keys);
+                let editing = self.picker.as_ref().map(|p| p.0).or(self.reorder.filter(|d| d.moving && (d.b, d.r) == (b, r)).map(|d| d.at));
+                for (i, ((line, remove), color)) in lines.into_iter().zip(colors).enumerate() {
+                    let edge = if editing == Some(i) || hovered(Part::Swatch(i)) { c.muted } else { c.line };
+                    p.draw_rounded_rect(line.adjusted(0.5, 0.5, -0.5, -0.5), 6.0, Some(c.ink), Some(Pen::new(edge, 1.0)));
+                    // (a grip: the line is dragged up or down by it, or anywhere)
+                    for col in 0..2 {
+                        for row in 0..3 {
+                            p.fill_ellipse(Rect::new(line.x + 8.0 + col as f32 * 5.0, line.center().y - 6.5 + row as f32 * 5.0, 2.4, 2.4), c.muted);
+                        }
+                    }
+                    let swatch = Rect::new(line.x + 24.0, line.center().y - 10.0, 20.0, 20.0);
+                    p.draw_rounded_rect(swatch, 5.0, Some(*color), Some(Pen::new(c.line, 1.0)));
+                    p.draw_text(Rect::new(swatch.right() + 10.0, line.y, 90.0, line.h), Align::Left, &color.hex(), text::mono(13.0, NORMAL), c.text);
+                    let key = if i < 7 { keymap.label(&format!("color.{}", i + 1)) } else { String::new() };
+                    if !key.is_empty() {
+                        p.draw_text(Rect::new(remove.x - 110.0, line.y, 100.0, line.h), Align::Right, &format!("Key {key}"), hint_font(), c.muted);
+                    }
+                    if colors.len() > 1 {
+                        let hover = hovered(Part::Remove(i));
+                        if hover {
+                            p.fill_rounded_rect(remove, 5.0, c.hover);
+                        }
+                        let cx = remove.center();
+                        let pen = Pen::new(if hover { c.text } else { c.muted }, 1.4);
+                        p.draw_line(Point::new(cx.x - 3.5, cx.y - 3.5), Point::new(cx.x + 3.5, cx.y + 3.5), pen);
+                        p.draw_line(Point::new(cx.x + 3.5, cx.y - 3.5), Point::new(cx.x - 3.5, cx.y + 3.5), pen);
+                    }
+                }
+                paint_button(p, add, ADD_COLOUR, hovered(Part::Add), colors.len() < config::MAX_PALETTE);
             }
             Control::Combo { options, value } => {
                 let open = self.combo == Some((b, r));
@@ -1866,6 +2141,62 @@ mod tests {
         // No shortcut service: the rows can't be used.
         s.set_global(None);
         assert!(matches!(s.row(b, r).unwrap().control, Control::Shortcut { enabled: false, .. }));
+    }
+
+    #[test]
+    fn toolbar_colours_are_added_changed_removed_and_reset() {
+        let mut s = settings();
+        s.show_page(1);
+        let (b, r) = row_at(&s, "palette");
+        let palette = |s: &Settings| s.cfg.palette.clone();
+        assert_eq!(palette(&s), config::default_palette());
+        // Removing the second.
+        click(&mut s, Hit::Row(b, r, Part::Remove(1)));
+        assert_eq!(palette(&s), ["#FF6A3D", "#3DDC97", "#3DB2FF", "#9B7BFF", "#F2EEE6", "#121218"]);
+        // Adding one: the default missing comes back, its picker opens.
+        click(&mut s, Hit::Row(b, r, Part::Add));
+        assert_eq!(palette(&s).last().map(String::as_str), Some("#FFC53D"));
+        assert_eq!(s.picker.as_ref().map(|p| p.0), Some(6));
+        // Typing a colour in the picker changes it; Enter saves it.
+        let hex = s.picker.as_ref().unwrap().1.hex.rect.translated(s.picker.as_ref().unwrap().1.pos).center();
+        click_at(&mut s, hex);
+        assert!(s.wants_text());
+        for _ in 0..7 {
+            s.key(&KeyPress { key: key::BACKSPACE, ..Default::default() });
+        }
+        s.commit_string("#123456");
+        s.key(&KeyPress { key: key::RETURN, ..Default::default() });
+        assert!(s.picker.is_none() && !s.wants_text());
+        assert_eq!(palette(&s).last().map(String::as_str), Some("#123456"));
+        // A click on a colour opens its picker; one elsewhere closes it.
+        click(&mut s, Hit::Row(b, r, Part::Swatch(0)));
+        assert_eq!(s.picker.as_ref().map(|p| p.0), Some(0));
+        click_at(&mut s, Point::new(NAV_W + 4.0, 4.0));
+        assert!(s.picker.is_none());
+        // Dragged down two lines: it moves there, and is saved on release (not a click).
+        let first = hit_point(&s, Hit::Row(b, r, Part::Swatch(0)));
+        s.pointer_motion(first, false);
+        s.button(Button::Left, true, first, 0);
+        for dy in [10.0, 40.0, 2.0 * PALETTE_LINE] {
+            s.pointer_motion(Point::new(first.x, first.y + dy), false);
+        }
+        s.button(Button::Left, false, Point::new(first.x, first.y + 2.0 * PALETTE_LINE), 0);
+        assert!(s.picker.is_none());
+        assert_eq!(&palette(&s)[..3], ["#3DDC97", "#3DB2FF", "#FF6A3D"]);
+        // Up to the most the toolbar holds, and never none.
+        for _ in 0..20 {
+            click(&mut s, Hit::Row(b, r, Part::Add));
+            s.close_picker();
+        }
+        assert_eq!(palette(&s).len(), config::MAX_PALETTE);
+        for _ in 0..20 {
+            let last = palette(&s).len() - 1;
+            click(&mut s, Hit::Row(b, r, Part::Remove(last)));
+        }
+        assert_eq!(palette(&s), ["#3DDC97"]);
+        // Reset.
+        click(&mut s, Hit::Row(b, r, Part::Control));
+        assert_eq!(palette(&s), config::default_palette());
     }
 
     #[test]

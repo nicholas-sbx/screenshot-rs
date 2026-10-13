@@ -31,6 +31,7 @@ use crate::ui::selection::{Drawings, DrawingsMut, Selection};
 use crate::ui::session::{Button, CursorShape};
 use crate::ui::shapes::{self, Mods, Shape, TOOLS, Tool, copy_for_editing};
 use crate::ui::snapping::EdgeMaps;
+use crate::ui::state::{CUSTOM, color_for_key, default_color_index, swatch_index, swatch_items};
 use crate::ui::textedit::KeyResult;
 use crate::ui::widgets::{Item, Look, Pointer, layout_row, paint_item};
 
@@ -45,7 +46,6 @@ const MIN_CANVAS: (f32, f32) = (200.0, 150.0);
 const ZOOM: (f32, f32) = (0.05, 32.0);
 /// How much of the picture always stays in view.
 const KEEP: f32 = 48.0;
-const CUSTOM: usize = SWATCHES.len();
 const SAY_FOR: Duration = Duration::from_secs(4);
 const COPIED_FOR: Duration = Duration::from_secs(2);
 /// How long after the last change the style becomes the last used.
@@ -226,6 +226,9 @@ pub struct Editor {
     selection: Selection,
     pub tool: Tool,
     colour_tool: Tool,
+    /// the toolbar's colours (the settings')
+    palette: Vec<Color>,
+    /// an index into `palette`, or CUSTOM
     color_index: usize,
     custom_color: Color,
     size: usize,
@@ -306,13 +309,15 @@ impl Editor {
         let keymap = Keymap::new(&cfg.keys);
         let custom_color = Color::parse(&cfg.custom_color).unwrap_or(SWATCHES[0]);
         let cfg_style = cfg.beautify_style.clone();
+        let palette = crate::ui::state::palette(&cfg.palette);
         let mut ed = Editor {
             image: Arc::new(image),
             dpr: dpr.max(0.25),
             target: SaveTarget::open(&path).ok(),
             path,
             alpha,
-            color_index: (cfg.default_color.clamp(0, CUSTOM as i64)) as usize,
+            color_index: default_color_index(cfg.default_color, palette.len()),
+            palette,
             size: (cfg.default_size.clamp(0, SIZES.len() as i64 - 1)) as usize,
             cfg,
             keymap,
@@ -499,15 +504,7 @@ impl Editor {
             items.push(b);
         }
         items.push(Item::new("divider.tools", Look::Divider, ""));
-        const SWATCH_IDS: [&str; 8] = ["color.1", "color.2", "color.3", "color.4", "color.5", "color.6", "color.7", "color.8"];
-        for (i, id) in SWATCH_IDS.iter().enumerate().take(CUSTOM) {
-            let mut s = Item::new(id, Look::Swatch(i), km.hint("Colour", id));
-            s.selected = self.color_index == i;
-            items.push(s);
-        }
-        let mut custom = Item::new("color.8", Look::CustomSwatch(self.custom_color), km.hint("Your own colour", "color.8") + "  ·  click to choose it");
-        custom.selected = self.color_index == CUSTOM;
-        items.push(custom);
+        items.extend(swatch_items(km, &self.palette, self.color_index, self.custom_color, true));
         items.push(Item::new("size", Look::Size(self.size), "Stroke size"));
         items.push(Item::new("divider.colors", Look::Divider, ""));
         let mut undo = Item::new("undo", Look::Icon { icon: "undo", size: 36.0 }, km.hint("Undo", "undo"));
@@ -792,8 +789,8 @@ impl Editor {
             _ => {
                 if let Some(t) = Tool::from_id(id) {
                     self.set_tool(t);
-                } else if let Some(i) = id.strip_prefix("color.").and_then(|n| n.parse::<usize>().ok()) {
-                    self.set_color(i.saturating_sub(1));
+                } else if let Some(i) = swatch_index(id) {
+                    self.set_color(i);
                 }
             }
         }
@@ -802,7 +799,7 @@ impl Editor {
     // -- tools ---------------------------------------------------------------------------
 
     fn color(&self) -> Color {
-        if self.color_index >= CUSTOM { self.custom_color } else { SWATCHES[self.color_index] }
+        self.palette.get(self.color_index).copied().unwrap_or(self.custom_color)
     }
 
     pub fn set_tool(&mut self, tool: Tool) {
@@ -972,14 +969,15 @@ impl Editor {
     /// A colour; from a tool that has none (pixelate, blur), back to the
     /// last drawing tool, so the colour gets used.
     pub fn set_color(&mut self, index: usize) {
+        let index = if index < self.palette.len() { index } else { CUSTOM };
         if self.tool == Tool::Crop {
             // (the crop tool stays: the colour is the margin's)
-            self.color_index = index.min(CUSTOM);
+            self.color_index = index;
             return self.refresh_bar();
         }
         if self.has_selection() {
             // (it changes the selected drawing)
-            self.color_index = index.min(CUSTOM);
+            self.color_index = index;
             let color = self.color();
             self.with_selection(|sel, d| sel.restyle(d, Some(color), None));
             return self.refresh_bar();
@@ -987,7 +985,7 @@ impl Editor {
         if !self.tool.uses_color() {
             self.tool = self.colour_tool;
         }
-        self.color_index = index.min(CUSTOM);
+        self.color_index = index;
         let color = self.color();
         if let Some(s) = &mut self.text_edit {
             s.color = color;
@@ -1783,8 +1781,8 @@ impl Editor {
             _ => {
                 if let Some(t) = action.strip_prefix("tool.").and_then(Tool::from_id) {
                     self.set_tool(t);
-                } else if let Some(i) = action.strip_prefix("color.").and_then(|n| n.parse::<usize>().ok()) {
-                    self.set_color(i.saturating_sub(1));
+                } else if let Some(i) = action.strip_prefix("color.").and_then(|n| n.parse::<usize>().ok()).and_then(|n| color_for_key(n, self.palette.len())) {
+                    self.set_color(i);
                 }
             }
         }
