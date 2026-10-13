@@ -22,7 +22,10 @@ pub const OPEN_AFTER: &[&str] = &["none", "image", "folder"];
 /// Screen capture helpers. "qt" is the old name for grabbing X11 directly.
 pub const BACKENDS: &[&str] = &["auto", "kwin", "screencopy", "portal", "spectacle", "grim", "gnome-screenshot", "qt"];
 pub const RECORD_FORMATS: &[&str] = &["mp4", "webm", "gif"];
-pub const RECORD_FPS: &[i64] = &[24, 30, 60];
+/// The recording frame rates offered; 0: native, as often as the screen
+/// gives a new picture (the screen-cast stream's own rate, the monitor's
+/// refresh rate on X11).
+pub const RECORD_FPS: &[i64] = &[24, 30, 60, 0];
 pub const REGION_POINTER: &[&str] = &["toggle", "hidden", "shown"];
 /// The tray icon's looks (desktop::tray::STYLES).
 pub const TRAY_ICONS: &[&str] = &["color", "theme", "white", "black", "auto"];

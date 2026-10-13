@@ -530,7 +530,7 @@ impl Settings {
                 heading: "Defaults".into(),
                 rows: vec![
                     Row::new("record_format", "Format", "GIF files have no audio.", seg(&[("mp4", "MP4"), ("webm", "WebM"), ("gif", "GIF")], &c.record_format)),
-                    Row::new("record_fps", "Frame rate", "", seg(&[("24", "24 fps"), ("30", "30 fps"), ("60", "60 fps")], &c.record_fps.to_string())),
+                    Row::new("record_fps", "Frame rate", "", seg(&[("24", "24 fps"), ("30", "30 fps"), ("60", "60 fps"), ("0", "Native")], &c.record_fps.to_string())),
                     Row::new("record_mic", "Microphone", "", Control::Toggle(c.record_mic)),
                     Row::new("record_system_audio", "Computer sound", "", Control::Toggle(c.record_system_audio)),
                     Row::new("record_cursor", "Mouse pointer", "", Control::Toggle(c.record_cursor)),

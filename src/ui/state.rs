@@ -3,7 +3,7 @@
 //! The session changes it; the overlays read it to paint.
 
 use crate::config::Config;
-use crate::geom::Point;
+use crate::geom::{IRect, Point, Rect};
 use crate::keys::Keymap;
 use crate::render::theme::{self, Color, SWATCHES};
 use crate::ui::overlay::Window;
@@ -51,8 +51,18 @@ pub struct State {
     pub hint: Option<String>,
     /// why recording in the chosen format can't work here
     pub record_problem: Option<String>,
-    /// an area to record is chosen on some monitor
-    pub any_armed: bool,
+    /// The area chosen to record (global logical pixels): every monitor
+    /// it reaches shows its part, handles and all, so it's moved and
+    /// resized from any of them.
+    pub rec_area: Option<Rect>,
+    /// the monitor (an overlay) whose recording panel shows: the one with
+    /// most of the area
+    pub rec_home: usize,
+    /// the area is being moved or resized (its handles and panel hide)
+    pub area_moving: bool,
+    /// each monitor (global logical) and its picture's pixels per logical
+    /// pixel, for the size a capture across them comes out at
+    pub monitors: Vec<(IRect, f32)>,
     /// a selection (or a window clicked) can cross monitors now
     pub spans: bool,
     /// the text being typed: (overlay, the text shape)
@@ -93,7 +103,10 @@ impl State {
             countdown: None,
             hint: None,
             record_problem: None,
-            any_armed: false,
+            rec_area: None,
+            rec_home: 0,
+            area_moving: false,
+            monitors: Vec::new(),
             spans: false,
             text_edit: None,
             pointer_overlay: None,
@@ -103,6 +116,18 @@ impl State {
             rainbow_t: 0.0,
             cfg,
         }
+    }
+
+    /// All the monitors together (global logical).
+    pub fn desktop(&self) -> Rect {
+        self.monitors.iter().fold(Rect::default(), |acc, (m, _)| if acc.is_empty() { m.to_f() } else { acc.united(&m.to_f()) })
+    }
+
+    /// The pixels per logical pixel `area` (global logical) comes out at:
+    /// its monitor's, else (across monitors) the highest of theirs.
+    pub fn scale_for(&self, area: Rect) -> f32 {
+        let touched = self.monitors.iter().filter(|(m, _)| m.to_f().intersects(&area));
+        touched.map(|(_, s)| *s).fold(None, |a: Option<f32>, s| Some(a.map_or(s, |a| a.max(s)))).unwrap_or(1.0)
     }
 
     /// The colour drawn with now.

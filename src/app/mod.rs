@@ -122,7 +122,7 @@ impl App {
     /// Input for `owner`'s surface (the focused one for keys).
     pub fn input(&mut self, owner: Option<Owner>, ev: Input) {
         match owner {
-            Some(Owner::Pin(id)) => return self.pin_input(id, ev),
+            Some(Owner::Pin(id)) | Some(Owner::PinPart(id, _)) => return self.pin_input(id, ev),
             Some(Owner::Menu(TRAY_MENU)) => return self.tray_menu_input(ev),
             Some(Owner::TrayIcon) => return self.tray_icon_input(ev),
             Some(Owner::Menu(id)) => return self.menu_input(id, ev),
@@ -198,6 +198,7 @@ impl App {
                 }
             }
             Owner::Pin(p) => self.close_pin(p),
+            Owner::PinPart(p, n) => self.pin_part_closed(p, n),
             Owner::Menu(TRAY_MENU) => self.close_tray_menu(),
             Owner::Menu(p) => self.close_menu(p),
             Owner::TrayIcon => {}
@@ -343,7 +344,7 @@ impl App {
         let Some(owner) = self.dpy.pointer_owner() else { return };
         let shape = match (owner, &self.session) {
             (Owner::Overlay(o), Some(s)) => s.cursor(o),
-            (Owner::Pin(_), _) => CursorShape::Move,
+            (Owner::Pin(_) | Owner::PinPart(..), _) => CursorShape::Move,
             (Owner::Menu(_), _) => CursorShape::Arrow,
             (Owner::Editor(id), _) => match self.editors.iter().find(|e| e.id == id) {
                 Some(e) => e.ed.cursor(),

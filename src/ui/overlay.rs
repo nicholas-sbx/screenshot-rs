@@ -136,9 +136,6 @@ pub struct Overlay {
     pub code_hover: Option<usize>,
     pub toolbar: Option<Toolbar>,
     pub toolbar_visible: bool,
-    pub rec_rect: Option<Rect>,
-    pub rec_window: Option<usize>,
-    pub rec_drag: Option<(Handle, Point, Rect)>,
     pub panel: Option<RecordPanel>,
     pub picker: Option<ColorPicker>,
     pub picker_visible: bool,
@@ -189,9 +186,6 @@ impl Overlay {
             code_hover: None,
             toolbar: None,
             toolbar_visible: false,
-            rec_rect: None,
-            rec_window: None,
-            rec_drag: None,
             panel: None,
             picker: None,
             picker_visible: false,
@@ -278,9 +272,21 @@ impl Overlay {
         true
     }
 
-    /// Which handle of the recording area is at `at`, or Move inside it.
-    pub fn handle_at(&self, at: Point) -> Option<Handle> {
-        let r = self.rec_rect?;
+    /// The area chosen to record, in this monitor's coordinates (it may
+    /// reach here from another monitor, or be wholly on one).
+    pub fn area(&self, st: &State) -> Option<Rect> {
+        st.rec_area.map(|a| a.translated(-self.output.rect.to_f().top_left()))
+    }
+
+    /// Does this monitor show the recording panel?
+    pub fn panel_shown(&self, st: &State) -> bool {
+        st.rec_area.is_some() && st.rec_home == self.index && !st.area_moving && st.countdown.is_none() && self.panel.is_some()
+    }
+
+    /// Which handle of the recording area is at `at`, or Move inside it
+    /// (whichever monitor the handle or the part is on).
+    pub fn handle_at(&self, st: &State, at: Point) -> Option<Handle> {
+        let r = self.area(st)?;
         let xs = [(Some(false), r.left()), (None, r.center().x), (Some(true), r.right())];
         let ys = [(Some(false), r.top()), (None, r.center().y), (Some(true), r.bottom())];
         let grab = HANDLE / 2.0 + 4.0;
@@ -340,8 +346,14 @@ impl Overlay {
 
     /// As `render`, giving up the overlay: the whole picture with nothing
     /// drawn on it is handed over as it is, without a copy.
-    pub fn into_render(mut self, rect: Option<Rect>) -> Result<Image, String> {
+    pub fn into_render(self, rect: Option<Rect>) -> Result<Image, String> {
         let phys = self.render_rect(rect);
+        self.into_render_px(phys)
+    }
+
+    /// As `into_render`, of the picture's pixels `phys`.
+    pub fn into_render_px(mut self, phys: IRect) -> Result<Image, String> {
+        let phys = phys.intersected(&self.base.rect());
         let whole = phys == self.base.rect();
         if whole && self.undrawn() {
             self.plain = None;
@@ -350,7 +362,9 @@ impl Overlay {
             let base = std::mem::replace(&mut self.base, Arc::new(Image::new(1, 1)?));
             return Ok(Arc::try_unwrap(base).unwrap_or_else(|shared| (*shared).clone()));
         }
-        self.render(rect)
+        let mut out = self.base.crop(phys)?;
+        self.draw_annotations(&mut out, phys);
+        Ok(out)
     }
 
     /// Show the picture with the mouse pointer in it, or without. The one
@@ -391,13 +405,14 @@ impl Overlay {
     }
 
     /// Is the pointer over (within `margin` of) a floating panel?
-    pub fn over_floating(&self, margin: f32, codes_shown: bool) -> bool {
+    pub fn over_floating(&self, st: &State, margin: f32) -> bool {
         let Some(pt) = self.cursor_pos else { return false };
+        let codes_shown = self.chips_shown(st);
         let near = |r: Rect| r.adjusted(-margin, -margin, margin, margin).contains(pt);
         if self.toolbar_visible && self.toolbar.as_ref().is_some_and(|t| near(t.rect())) {
             return true;
         }
-        if self.panel.as_ref().is_some_and(|p| near(p.rect())) && self.rec_rect.is_some() {
+        if self.panel_shown(st) && self.panel.as_ref().is_some_and(|p| near(p.rect())) {
             return true;
         }
         if self.picker_open() && self.picker.as_ref().is_some_and(|p| near(p.rect())) {
@@ -457,10 +472,10 @@ impl Overlay {
         let mut elements = Vec::new();
         let region = matches!(st.tool, Tool::Region | Tool::Record);
         let selection = self.sel_rect.or(self.span_rect);
-        let hover = self.hover_window.or(if st.spans { self.span_hover } else { None });
-        let bg_dim = (region && st.dim.a > 0).then_some(st.dim);
+        let hover = self.hovered(st);
+        let bg_dim = self.dim(st);
         let hole = if bg_dim.is_some() {
-            let focus = selection.or(self.rec_rect).or(hover.map(|h| h.0));
+            let focus = selection.or(hover.map(|h| self.window_outline(st, h.0, h.1)));
             focus.map(|f| self.hole_rect(f)).filter(|h| !h.is_empty())
         } else {
             None
@@ -502,15 +517,19 @@ impl Overlay {
         {
             elements.push(Element { id: Id::TextEdit, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX - 1) });
         }
-        let picking = region && self.rec_rect.is_none();
+        let picking = self.picking(st);
         if region {
             if selection.is_none()
                 && let Some((r, w)) = hover
             {
-                let label = self.window_label(st, r, w);
-                let (bx, opacity) = self.window_label_box(r, &label);
-                let bounds = self.dev(r, 2).united(&self.dev(bx, 2));
-                elements.push(Element { id: Id::Window, bounds, key: hash(&(rect_key(r), &label, rect_key(bx), (opacity * 10.0) as i32)) });
+                let (outline, label) = self.window_marks(st, r, w);
+                let mut bounds = self.dev(outline, 2);
+                let mut key = (rect_key(outline), None);
+                if let Some((text, bx, opacity)) = &label {
+                    bounds = bounds.united(&self.dev(*bx, 2));
+                    key.1 = Some((text.clone(), rect_key(*bx), (opacity * 10.0) as i32));
+                }
+                elements.push(Element { id: Id::Window, bounds, key: hash(&key) });
             }
             if self.sel_rect.is_none() && st.codes_visible && st.tool == Tool::Region && !self.codes.is_empty() {
                 let mut b = IRect::default();
@@ -527,20 +546,22 @@ impl Overlay {
                 b = b.united(&self.dev(self.selection_pill_rect(sel, label), 2));
             }
             elements.push(Element { id: Id::Selection, bounds: b, key: hash(&(rect_key(sel), &label, st.theme_key)) });
-        } else if let Some(r) = self.rec_rect {
-            elements.push(Element { id: Id::Selection, bounds: self.dev(r.adjusted(-2.0, -2.0, 2.0, 2.0), 2), key: hash(&(rect_key(r), st.theme_key)) });
+        } else if let Some(r) = self.area(st) {
+            elements.push(Element { id: Id::Area, bounds: self.dev(r.adjusted(-2.0, -2.0, 2.0, 2.0), 2), key: hash(&(rect_key(r), st.theme_key)) });
             if let Some(n) = st.countdown {
                 let size = 56f32.max(140f32.min(r.w * 0.6).min(r.h * 0.6));
                 let bx = Rect::new(r.center().x - size / 2.0, r.center().y - size / 2.0, size, size);
                 elements.push(Element { id: Id::Countdown, bounds: self.dev(bx.adjusted(-9.0, -9.0, 9.0, 9.0), 2), key: hash(&n) });
-            } else if self.rec_drag.is_none() {
+            } else if !st.area_moving {
                 elements.push(Element {
                     id: Id::Handles,
                     bounds: self.dev(r.adjusted(-HANDLE, -HANDLE, HANDLE, HANDLE), 2),
                     key: hash(&(rect_key(r), st.theme_key)),
                 });
             }
-        } else if picking
+        }
+        if selection.is_none()
+            && picking
             && st.cfg.show_crosshair
             && let Some(pos) = self.cursor_pos
         {
@@ -575,9 +596,7 @@ impl Overlay {
             let key = hash(&(rect_key(t.rect()), &t.ptr, toolbar_key(t), st.theme_key));
             elements.push(Element { id: Id::Toolbar, bounds: self.dev(t.rect(), 2), key });
         }
-        if self.rec_rect.is_some()
-            && self.rec_drag.is_none()
-            && st.countdown.is_none()
+        if self.panel_shown(st)
             && let Some(panel) = &self.panel
         {
             let key = hash(&(rect_key(panel.rect()), &panel.ptr, panel_key(panel), st.theme_key));
@@ -617,9 +636,65 @@ impl Overlay {
         st.tool == Tool::Region && self.sel_rect.is_none() && st.codes_visible
     }
 
+    /// The shading over what isn't chosen: while choosing a region (not
+    /// one to record: there an area can be chosen while another is, on any
+    /// monitor, so nothing is left out to shade).
+    fn dim(&self, st: &State) -> Option<Color> {
+        (st.tool == Tool::Region && st.dim.a > 0).then_some(st.dim)
+    }
+
+    /// Choosing an area or a window here: the crosshair, the magnifier and
+    /// the window under the pointer show. Not while the area to record
+    /// counts down or is moved, nor over it (its handles move and resize it).
+    pub fn picking(&self, st: &State) -> bool {
+        matches!(st.tool, Tool::Region | Tool::Record)
+            && st.countdown.is_none()
+            && !st.area_moving
+            && !self.cursor_pos.is_some_and(|p| self.handle_at(st, p).is_some())
+    }
+
+    /// The window under the pointer here, else (across monitors) the one
+    /// under it on another monitor, where it reaches here.
+    fn hovered(&self, st: &State) -> Option<(Rect, usize)> {
+        self.hover_window.or(if st.spans { self.span_hover } else { None })
+    }
+
+    /// How hovered window `w` (`r`: its part here) is marked: its box (when
+    /// it's taken across monitors, all of it, so only its edges on this
+    /// monitor show: none where it goes over to the next), and on the
+    /// monitor the pointer is on, its label: (text, box, opacity).
+    fn window_marks(&self, st: &State, r: Rect, w: usize) -> (Rect, Option<(String, Rect, f32)>) {
+        let outline = self.window_outline(st, r, w);
+        let label = self.hover_window.filter(|h| h.1 == w).map(|_| {
+            let text = self.window_label(st, r, w);
+            let (bx, opacity) = self.window_label_box(r, &text);
+            (text, bx, opacity)
+        });
+        (outline, label)
+    }
+
+    /// Hovered window `w`'s box (`r`: its part here): when it's taken
+    /// across monitors, all of it.
+    fn window_outline(&self, st: &State, r: Rect, w: usize) -> Rect {
+        let g = self.output.rect.to_f().top_left();
+        if st.spans { st.windows.get(w).map_or(r, |win| win.rect.to_f().translated(-g)) } else { r }
+    }
+
+    /// The size, in pixels, a capture of `r` (logical, here) comes out at:
+    /// at this monitor's scale, or across monitors at the highest of theirs.
+    fn capture_size(&self, st: &State, r: Rect) -> (i32, i32) {
+        let g = self.output.rect.to_f().top_left();
+        if self.rect().contains_rect(&r) || !st.spans {
+            return (py_round(r.w * self.dpr), py_round(r.h * self.dpr));
+        }
+        let whole = r.translated(g).intersected(&st.desktop());
+        let s = st.scale_for(whole);
+        (py_round(whole.w * s), py_round(whole.h * s))
+    }
+
     /// Where the magnifier is drawn, if it is.
     pub fn loupe_at(&self, st: &State) -> Option<Point> {
-        let picking = matches!(st.tool, Tool::Region | Tool::Record) && self.rec_rect.is_none();
+        let picking = self.picking(st);
         if self.span_rect.is_some()
             && let Some(sp) = self.span_pointer
             && st.cfg.show_loupe
@@ -628,7 +703,7 @@ impl Overlay {
         }
         let pos = self.cursor_pos?;
         // (hidden right over a panel only: near one, it still shows)
-        let allowed = !self.over_floating(0.0, self.chips_shown(st));
+        let allowed = !self.over_floating(st, 0.0);
         ((picking && st.cfg.show_loupe || st.eyedropper) && allowed && self.rect().contains(pos) && pos.x < self.width() && pos.y < self.height())
             .then_some(pos)
     }
@@ -669,14 +744,17 @@ impl Overlay {
     }
 
     fn window_label(&self, st: &State, r: Rect, w: usize) -> String {
-        let size = format!("{} × {}", py_round(r.w * self.dpr), py_round(r.h * self.dpr));
+        // (one taken across monitors: all of it)
+        let (pw, ph) = self.capture_size(st, self.window_outline(st, r, w));
+        let size = format!("{pw} × {ph}");
         let title = st.windows.get(w).map(|w| util::displayable(&w.title)).unwrap_or_default();
         let title = util::elide(&title, 40);
         if title.is_empty() { size } else { format!("{title}  ·  {size}") }
     }
 
     fn selection_label(&self, st: &State, r: Rect) -> String {
-        let label = format!("{} × {}", py_round(r.w * self.dpr), py_round(r.h * self.dpr));
+        let (pw, ph) = self.capture_size(st, r);
+        let label = format!("{pw} × {ph}");
         if st.tool == Tool::Record {
             format!("Record  ·  {label}")
         } else if st.pin_mode {
@@ -753,9 +831,9 @@ impl Overlay {
         let region_logical = Rect::new(region_rect.x / self.dpr, region_rect.y / self.dpr, region_rect.w / self.dpr, region_rect.h / self.dpr);
         let rtool = matches!(st.tool, Tool::Region | Tool::Record);
         let selection = self.sel_rect.or(self.span_rect);
-        let hover = self.hover_window.or(if st.spans { self.span_hover } else { None });
-        let dim = (rtool && st.dim.a > 0).then_some(st.dim);
-        let hole = dim.and_then(|_| selection.or(self.rec_rect).or(hover.map(|h| h.0)).map(|f| self.hole_rect(f)));
+        let hover = self.hovered(st);
+        let dim = self.dim(st);
+        let hole = dim.and_then(|_| selection.or(hover.map(|h| self.window_outline(st, h.0, h.1))).map(|f| self.hole_rect(f)));
         let drawn: Vec<&Shape> = self
             .stacked()
             .into_iter()
@@ -788,17 +866,21 @@ impl Overlay {
                 Selection::paint_trash(&mut p, t, 1.0);
             }
         }
-        let picking = rtool && self.rec_rect.is_none();
+        let picking = self.picking(st);
         if rtool {
             if selection.is_none()
                 && let Some((r, w)) = hover
             {
-                let label = self.window_label(st, r, w);
-                let (bx, opacity) = self.window_label_box(r, &label);
-                if r.united(&bx).intersects(&region_logical.adjusted(-2.0, -2.0, 2.0, 2.0)) {
+                let (outline, label) = self.window_marks(st, r, w);
+                let near = region_logical.adjusted(-2.0, -2.0, 2.0, 2.0);
+                if outline.intersects(&near) {
                     let edge = c.text.with_alpha(110);
-                    p.stroke_rect(r.adjusted(0.5, 0.5, -0.5, -0.5), Pen::new(edge, 1.0));
-                    pill(&mut p, &label, bx.top_left(), PillStyle { opacity, ..PillStyle::small() });
+                    p.stroke_rect(outline.adjusted(0.5, 0.5, -0.5, -0.5), Pen::new(edge, 1.0));
+                }
+                if let Some((text, bx, opacity)) = label
+                    && bx.intersects(&near)
+                {
+                    pill(&mut p, &text, bx.top_left(), PillStyle { opacity, ..PillStyle::small() });
                 }
             }
             if self.sel_rect.is_none() && st.codes_visible && st.tool == Tool::Region {
@@ -818,11 +900,11 @@ impl Overlay {
                     PillStyle { anchor_bottom: true, keep_inside: true, accent: true, ..Default::default() },
                 );
             }
-        } else if let Some(r) = self.rec_rect {
+        } else if let Some(r) = self.area(st) {
             p.stroke_rect(r.adjusted(-1.0, -1.0, 1.0, 1.0), Pen::new(c.accent, 2.0));
             if let Some(n) = st.countdown {
                 paint_countdown(&mut p, r, n, st.cfg.record_countdown);
-            } else if self.rec_drag.is_none() {
+            } else if !st.area_moving {
                 for x in [r.left(), r.center().x, r.right()] {
                     for y in [r.top(), r.center().y, r.bottom()] {
                         if (x, y) != (r.center().x, r.center().y) {
@@ -836,7 +918,9 @@ impl Overlay {
                     }
                 }
             }
-        } else if picking
+        }
+        if selection.is_none()
+            && picking
             && st.cfg.show_crosshair
             && let Some(pos) = self.cursor_pos
         {
@@ -875,9 +959,7 @@ impl Overlay {
         {
             t.paint(&mut p);
         }
-        if self.rec_rect.is_some()
-            && self.rec_drag.is_none()
-            && st.countdown.is_none()
+        if self.panel_shown(st)
             && let Some(panel) = &self.panel
             && self.dev(panel.rect(), 2).intersects(&region)
         {
@@ -1273,7 +1355,7 @@ pub const EYEDROPPER_HINT: &str = "Click a pixel to make it your colour  ·  Esc
 pub const DRAW_HINT: &str = "Draw on the screen  ·  {tool.region} then drag to capture  ·  Enter for whole screen";
 pub const RECORD_PICK: &str = "Drag the area to record  ·  Click for whole screen  ·  Esc to cancel";
 pub const RECORD_WINDOWS: &str = "Drag the area to record  ·  Click a window  ·  Enter for whole screen  ·  Esc to cancel";
-pub const RECORD_ARMED: &str = "Drag the edges to adjust  ·  Enter to start  ·  Esc to go back";
+pub const RECORD_ARMED: &str = "Drag the edges to adjust  ·  Drag or click elsewhere for another  ·  Enter to start  ·  Esc to go back";
 
 /// A hint with its {action} keys filled in; a part whose key is unset goes.
 pub fn with_keys(text: &str, keymap: &crate::keys::Keymap) -> String {
@@ -1304,7 +1386,7 @@ fn hint_text(st: &State, o: &Overlay) -> String {
         if let Some(p) = &st.record_problem {
             return p.clone();
         }
-        return if st.any_armed {
+        return if st.rec_area.is_some() {
             RECORD_ARMED.into()
         } else if !o.windows.is_empty() {
             RECORD_WINDOWS.into()
@@ -1454,6 +1536,7 @@ enum Id {
     Window,
     Codes,
     Selection,
+    Area,
     Handles,
     Countdown,
     CrossV,

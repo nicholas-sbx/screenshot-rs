@@ -345,6 +345,25 @@ impl X11 {
 
     // -- monitors ------------------------------------------------------------------------
 
+    /// How many times a second `monitor` shows a new picture: the refresh
+    /// rate of the mode of the CRTC under its middle, if RandR says.
+    pub fn refresh_rate(&self, monitor: &Monitor) -> Option<f64> {
+        let res = self.conn.randr_get_screen_resources_current(self.root).ok()?.reply().ok()?;
+        let c = monitor.rect.center();
+        let (x, y) = (self.device(c.x), self.device(c.y));
+        for &crtc in &res.crtcs {
+            let Some(info) = self.conn.randr_get_crtc_info(crtc, res.config_timestamp).ok().and_then(|c| c.reply().ok()) else { continue };
+            let inside = (info.x as i32..info.x as i32 + info.width as i32).contains(&x) && (info.y as i32..info.y as i32 + info.height as i32).contains(&y);
+            if info.mode == 0 || !inside {
+                continue;
+            }
+            let mode = res.modes.iter().find(|m| m.id == info.mode)?;
+            let dots = mode.htotal as f64 * mode.vtotal as f64;
+            return (dots > 0.0 && mode.dot_clock > 0).then(|| mode.dot_clock as f64 / dots);
+        }
+        None
+    }
+
     pub fn monitors(&self) -> Vec<Monitor> {
         let s = self.scale;
         let found = self.conn.randr_get_monitors(self.root, true).ok().and_then(|c| c.reply().ok());
@@ -362,7 +381,7 @@ impl X11 {
                     .map(|n| String::from_utf8_lossy(&n.name).into_owned())
                     .unwrap_or_else(|| format!("monitor-{}", out.len()));
                 let rect = IRect::new(m.x as i32 / s, m.y as i32 / s, m.width as i32 / s, m.height as i32 / s);
-                out.push(Monitor { output: Output::X11(m.name), name, rect, scale: s });
+                out.push(Monitor { output: Output::X11(m.name), name, rect, scale: s as f32 });
             }
         }
         // (a monitor holding others whole is an output's own, left over
@@ -373,7 +392,7 @@ impl X11 {
             // (no RandR: the whole screen)
             let r = &self.conn.setup().roots[self.screen];
             let rect = IRect::new(0, 0, r.width_in_pixels as i32 / s, r.height_in_pixels as i32 / s);
-            out.push(Monitor { output: Output::X11(0), name: "screen".into(), rect, scale: s });
+            out.push(Monitor { output: Output::X11(0), name: "screen".into(), rect, scale: s as f32 });
         }
         out
     }
@@ -638,17 +657,13 @@ impl X11 {
         let _ = self.conn.flush();
     }
 
-    pub fn place_layer(&mut self, owner: Owner, at: (i32, i32), size: (u32, u32)) {
+    /// Move `owner`'s window to `at` (logical) from `monitor`'s top left,
+    /// whichever monitor that puts it on.
+    pub fn place_layer(&mut self, owner: Owner, monitor: &Monitor, at: (i32, i32), size: (u32, u32)) {
         let Some(s) = self.surfaces.iter_mut().find(|s| s.owner == owner) else { return };
         s.logical = size;
         let win = s.win;
-        // (from the monitor it's on: the one under its centre now)
-        let origin = self.conn.translate_coordinates(win, self.root, 0, 0).ok().and_then(|c| c.reply().ok());
-        let Some(o) = origin else { return };
-        let s_ = self.scale;
-        let centre = crate::geom::IPoint::new(o.dst_x as i32 / s_, o.dst_y as i32 / s_);
-        let monitors = self.monitors();
-        let m = monitors.iter().find(|m| m.rect.contains(centre)).or(monitors.first()).map(|m| m.rect).unwrap_or_default();
+        let m = monitor.rect;
         let aux = ConfigureWindowAux::new()
             .x(self.device(m.x + at.0))
             .y(self.device(m.y + at.1))
