@@ -165,7 +165,7 @@ fn paint_picture(src: &Image, device: (u32, u32), scale: f32, target: &mut Canva
             out[..cols * 4].copy_from_slice(&line[region.x as usize * 4..(region.x as usize + cols) * 4]);
         }
         let last = &line[(sw as usize - 1) * 4..sw as usize * 4];
-        for px in out[cols * 4..].chunks_exact_mut(4) {
+        for px in out[cols * 4..].as_chunks_mut::<4>().0 {
             px.copy_from_slice(last);
         }
     }
