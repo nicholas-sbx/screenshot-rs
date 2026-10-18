@@ -4,6 +4,7 @@
 
 mod capture;
 mod caret;
+mod countdown;
 mod editor;
 mod finish;
 mod ocr;
@@ -103,6 +104,8 @@ pub struct App {
     reading: Vec<ocr::Reading>,
     /// the Recent captures window
     recent: Option<recent::RecentWin>,
+    /// a delayed capture counting down
+    countdown: Option<countdown::Countdown>,
     /// "Annotate clipboard image": the clipboard's picture being read (and
     /// whether by wl-paste, the second try)
     clipboard_image: Option<(crate::clipboard::Pasted, bool)>,
@@ -140,7 +143,7 @@ impl App {
             Some(Owner::Settings) => return self.settings_input(ev),
             Some(Owner::Recent) => return self.recent_input(ev),
             Some(Owner::RecBar) => return self.recbar_input(ev),
-            Some(Owner::RecMark(_)) => return,
+            Some(Owner::RecMark(_) | Owner::Countdown(_)) => return,
             _ => {}
         }
         let Some(s) = &mut self.session else { return };
@@ -218,7 +221,7 @@ impl App {
             Owner::Recent => self.close_recent(),
             // (the bar's window closed by the desktop: done recording)
             Owner::RecBar => self.stop_recording(),
-            Owner::RecMark(_) => {}
+            Owner::RecMark(_) | Owner::Countdown(_) => {}
         }
     }
 
@@ -267,6 +270,7 @@ impl App {
             self.editors_deadline(),
             settings,
             self.recent_deadline(),
+            self.countdown_deadline(),
             self.recording_deadline(),
             self.dpy.next_deadline(),
             self.blink.deadline(),
@@ -303,6 +307,7 @@ impl App {
         self.poll_recording();
         self.poll_reading();
         self.poll_recent();
+        self.poll_countdown();
         if let Some(rx) = &self.paste_rx
             && let Ok(text) = rx.try_recv()
         {
@@ -351,6 +356,7 @@ impl App {
         self.redraw_editors();
         self.redraw_settings();
         self.redraw_recent();
+        self.redraw_countdown();
         self.redraw_recording();
         self.redraw_tray_icon();
         let Some(s) = &mut self.session else { return };
@@ -522,6 +528,7 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         blink: caret::Blink::default(),
         reading: Vec::new(),
         recent: None,
+        countdown: None,
         clipboard_image: None,
     };
     match queue {
@@ -588,15 +595,13 @@ pub fn run_once(args: &Args) -> i32 {
         crate::warn!("unknown capture mode");
         return 2;
     };
-    let mut asked = started;
+    let job = Job { mode, pin: args.pin, record: args.record, ocr: args.ocr, scan: !args.no_scan, asked: started };
     if args.delay > 0.0 {
-        if let Some(s) = crate::signals::wait(Duration::from_secs_f64(args.delay.min(3600.0))) {
-            return crate::signals::exit_code(s);
-        }
-        asked = Instant::now();
+        // (counted down on screen; Ctrl+C still stops it)
+        app.count_down(job, Duration::from_secs_f64(args.delay.min(3600.0)), false);
+    } else {
+        app.start_capture(job);
     }
-    let job = Job { mode, pin: args.pin, record: args.record, ocr: args.ocr, scan: !args.no_scan, asked };
-    app.start_capture(job);
     app.after_dispatch(); // (it may have ended already)
     while app.exit.is_none() {
         let timeout = app.timeout();

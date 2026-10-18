@@ -263,6 +263,48 @@ $BIN -m > /dev/null && expect_size "current monitor" "$(newest)" "1600 1000" || 
 $BIN -r 64x48+0+0 -o "$work/out.png" > /dev/null && expect_size "--output" "$work/out.png" "64 48" || fail "--output failed"
 $BIN -r 64x48+0+0 -o - --no-copy > "$work/stdout.png" && expect_size "PNG to stdout" "$work/stdout.png" "64 48" || fail "-o - failed"
 
+# A delayed capture counts down on screen (the dial at the bottom middle),
+# and the dial is gone before the picture: none of its ring is in it.
+$BIN -d 2 -r 300x200+650+780 -o "$work/delayed.png" --no-copy > /dev/null 2>&1 &
+pid=$!
+sleep 1
+grim -g "650,780 300x200" "$work/dial.png" 2>/dev/null || true
+finish $pid 6
+[ $code = 0 ] && pass "delayed capture exited 0" || fail "delayed capture exited $code"
+ring() { # how many pixels of the dial's ring (the accent colour) in a PNG
+    python3 - "$1" <<'PY'
+import struct, sys, zlib
+d = open(sys.argv[1], "rb").read()
+w, h = struct.unpack(">II", d[16:24])
+bpp = 4 if d[25] == 6 else 3
+i, idat = 8, b""
+while i < len(d):
+    n = struct.unpack(">I", d[i:i + 4])[0]
+    if d[i + 4:i + 8] == b"IDAT":
+        idat += d[i + 8:i + 8 + n]
+    i += 12 + n
+raw, stride, prev, count = zlib.decompress(idat), w * bpp + 1, bytearray(w * bpp), 0
+for y in range(h):
+    f, line = raw[y * stride], bytearray(raw[y * stride + 1:(y + 1) * stride])
+    for x in range(len(line)):
+        a = line[x - bpp] if x >= bpp else 0
+        b = prev[x]
+        c = prev[x - bpp] if x >= bpp else 0
+        if f == 1: line[x] = (line[x] + a) & 255
+        elif f == 2: line[x] = (line[x] + b) & 255
+        elif f == 3: line[x] = (line[x] + (a + b) // 2) & 255
+        elif f == 4:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+    count += sum(1 for x in range(w) if line[x * bpp] > 200 and 60 < line[x * bpp + 1] < 140 and line[x * bpp + 2] < 110)
+    prev = line
+print(count)
+PY
+}
+[ "$(ring "$work/dial.png" 2>/dev/null || echo 0)" -gt 50 ] && pass "the countdown shows on screen" || fail "no countdown on screen ($(ring "$work/dial.png" 2>/dev/null || echo none) ring pixels)"
+[ "$(ring "$work/delayed.png" 2>/dev/null || echo 1)" = 0 ] && pass "the countdown isn't in the capture" || fail "the countdown is in the capture"
+
 # Beautify after capture: on the last style's background (64 px padding).
 python3 - "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<'PY'
 import json, sys

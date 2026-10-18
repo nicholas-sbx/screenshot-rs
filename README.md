@@ -136,6 +136,10 @@ The keys can be changed in Settings → Shortcuts → Keys in Flatshot RS (so ca
 - **QR codes** are looked for while they're shown (<kbd>Q</kbd>); hidden at the start, the capture isn't looked through until you show them.
 - **Tray icon styles** (Settings → General → Tray icon): the app's colours, your theme's, a plain white or black outline for panels with symbolic icons, or Auto (white or black, following the desktop's light or dark scheme). The tray menu has every capture with its key, **Restart Flatshot RS** (after an upgrade) and **Quit Flatshot RS**.
 
+### Delayed captures
+
+**Capture region in 3 seconds** and **Capture active window in 3 seconds** in the tray menu, and `flatshot-rs -d SECONDS`, count down on screen: a small dial at the bottom of each monitor shows the seconds left, with a ring running down. It never takes the keyboard or the pointer (clicks go through it to what's under it), so a menu you open for the capture stays open, and it's gone a moment before the picture is taken, so it's never in it.
+
 ### Recent captures
 
 **Recent captures…** in the tray menu (or `flatshot-rs --recent`) opens a window of the last 100 captures, recordings and pictures saved from the editor, newest first. Each card shows the capture and what's known about it: what was captured (region, window, monitor, all screens, recording and its length), the window it came from, its size in pixels and on disk, when, and whether it was copied, had QR codes in it, drawings on it, or was edited since. Point at one (or choose it with the arrow keys) to open it (or double-click, or <kbd>Enter</kbd>), annotate it, copy it (<kbd>Ctrl</kbd>+<kbd>C</kbd>: the picture, or a recording's file), show it in its folder, or take it off the list (<kbd>Delete</kbd>). A file that has since gone is marked so.
@@ -165,7 +169,7 @@ The reading is done by [Tesseract](https://github.com/tesseract-ocr/tesseract) (
 flatshot-rs                      region capture (handed to the tray app if it runs)
 flatshot-rs -f | -m | -w | -l    all screens, current monitor, active window, last region
 flatshot-rs -r 800x600+100+50    an exact area (logical pixels)
-flatshot-rs -d 3                 after 3 seconds
+flatshot-rs -d 3                 after 3 seconds, counted down on screen
 flatshot-rs -o file.png          save there ("-" writes PNG to stdout)
 flatshot-rs --no-copy --no-save  just print the path / don't keep a file
 flatshot-rs --record             record an area (stops the recording in progress)

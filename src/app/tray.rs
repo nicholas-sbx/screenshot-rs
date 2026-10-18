@@ -497,6 +497,10 @@ impl App {
 
     /// Capture after `delay` (now, without one).
     pub(super) fn capture_later(&mut self, mut job: Job, delay: Duration) {
+        // (a real wait is counted down on screen; the menu's moment isn't)
+        if delay >= Duration::from_secs(1) {
+            return self.count_down(job, delay, true);
+        }
         if delay.is_zero() {
             self.cfg = config::load(); // (settings changed since)
             crate::render::theme::use_theme(&self.cfg.theme);
