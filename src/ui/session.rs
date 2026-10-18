@@ -22,7 +22,7 @@ use crate::timing::{self, Clock};
 use crate::ui::overlay::{Code, Grab, Handle, LOUPE_ZOOM, Output, Overlay, Window};
 use crate::ui::panels::{CodeChip, ColorPicker, PickerEvent, RecordPanel, RecordView, place_chips};
 use crate::ui::selection::Selection;
-use crate::ui::shapes::{self, Mods, Shape, Tool, copy_for_editing};
+use crate::ui::shapes::{self, Mods, Shape, TextStyle, Tool, copy_for_editing};
 use crate::ui::snapping::{self, EdgeMaps, py_round};
 use crate::ui::state::{CUSTOM, Desktop, OWN_SWATCH, State, color_for_key, swatch_index};
 use crate::ui::textedit::KeyResult;
@@ -228,6 +228,9 @@ pub struct Session {
     scan_pending: bool,
     /// whether text can be copied here has been found out (st.ocr_problem)
     ocr_checked: bool,
+    /// a callout being dragged out: the overlay, and what it points at (its
+    /// text, being typed, follows the pointer until it's let go)
+    callout: Option<(usize, Point)>,
     /// pictures still being looked through for codes
     scans_left: usize,
     /// the overlay whose select tool holds a drawing being dragged (which
@@ -338,6 +341,7 @@ impl Session {
             cancelled: Arc::new(AtomicBool::new(false)),
             scan_pending: false,
             ocr_checked: false,
+            callout: None,
             scans_left: 0,
             drag_owner: None,
             pointer: vec![None; n],
@@ -350,7 +354,7 @@ impl Session {
         }
         s.update_spans();
         for o in 0..n {
-            let tb = Toolbar::new(&toolbar_view(&s.st, CodeScan::Found(0), false, false));
+            let tb = Toolbar::fitted(&toolbar_view(&s.st, CodeScan::Found(0), false, false), s.overlays[o].width());
             s.overlays[o].toolbar = Some(tb);
             s.place_floating(o);
         }
@@ -1121,9 +1125,7 @@ impl Session {
             }
             // (in the one stack all the monitors share)
             drawn.sort_by_key(|s| s.order);
-            for shape in &drawn {
-                shape.paint(&mut p, &under, scale);
-            }
+            shapes::paint_all(&mut p, &drawn, &under, scale);
         }
         out.force_opaque();
         Ok(out)
@@ -1185,6 +1187,10 @@ impl Session {
         }
         if tool != Tool::Select {
             self.select_on(None);
+        }
+        // (the text tool chosen again: its next style)
+        if tool == Tool::Text && self.st.tool == Tool::Text {
+            self.st.text_style = self.st.text_style.next();
         }
         self.st.tool = tool;
         if tool.uses_color() {
@@ -2670,7 +2676,17 @@ impl Session {
                     }
                     (k, s)
                 }
-                None => (o, Shape::text(pos, self.st.color(), self.st.size)),
+                None => {
+                    // (a callout: pressed on what it points at, its text dragged to its place)
+                    let (at, style) = match self.st.text_style {
+                        TextStyle::Callout(_) => {
+                            self.callout = Some((o, pos));
+                            (shapes::callout_text_at(pos, pos), TextStyle::Callout(pos))
+                        }
+                        style => (pos, style),
+                    };
+                    (o, Shape::text(at, self.st.color(), self.st.size, style))
+                }
             };
             self.begin_text(k, shape);
         } else if tool == Tool::Counter {
@@ -2700,6 +2716,14 @@ impl Session {
 
     fn canvas_motion(&mut self, o: usize, pos: Point, mods: i32) {
         self.overlays[o].cursor_pos = Some(pos);
+        if let Some((_, tip)) = self.callout.filter(|c| c.0 == o) {
+            if let Some((_, shape)) = &mut self.st.text_edit
+                && let Some(t) = shape.as_text_mut()
+            {
+                t.pos = shapes::callout_text_at(tip, pos);
+            }
+            return;
+        }
         // (a drag keeps the pointer on the overlay it started on, wherever
         // it goes: the toolbar follows it onto the monitor it's over)
         let under = self.overlay_under(o, pos).unwrap_or(o);
@@ -2749,7 +2773,7 @@ impl Session {
         if button != Button::Left {
             return;
         }
-        if self.overlays[o].text_drag.take().is_some() {
+        if self.overlays[o].text_drag.take().is_some() || self.callout.take().is_some() {
             return;
         }
         if let Some(k) = self.drag_owner.take().filter(|&k| k < self.overlays.len() && self.overlays[k].selection.dragging()) {
@@ -2833,6 +2857,7 @@ impl Drop for Session {
 fn toolbar_view(st: &State, codes: CodeScan, can_undo: bool, can_redo: bool) -> View<'_> {
     View {
         tool: st.tool,
+        text_style: st.text_style,
         can_record: st.can_record,
         palette: &st.palette,
         color_index: st.color_index,

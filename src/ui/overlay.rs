@@ -337,9 +337,7 @@ impl Overlay {
         }
         {
             let mut p = Painter::for_region(out.pixmap_mut(), self.dpr, (phys.x, phys.y));
-            for shape in self.stacked() {
-                shape.paint(&mut p, &self.base, self.dpr);
-            }
+            crate::ui::shapes::paint_all(&mut p, self.stacked(), &self.base, self.dpr);
         }
         out.force_opaque();
     }
@@ -847,9 +845,7 @@ impl Overlay {
         copy_background_parallel(target, region_local, &self.base, region, shade_now, hole);
         if !drawn.is_empty() {
             let mut p = Painter::for_region(target.pixmap_mut(), self.dpr, origin);
-            for s in &drawn {
-                s.paint(&mut p, &self.base, self.dpr);
-            }
+            crate::ui::shapes::paint_all(&mut p, drawn.iter().copied(), &self.base, self.dpr);
             drop(p);
             if let Some(d) = dim {
                 shade(target, region_local, region, d, hole);
@@ -1346,6 +1342,8 @@ pub const HINT_REGION: &str = "Drag to capture  ·  Click for whole screen  ·  
 pub const HINT_CODES: &str = "Drag to capture  ·  {codes} hides detected codes  ·  Esc to cancel";
 pub const HINT_WINDOWS: &str = "Drag to capture  ·  Click a window to capture it  ·  Esc to cancel";
 pub const HINT_TEXT: &str = "Click to place text, or on text to change it  ·  Enter for a new line  ·  Esc or Ctrl+Enter to finish";
+pub const HINT_CALLOUT: &str = "Drag from what the callout points at to where its text goes  ·  Esc or Ctrl+Enter to finish";
+pub const HINT_SPOTLIGHT: &str = "Drag over what to show: everything else is shaded  ·  Several light up together";
 pub const HINT_SHAPE: &str = "Shift: square  ·  Ctrl: from the middle  ·  Alt: move it";
 pub const HINT_SELECT: &str = "Click a drawing to select it  ·  Drag to move  ·  Handles resize  ·  Delete removes it";
 pub const HINT_SELECTED: &str = "Drag to move (Shift: straight)  ·  Handles: Shift keeps its shape, Ctrl from the middle  ·  Arrows nudge  ·  Delete";
@@ -1418,7 +1416,9 @@ fn hint_text(st: &State, o: &Overlay) -> String {
             Tool::Region if !o.codes.is_empty() && st.codes_visible => HINT_CODES,
             Tool::Region if !o.windows.is_empty() => HINT_WINDOWS,
             Tool::Region => HINT_REGION,
+            Tool::Text if matches!(st.text_style, crate::ui::shapes::TextStyle::Callout(_)) => HINT_CALLOUT,
             Tool::Text => HINT_TEXT,
+            Tool::Spotlight => HINT_SPOTLIGHT,
             Tool::Select if o.selection.current(&o.annotations).is_some() => HINT_SELECTED,
             Tool::Select => HINT_SELECT,
             _ => DRAW_HINT,

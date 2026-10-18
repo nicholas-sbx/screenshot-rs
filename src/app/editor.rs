@@ -90,7 +90,9 @@ impl App {
         let (mon, dpr) = monitors.first().map(|m| ((m.rect.w as f32, m.rect.h as f32), m.scale)).unwrap_or(((1920.0, 1080.0), 1.0));
         let ed = Editor::new(image, dpr, target, crate::config::load());
         let min = ed.min_size();
-        let size = initial_size((ed.image.width() as f32 / dpr, ed.image.height() as f32 / dpr), mon, min.0 as f32);
+        // (wide enough for the bar in one row, where the monitor is)
+        let bar = ed.bar_width().min(mon.0 * 0.85).max(min.0 as f32);
+        let size = initial_size((ed.image.width() as f32 / dpr, ed.image.height() as f32 / dpr), mon, bar);
         self.next_editor += 1;
         let id = self.next_editor;
         let title = ed.title();

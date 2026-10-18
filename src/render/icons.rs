@@ -26,6 +26,10 @@ pub const NAMES: &[&str] = &[
     "text",
     "pixelate",
     "blur",
+    "spotlight",
+    "magnify",
+    "text-label",
+    "text-callout",
     "counter",
     "undo",
     "redo",
@@ -202,6 +206,48 @@ fn draw_icon(c: &mut Ctx<'_, '_>, name: &str) {
             c.p.fill_rect(Rect::new(4.0, 19.5, 16.0, 2.0), color.with_alpha_f(color.a as f32 / 255.0 * 0.55));
         }
         "text" => c.lines(&[&[(6.0, 8.0), (6.0, 5.5), (18.0, 5.5), (18.0, 8.0)], &[(12.0, 5.5), (12.0, 19.0)], &[(9.5, 19.0), (14.5, 19.0)]]),
+        // (a box of its colour, the text on it)
+        "text-label" => {
+            c.p.fill_rounded_rect(Rect::new(3.0, 4.0, 18.0, 16.0), 3.5, color.with_alpha_f(color.a as f32 / 255.0 * 0.32));
+            c.rrect(3.0, 4.0, 18.0, 16.0, 3.5);
+            c.lines(&[&[(8.0, 9.5), (8.0, 8.0), (16.0, 8.0), (16.0, 9.5)], &[(12.0, 8.0), (12.0, 16.5)]]);
+        }
+        // (a speech bubble with lines of text)
+        "text-callout" => {
+            let body = c.closed(&[
+                (5.5, 4.0),
+                (18.5, 4.0),
+                (20.5, 6.0),
+                (20.5, 13.0),
+                (18.5, 15.0),
+                (11.0, 15.0),
+                (6.5, 19.5),
+                (7.0, 15.0),
+                (5.5, 15.0),
+                (3.5, 13.0),
+                (3.5, 6.0),
+            ]);
+            c.stroke(body);
+            c.lines(&[&[(7.5, 8.0), (16.5, 8.0)], &[(7.5, 11.0), (13.5, 11.0)]]);
+        }
+        // (everything shaded but a round lit area)
+        "spotlight" => {
+            let mut pb = PathBuilder::new();
+            pb.push_rect(tiny_skia::Rect::from_xywh(3.0, 3.0, 18.0, 18.0).expect("a rect"));
+            pb.push_circle(12.0, 12.0, 5.5);
+            if let Some(shade) = pb.finish() {
+                c.p.fill_path_rule(&shade, color.with_alpha_f(color.a as f32 / 255.0 * 0.45), true);
+            }
+            c.ellipse(6.5, 6.5, 11.0, 11.0);
+        }
+        // (a square lens over big pixels, with its handle)
+        "magnify" => {
+            c.rrect(3.5, 3.5, 13.0, 13.0, 2.5);
+            for (i, j) in [(0.0, 0.0), (1.0, 1.0)] {
+                c.p.fill_rect(Rect::new(6.5 + i * 3.5, 6.5 + j * 3.5, 3.5, 3.5), color);
+            }
+            c.line((16.5, 16.5), (20.5, 20.5));
+        }
         "pixelate" => {
             for i in 0..3 {
                 for j in 0..3 {

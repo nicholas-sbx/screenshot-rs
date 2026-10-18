@@ -31,6 +31,8 @@ pub const BINDINGS: &[(&str, &str, &str, Where)] = &[
     ("tool.text", "Text", "T", Where::Both),
     ("tool.pixelate", "Pixelate", "X", Where::Both),
     ("tool.blur", "Blur", "U", Where::Both),
+    ("tool.spotlight", "Spotlight: shade everything else", "D", Where::Both),
+    ("tool.magnify", "Magnifier", "Z", Where::Both),
     ("tool.counter", "Counter", "N", Where::Both),
     ("tool.crop", "Crop, cut out, rotate and resize", "C", Where::Editor),
     // (the toolbar's swatches from the left: its colours, then your own,
@@ -137,6 +139,15 @@ impl Keymap {
             parsed.push((*action, parse_key(&value)));
             keys.insert(action.to_string(), value);
         }
+        // A key you chose wins over a default it clashes with (one a newer
+        // version gave a new action): that action is left without a key.
+        let chosen: Vec<(&str, (i32, i32))> = parsed.iter().filter(|(a, _)| overrides.contains_key(*a)).filter_map(|(a, k)| Some((*a, (*k)?))).collect();
+        for (action, k) in &mut parsed {
+            if !overrides.contains_key(*action) && k.is_some_and(|k| chosen.iter().any(|(a, c)| *c == k && overlaps(a, action))) {
+                *k = None;
+                keys.insert(action.to_string(), String::new());
+            }
+        }
         Keymap { keys, parsed }
     }
 
@@ -221,6 +232,19 @@ mod tests {
         assert_eq!(km.action(&press(0x50, 0), Where::Capture), None);
         assert_eq!(km.action(&press(0x51, 0), Where::Capture), None);
         assert_eq!(km.hint("Codes", "codes"), "Codes");
+        // A key you gave something wins over a default one: here, the magnifier's.
+        let mut o = BTreeMap::new();
+        o.insert("codes".to_string(), "Z".to_string());
+        let km = Keymap::new(&o);
+        assert_eq!(km.action(&press(key::Z, 0), Where::Capture), Some("codes"));
+        assert_eq!(km.label("tool.magnify"), "");
+        // (only where both work: in the editor, codes don't)
+        let mut o = BTreeMap::new();
+        o.insert("save".to_string(), "D".to_string());
+        assert_eq!(Keymap::new(&o).action(&press(0x44, 0), Where::Editor), Some("save"));
+        o.insert("save".to_string(), "Ctrl+S".to_string());
+        o.insert("codes".to_string(), "C".to_string());
+        assert_eq!(Keymap::new(&o).action(&press(0x43, 0), Where::Editor), Some("tool.crop"));
     }
 
     #[test]

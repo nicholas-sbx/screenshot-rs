@@ -7,7 +7,7 @@ use crate::geom::{IRect, Point, Rect};
 use crate::keys::Keymap;
 use crate::render::theme::{self, Color};
 use crate::ui::overlay::Window;
-use crate::ui::shapes::{Shape, Tool};
+use crate::ui::shapes::{Shape, TextStyle, Tool};
 
 /// The colour index of your own colour (the toolbar's others are 0..).
 pub const CUSTOM: usize = usize::MAX;
@@ -59,6 +59,8 @@ pub struct State {
     pub cfg: Config,
     pub keymap: Keymap,
     pub tool: Tool,
+    /// how the text tool's new texts look
+    pub text_style: TextStyle,
     /// the last tool used that draws in a colour
     pub colour_tool: Tool,
     /// the toolbar's colours (the settings')
@@ -127,6 +129,7 @@ impl State {
         State {
             keymap,
             tool,
+            text_style: TextStyle::Plain,
             colour_tool: if tool.uses_color() { tool } else { Tool::Pen },
             color_index: default_color_index(cfg.default_color, palette.len()),
             palette,

@@ -10,7 +10,7 @@ use crate::geom::{IRect, Point, Rect};
 use crate::image::Image;
 use crate::keyseq;
 use crate::render::Painter;
-use crate::render::paint::{Align, Pen, polygon};
+use crate::render::paint::{Align, Pen, polygon, rounded_rect_path};
 use crate::render::text::{self, BOLD};
 use crate::render::theme::{self, Color, OUTLINE_DARK, OUTLINE_LIGHT, SIZES};
 use crate::ui::textedit::{KeyResult, Measure, TextEdit};
@@ -48,6 +48,10 @@ pub enum Tool {
     Text,
     Pixelate,
     Blur,
+    /// shade everything but the areas dragged out
+    Spotlight,
+    /// what's under an area, enlarged in it
+    Magnify,
     Counter,
     /// the editor's: crop, cut out, rotate and resize the picture
     Crop,
@@ -69,6 +73,8 @@ pub const TOOLS: &[(Tool, &str, &str)] = &[
     (Tool::Text, "text", "Text"),
     (Tool::Pixelate, "pixelate", "Pixelate"),
     (Tool::Blur, "blur", "Blur"),
+    (Tool::Spotlight, "spotlight", "Spotlight: shade everything else"),
+    (Tool::Magnify, "magnify", "Magnifier"),
     (Tool::Counter, "counter", "Counter"),
     (Tool::Crop, "crop", "Crop, cut out, rotate and resize"),
 ];
@@ -84,7 +90,10 @@ impl Tool {
 
     /// The tools that draw in the chosen colour.
     pub fn uses_color(self) -> bool {
-        matches!(self, Tool::Pen | Tool::Line | Tool::Arrow | Tool::Rect | Tool::Solid | Tool::Ellipse | Tool::Marker | Tool::Text | Tool::Counter)
+        matches!(
+            self,
+            Tool::Pen | Tool::Line | Tool::Arrow | Tool::Rect | Tool::Solid | Tool::Ellipse | Tool::Marker | Tool::Text | Tool::Counter | Tool::Magnify
+        )
     }
 
     /// The tools that choose an area of the screen, not drawings: to
@@ -95,7 +104,7 @@ impl Tool {
 
     /// Tools dragged out from a corner (Shift/Ctrl/Alt change them).
     pub fn is_drag(self) -> bool {
-        matches!(self, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Solid | Tool::Ellipse | Tool::Pixelate | Tool::Blur)
+        matches!(self, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Solid | Tool::Ellipse | Tool::Pixelate | Tool::Blur | Tool::Spotlight | Tool::Magnify)
     }
 }
 
@@ -185,9 +194,50 @@ pub struct TextShape {
     pub pos: Point,
     pub edit: TextEdit,
     pub editing: bool,
+    pub style: TextStyle,
     /// For an edited copy (see Shape::replaces): how the text it replaces
     /// was, (text, pos, color, size).
     pub original: Option<(String, Point, Color, usize)>,
+}
+
+/// How a text looks: plain (its colour), on a label (white or black text
+/// on a rounded box of its colour), or a callout (a label with a tail
+/// pointing at `.0`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum TextStyle {
+    #[default]
+    Plain,
+    Label,
+    Callout(Point),
+}
+
+impl TextStyle {
+    /// The next of the text tool's styles (a click on it, or T, again).
+    pub fn next(self) -> TextStyle {
+        match self {
+            TextStyle::Plain => TextStyle::Label,
+            TextStyle::Label => TextStyle::Callout(Point::default()),
+            TextStyle::Callout(_) => TextStyle::Plain,
+        }
+    }
+
+    /// The text tool's icon in this style.
+    pub fn icon(self) -> &'static str {
+        match self {
+            TextStyle::Plain => "text",
+            TextStyle::Label => "text-label",
+            TextStyle::Callout(_) => "text-callout",
+        }
+    }
+
+    /// What the text tool does in this style.
+    pub fn hint(self) -> &'static str {
+        match self {
+            TextStyle::Plain => "Text",
+            TextStyle::Label => "Text on a label",
+            TextStyle::Callout(_) => "Callout: drag from what it points at to where its text goes",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -200,6 +250,8 @@ pub enum Kind {
     Ellipse(Drag),
     Pixelate(Drag, CoverCache),
     Blur(Drag, CoverCache),
+    Spotlight(Drag),
+    Magnify(Drag),
     Text(TextShape),
     Counter {
         pos: Point,
@@ -248,14 +300,16 @@ impl Shape {
             Tool::Ellipse => Kind::Ellipse(Drag::new(pos, false)),
             Tool::Pixelate => Kind::Pixelate(Drag::new(pos, false), CoverCache::default()),
             Tool::Blur => Kind::Blur(Drag::new(pos, false), CoverCache::default()),
+            Tool::Spotlight => Kind::Spotlight(Drag::new(pos, false)),
+            Tool::Magnify => Kind::Magnify(Drag::new(pos, false)),
             _ => return None,
         };
         Some(Shape { kind, color, size, hidden: false, replaces: None, order: 0 })
     }
 
-    pub fn text(pos: Point, color: Color, size: usize) -> Shape {
+    pub fn text(pos: Point, color: Color, size: usize, style: TextStyle) -> Shape {
         Shape {
-            kind: Kind::Text(TextShape { pos, edit: TextEdit::default(), editing: true, original: None }),
+            kind: Kind::Text(TextShape { pos, edit: TextEdit::default(), editing: true, style, original: None }),
             color,
             size,
             hidden: false,
@@ -299,7 +353,7 @@ impl Shape {
     pub fn geometry(&self) -> Rect {
         match &self.kind {
             Kind::Stroke(s) => points_bounds(&s.points),
-            Kind::Text(t) => text_bounds(t, self.size),
+            Kind::Text(t) => label_box(t, self.size),
             Kind::Counter { pos, .. } => {
                 let r = COUNTER_RADII[self.size.min(2)];
                 Rect::new(pos.x - r, pos.y - r, 2.0 * r, 2.0 * r)
@@ -309,13 +363,29 @@ impl Shape {
         }
     }
 
+    /// A spotlight's lit area.
+    pub fn spotlight(&self) -> Option<Rect> {
+        match &self.kind {
+            Kind::Spotlight(d) if !self.hidden => Some(d.rect()),
+            _ => None,
+        }
+    }
+
     /// How far its paint reaches past its geometry.
     pub fn reach(&self) -> f32 {
         let w = self.width();
         match &self.kind {
             Kind::Stroke(s) => stroke_reach(s, w),
             // (filled: no stroke past its box)
-            Kind::Text(_) | Kind::Counter { .. } | Kind::Solid(_) | Kind::Pixelate(..) | Kind::Blur(..) | Kind::Removed | Kind::Step(_) => 0.0,
+            Kind::Text(_)
+            | Kind::Counter { .. }
+            | Kind::Solid(_)
+            | Kind::Pixelate(..)
+            | Kind::Blur(..)
+            | Kind::Spotlight(_)
+            | Kind::Removed
+            | Kind::Step(_) => 0.0,
+            Kind::Magnify(_) => MAGNIFIER_FRAME / 2.0,
             _ => w / 2.0,
         }
     }
@@ -372,7 +442,12 @@ impl Shape {
     fn map_points(&mut self, f: impl Fn(Point) -> Point) {
         match &mut self.kind {
             Kind::Stroke(s) => s.points.iter_mut().for_each(|p| *p = f(*p)),
-            Kind::Text(t) => t.pos = f(t.pos),
+            Kind::Text(t) => {
+                t.pos = f(t.pos);
+                if let TextStyle::Callout(tip) = &mut t.style {
+                    *tip = f(*tip);
+                }
+            }
             Kind::Counter { pos, .. } => *pos = f(*pos),
             Kind::Removed | Kind::Step(_) => {}
             _ => {
@@ -469,7 +544,7 @@ impl Shape {
     pub fn drag(&self) -> Option<&Drag> {
         match &self.kind {
             Kind::Line(d) | Kind::Arrow(d) | Kind::Rect(d) | Kind::Solid(d) | Kind::Ellipse(d) => Some(d),
-            Kind::Pixelate(d, _) | Kind::Blur(d, _) => Some(d),
+            Kind::Pixelate(d, _) | Kind::Blur(d, _) | Kind::Spotlight(d) | Kind::Magnify(d) => Some(d),
             _ => None,
         }
     }
@@ -477,7 +552,7 @@ impl Shape {
     fn drag_mut(&mut self) -> Option<&mut Drag> {
         match &mut self.kind {
             Kind::Line(d) | Kind::Arrow(d) | Kind::Rect(d) | Kind::Solid(d) | Kind::Ellipse(d) => Some(d),
-            Kind::Pixelate(d, _) | Kind::Blur(d, _) => Some(d),
+            Kind::Pixelate(d, _) | Kind::Blur(d, _) | Kind::Spotlight(d) | Kind::Magnify(d) => Some(d),
             _ => None,
         }
     }
@@ -534,7 +609,16 @@ impl Shape {
             }
             Kind::Rect(d) | Kind::Ellipse(d) => d.rect().adjusted(-w - 2.0, -w - 2.0, w + 2.0, w + 2.0),
             Kind::Solid(d) | Kind::Pixelate(d, _) | Kind::Blur(d, _) => d.rect().adjusted(-2.0, -2.0, 2.0, 2.0),
-            Kind::Text(t) => text_bounds(t, self.size).adjusted(-TEXT_PAD - 3.0, -TEXT_PAD - 3.0, TEXT_PAD + 3.0, TEXT_PAD + 3.0),
+            // (it shades everything else)
+            Kind::Spotlight(_) => Rect::new(-1e6, -1e6, 2e6, 2e6),
+            Kind::Magnify(d) => d.rect().adjusted(-MAGNIFIER_FRAME - 8.0, -MAGNIFIER_FRAME - 6.0, MAGNIFIER_FRAME + 8.0, MAGNIFIER_FRAME + 10.0),
+            Kind::Text(t) => {
+                let b = label_box(t, self.size).adjusted(-TEXT_PAD - 3.0, -TEXT_PAD - 3.0, TEXT_PAD + 3.0, TEXT_PAD + 3.0);
+                match t.style {
+                    TextStyle::Callout(tip) => b.united(&Rect::new(tip.x - 3.0, tip.y - 3.0, 6.0, 6.0)),
+                    _ => b,
+                }
+            }
             Kind::Counter { pos, .. } => {
                 let r = COUNTER_RADII[self.size.min(2)] + 2.0;
                 Rect::new(pos.x - r, pos.y - r, 2.0 * r, 2.0 * r)
@@ -589,6 +673,8 @@ impl Shape {
             Kind::Ellipse(d) => p.stroke_ellipse(d.rect(), Pen::round(self.color, w)),
             Kind::Pixelate(d, cache) => paint_cover(p, d.rect(), base, dpr, self.size, cache, false),
             Kind::Blur(d, cache) => paint_cover(p, d.rect(), base, dpr, self.size, cache, true),
+            Kind::Spotlight(d) => paint_spotlights(p, &[d.rect()]),
+            Kind::Magnify(d) => paint_magnifier(p, d.rect(), base, dpr, self.size, self.color),
             Kind::Text(t) => paint_text(p, t, self.color, self.size),
             Kind::Counter { pos, number } => {
                 let r = COUNTER_RADII[self.size.min(2)];
@@ -632,6 +718,118 @@ fn paint_arrow(p: &mut Painter<'_>, d: &Drag, color: Color, w: f32) {
         p.fill_path(&path, color);
         p.stroke_path(&path, Pen::round(color, (w * 0.6).max(1.5)));
     }
+}
+
+/// Paint `shapes` in order, the spotlights together: where the first is
+/// in the stack, everything but all of their areas is shaded once (so
+/// they light up alike, overlapping or not); drawings above it aren't.
+pub fn paint_all<'a>(p: &mut Painter<'_>, shapes: impl IntoIterator<Item = &'a Shape>, base: &Image, dpr: f32) {
+    let shapes: Vec<&Shape> = shapes.into_iter().collect();
+    let lit: Vec<Rect> = shapes.iter().filter_map(|s| s.spotlight()).collect();
+    let mut shaded = false;
+    for s in shapes {
+        if matches!(s.kind, Kind::Spotlight(_)) {
+            if !shaded && !lit.is_empty() {
+                paint_spotlights(p, &lit);
+                shaded = true;
+            }
+            continue;
+        }
+        s.paint(p, base, dpr);
+    }
+}
+
+/// How dark a spotlight shades what isn't in it.
+const SPOT_SHADE: Color = Color::rgba(0, 0, 0, 150);
+const SPOT_RADIUS: f32 = 8.0;
+
+/// Shade all of what `p` draws on but the areas `lit` (logical).
+fn paint_spotlights(p: &mut Painter<'_>, lit: &[Rect]) {
+    let (w, h) = (p.width(), p.height());
+    let Some(mut mask) = tiny_skia::Mask::new(w, h) else { return };
+    for r in lit {
+        if let Some(path) = rounded_rect_path(r.normalized(), SPOT_RADIUS) {
+            mask.fill_path(&path, tiny_skia::FillRule::Winding, true, p.transform());
+        }
+    }
+    // (shaded where nothing is lit)
+    for v in mask.data_mut() {
+        *v = 255 - *v;
+    }
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color(crate::render::paint::sk(SPOT_SHADE.with_alpha_f(SPOT_SHADE.a as f32 / 255.0 * p.opacity())));
+    if let Some(all) = tiny_skia::Rect::from_xywh(0.0, 0.0, w as f32, h as f32) {
+        p.pm.fill_rect(all, &paint, tiny_skia::Transform::identity(), Some(&mask));
+    }
+}
+
+/// The magnifier's frame (logical pixels).
+const MAGNIFIER_FRAME: f32 = 3.0;
+/// How much it enlarges, by size.
+const MAGNIFY: [f32; 3] = [2.0, 3.0, 4.0];
+
+/// What's under the middle of `r` in `base`, enlarged to fill it, framed
+/// in `color` (whole pixels: crisp, as a screen's are).
+fn paint_magnifier(p: &mut Painter<'_>, r: Rect, base: &Image, dpr: f32, size: usize, color: Color) {
+    let r = r.normalized();
+    if r.w < 4.0 || r.h < 4.0 {
+        return;
+    }
+    let k = MAGNIFY[size.min(2)];
+    let (bw, bh) = (base.width() as f32, base.height() as f32);
+    let (sw, sh) = ((r.w * dpr / k).min(bw), (r.h * dpr / k).min(bh));
+    let c = r.center();
+    let src = Rect::new((c.x * dpr - sw / 2.0).clamp(0.0, bw - sw), (c.y * dpr - sh / 2.0).clamp(0.0, bh - sh), sw, sh);
+    // (a soft shadow under it, lifted off the picture)
+    for i in 1..=4 {
+        let d = i as f32 * 1.5;
+        p.fill_rounded_rect(r.adjusted(-d, -d + 3.0, d, d + 3.0), 2.0 + d, Color::rgba(0, 0, 0, 14));
+    }
+    p.draw_image(base, r, src, false);
+    p.stroke_rect(r, Pen::new(color, MAGNIFIER_FRAME));
+}
+
+/// Where a callout's text goes, pointing at `tip`, dragged to `to`: there
+/// (a little above, the pointer at its middle), or up and to the right of
+/// what it points at when it wasn't dragged.
+pub fn callout_text_at(tip: Point, to: Point) -> Point {
+    if to.distance(tip) < 12.0 { tip + Point::new(28.0, -64.0) } else { to - Point::new(0.0, 14.0) }
+}
+
+/// A text's box: its lines, and on a label (or a callout) the label round them.
+fn label_box(t: &TextShape, size: usize) -> Rect {
+    let b = text_bounds(t, size);
+    match t.style {
+        TextStyle::Plain => b,
+        _ => {
+            let pad = label_pad(size);
+            b.adjusted(-pad, -pad * 0.55, pad, pad * 0.55)
+        }
+    }
+}
+
+fn label_pad(size: usize) -> f32 {
+    (TEXT_SIZES_PX[size.min(2)] * 0.5).round()
+}
+
+/// A label (and a callout's tail) behind a text, in its colour.
+fn paint_label(p: &mut Painter<'_>, t: &TextShape, color: Color, size: usize) {
+    let bx = label_box(t, size);
+    if let TextStyle::Callout(tip) = t.style {
+        // A tail from the middle of the label to the tip, under the label:
+        // only what's outside it shows.
+        let c = bx.center();
+        let d = tip - c;
+        let len = d.length();
+        if len > 1.0 {
+            let half = (bx.h.min(bx.w) * 0.32).max(4.0);
+            let n = Point::new(-d.y / len, d.x / len) * half;
+            if let Some(path) = polygon(&[c + n, tip, c - n]) {
+                p.fill_path(&path, color);
+            }
+        }
+    }
+    p.fill_rounded_rect(bx, (bx.h * 0.28).min(12.0), color);
 }
 
 /// Pixelate (`blur` false) or blur what's under `r` in `base`.
@@ -930,7 +1128,7 @@ pub fn copy_for_editing(s: &Shape, index: usize) -> Option<Shape> {
     let mut edit = TextEdit::new(&t.edit.text);
     edit.place(edit.text.len(), false);
     Some(Shape {
-        kind: Kind::Text(TextShape { pos: t.pos, edit, editing: true, original: Some((t.edit.text.clone(), t.pos, s.color, s.size)) }),
+        kind: Kind::Text(TextShape { pos: t.pos, edit, editing: true, style: t.style, original: Some((t.edit.text.clone(), t.pos, s.color, s.size)) }),
         color: s.color,
         size: s.size,
         hidden: false,
@@ -975,6 +1173,13 @@ fn paint_text(p: &mut Painter<'_>, t: &TextShape, color: Color, size: usize) {
     let m = text::metrics(f);
     let lines = t.edit.lines();
     let palette = theme::c();
+    // On a label: the label in its colour, the text white or black on it.
+    let color = if t.style == TextStyle::Plain {
+        color
+    } else {
+        paint_label(p, t, color, size);
+        if color.is_light() { OUTLINE_DARK } else { OUTLINE_LIGHT }
+    };
     if t.editing {
         // The edit box, and what's selected.
         let bx = text_bounds(t, size).adjusted(-TEXT_PAD, -TEXT_PAD / 2.0, TEXT_PAD, TEXT_PAD / 2.0);
@@ -1094,7 +1299,7 @@ mod tests {
     fn validity() {
         let s = Shape::create(Tool::Arrow, Point::new(0.0, 0.0), Color::BLACK, 0).unwrap();
         assert!(!s.is_valid());
-        let mut t = Shape::text(Point::new(0.0, 0.0), Color::BLACK, 1);
+        let mut t = Shape::text(Point::new(0.0, 0.0), Color::BLACK, 1, TextStyle::Plain);
         assert!(!t.is_valid());
         t.as_text_mut().unwrap().edit.insert("hi");
         assert!(t.is_valid());
@@ -1118,5 +1323,89 @@ mod tests {
         assert_eq!(b.size(), (30, 30));
         let (r, _, _, _) = crate::image::unpack(b.pixel(15, 15));
         assert!(r > 40 && r < 215, "blurred to grey: {r}");
+    }
+
+    fn dragged(tool: Tool, a: Point, b: Point, color: Color) -> Shape {
+        let mut s = Shape::create(tool, a, color, 1).unwrap();
+        s.extend(b, Mods::default());
+        s
+    }
+
+    #[test]
+    fn spotlights_light_up_together_and_drawings_above_them_stay_bright() {
+        let base = Image::filled(100, 100, 0xFFC0C0C0).unwrap();
+        let red = Color::rgb(0xFF0000);
+        let shapes = [
+            dragged(Tool::Spotlight, Point::new(10.0, 10.0), Point::new(40.0, 40.0), red),
+            dragged(Tool::Spotlight, Point::new(30.0, 30.0), Point::new(70.0, 60.0), red),
+            dragged(Tool::Solid, Point::new(80.0, 80.0), Point::new(95.0, 95.0), red),
+        ];
+        let mut out = base.clone();
+        {
+            let mut p = Painter::new(out.pixmap_mut(), 1.0);
+            paint_all(&mut p, &shapes, &base, 1.0);
+        }
+        // In either (their overlap too): as it was. Out of both: shaded, once.
+        for (x, y) in [(20, 20), (35, 35), (60, 50)] {
+            assert_eq!(out.pixel(x, y), 0xFFC0C0C0, "{x},{y} lit");
+        }
+        let shaded = out.pixel(5, 90);
+        assert!(shaded >> 16 & 0xFF < 0x60, "{shaded:08X}");
+        assert_eq!(out.pixel(50, 20), shaded);
+        // (the box drawn after them isn't shaded)
+        assert_eq!(out.pixel(88, 88), 0xFFFF0000);
+        // Hidden, it shades nothing.
+        let mut hidden = shapes[..1].to_vec();
+        hidden[0].hidden = true;
+        assert!(hidden[0].spotlight().is_none());
+    }
+
+    #[test]
+    fn the_magnifier_enlarges_what_is_under_its_middle() {
+        let mut base = Image::filled(100, 100, 0xFF000000).unwrap();
+        // (a white dot 2 pixels across in the middle)
+        for (x, y) in [(49, 49), (50, 49), (49, 50), (50, 50)] {
+            base.set_pixel(x, y, 0xFFFFFFFF);
+        }
+        let m = dragged(Tool::Magnify, Point::new(30.0, 30.0), Point::new(70.0, 70.0), Color::rgb(0x00FF00));
+        let mut out = base.clone();
+        {
+            let mut p = Painter::new(out.pixmap_mut(), 1.0);
+            m.paint(&mut p, &base, 1.0);
+        }
+        // At 3x the dot is 6 across: white well off the middle, where it wasn't.
+        assert_eq!(out.pixel(47, 47), 0xFFFFFFFF);
+        assert_eq!(out.pixel(52, 52), 0xFFFFFFFF);
+        assert_eq!(out.pixel(45, 45), 0xFF000000);
+        // Framed in its colour.
+        assert_eq!(out.pixel(30, 50), 0xFF00FF00);
+    }
+
+    #[test]
+    fn a_callout_points_where_it_was_dragged_from_and_moves_as_one() {
+        crate::render::text::warm_up();
+        let tip = Point::new(20.0, 120.0);
+        let to = Point::new(120.0, 40.0);
+        let mut c = Shape::text(callout_text_at(tip, to), Color::rgb(0x2050FF), 1, TextStyle::Callout(tip));
+        c.as_text_mut().unwrap().edit.insert("look");
+        c.as_text_mut().unwrap().editing = false;
+        let b = c.bounds();
+        assert!(b.contains(tip) && b.contains(to), "{b:?}");
+        // Moved: the tip goes with it.
+        let m = c.moved(Point::new(10.0, 5.0));
+        assert_eq!(m.as_text().unwrap().style, TextStyle::Callout(Point::new(30.0, 125.0)));
+        // Painted: the label in its colour, its tail reaching the tip, the text white on it.
+        let base = Image::filled(200, 160, 0xFF000000).unwrap();
+        let mut out = base.clone();
+        {
+            let mut p = Painter::new(out.pixmap_mut(), 1.0);
+            c.paint(&mut p, &base, 1.0);
+        }
+        let near_tip = tip + (label_box(c.as_text().unwrap(), 1).center() - tip) * 0.1;
+        assert_eq!(out.pixel(near_tip.x as u32, near_tip.y as u32), 0xFF2050FF);
+        let bx = label_box(c.as_text().unwrap(), 1);
+        assert_eq!(out.pixel(bx.x as u32 + 3, bx.center().y as u32), 0xFF2050FF);
+        // Not dragged: up and to the right of what it points at.
+        assert_eq!(callout_text_at(tip, tip + Point::new(3.0, 2.0)), tip + Point::new(28.0, -64.0));
     }
 }

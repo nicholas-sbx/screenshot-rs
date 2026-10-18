@@ -20,7 +20,7 @@ use crate::render::theme::{self, Color};
 use crate::scanner;
 use crate::ui::overlay::{Output, Window};
 use crate::ui::session::{Button, CursorShape, Effect, Outcome, RecordSupport, Request, Screen, Session, Setup, Waker};
-use crate::ui::shapes::Tool;
+use crate::ui::shapes::{TextStyle, Tool};
 use crate::ui::state::{CUSTOM, Desktop, OWN_SWATCH};
 use crate::ui::toolbar::CodeScan;
 
@@ -992,7 +992,7 @@ fn text_fields(tmp: &Path) -> R {
     let mut s = session(test_config(tmp), Request::default(), vec![screen], FakeRecorder { problem: None, span: false });
     s.pointer_enter(0, Point::new(300.0, 300.0));
     tap(&mut s, 0, 0x54, "t", 0);
-    click(&mut s, 0, Point::new(100.0, 100.0), 0);
+    click(&mut s, 0, Point::new(100.0, 200.0), 0);
     for ch in "hi".chars() {
         tap(&mut s, 0, 0x41, &ch.to_string(), 0);
     }
@@ -1013,6 +1013,25 @@ fn text_fields(tmp: &Path) -> R {
     tap(&mut s, 0, key::BACKSPACE, "", 0);
     tap(&mut s, 0, key::ESCAPE, "", 0);
     check!(s.overlays[0].annotations.iter().all(|a| a.hidden || a.is_removed()), "an emptied text stayed");
+    // T again: on a label; and again: a callout, dragged from what it points at.
+    tap(&mut s, 0, 0x54, "t", 0);
+    tap(&mut s, 0, 0x54, "t", 0);
+    check!(matches!(s.st.text_style, TextStyle::Callout(_)), "{:?}", s.st.text_style);
+    drag(&mut s, 0, Point::new(150.0, 450.0), Point::new(400.0, 250.0), 0);
+    for ch in "here".chars() {
+        tap(&mut s, 0, 0x41, &ch.to_string(), 0);
+    }
+    tap(&mut s, 0, key::ESCAPE, "", 0);
+    let callout = s.overlays[0].annotations.iter().rev().find(|a| !a.hidden).and_then(|a| a.as_text());
+    check!(
+        callout.is_some_and(|t| t.style == TextStyle::Callout(Point::new(150.0, 450.0))
+            && t.pos.distance(Point::new(400.0, 250.0)) < 40.0
+            && t.edit.text == "here"),
+        "no callout: {:?}",
+        callout.map(|t| (t.style, t.pos, &t.edit.text))
+    );
+    tap(&mut s, 0, 0x54, "t", 0);
+    check!(s.st.text_style == TextStyle::Plain, "T didn't go round to plain text");
     Ok(())
 }
 
@@ -1023,26 +1042,27 @@ fn area_keys(tmp: &Path) -> R {
     let screen = Screen { output: Output { name: "DP-1".into(), rect: IRect::new(0, 0, 800, 600), scale: 1.0 }, picture, pointer: None };
     let mut s = session(test_config(tmp), Request { record: true, ..Default::default() }, vec![screen], FakeRecorder { problem: None, span: false });
     s.pointer_enter(0, Point::new(300.0, 300.0));
-    drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(300.0, 200.0), keyseq::SHIFT);
-    check!(s.overlays[0].area(&s.st) == Some(Rect::new(100.0, 100.0, 200.0, 200.0)), "Shift: {:?}", s.overlays[0].area(&s.st));
+    // (under the toolbar: two rows on a monitor this narrow)
+    drag(&mut s, 0, Point::new(100.0, 200.0), Point::new(300.0, 300.0), keyseq::SHIFT);
+    check!(s.overlays[0].area(&s.st) == Some(Rect::new(100.0, 200.0, 200.0, 200.0)), "Shift: {:?}", s.overlays[0].area(&s.st));
     tap(&mut s, 0, key::ESCAPE, "", 0);
     drag(&mut s, 0, Point::new(400.0, 300.0), Point::new(450.0, 340.0), CTRL);
     check!(s.overlays[0].area(&s.st) == Some(Rect::new(350.0, 260.0, 100.0, 80.0)), "Ctrl: {:?}", s.overlays[0].area(&s.st));
     tap(&mut s, 0, key::ESCAPE, "", 0);
     // Alt held for the last stretch: the area so far moves with the pointer.
-    s.pointer_motion(0, Point::new(100.0, 100.0), 0, false);
-    s.button(0, Button::Left, true, Point::new(100.0, 100.0), 0);
-    s.pointer_motion(0, Point::new(200.0, 150.0), 0, false);
-    s.pointer_motion(0, Point::new(260.0, 170.0), keyseq::ALT, false);
-    s.button(0, Button::Left, false, Point::new(260.0, 170.0), keyseq::ALT);
-    check!(s.overlays[0].area(&s.st) == Some(Rect::new(160.0, 120.0, 100.0, 50.0)), "Alt: {:?}", s.overlays[0].area(&s.st));
+    s.pointer_motion(0, Point::new(100.0, 200.0), 0, false);
+    s.button(0, Button::Left, true, Point::new(100.0, 200.0), 0);
+    s.pointer_motion(0, Point::new(200.0, 250.0), 0, false);
+    s.pointer_motion(0, Point::new(260.0, 270.0), keyseq::ALT, false);
+    s.button(0, Button::Left, false, Point::new(260.0, 270.0), keyseq::ALT);
+    check!(s.overlays[0].area(&s.st) == Some(Rect::new(160.0, 220.0, 100.0, 50.0)), "Alt: {:?}", s.overlays[0].area(&s.st));
     // Shift pressed mid-drag squares it there and then.
     tap(&mut s, 0, key::ESCAPE, "", 0);
-    s.pointer_motion(0, Point::new(100.0, 100.0), 0, false);
-    s.button(0, Button::Left, true, Point::new(100.0, 100.0), 0);
-    s.pointer_motion(0, Point::new(300.0, 160.0), 0, false);
+    s.pointer_motion(0, Point::new(100.0, 200.0), 0, false);
+    s.button(0, Button::Left, true, Point::new(100.0, 200.0), 0);
+    s.pointer_motion(0, Point::new(300.0, 260.0), 0, false);
     s.modifiers(keyseq::SHIFT);
-    check!(s.overlays[0].sel_rect == Some(Rect::new(100.0, 100.0, 200.0, 200.0)), "Shift pressed: {:?}", s.overlays[0].sel_rect);
+    check!(s.overlays[0].sel_rect == Some(Rect::new(100.0, 200.0, 200.0, 200.0)), "Shift pressed: {:?}", s.overlays[0].sel_rect);
     Ok(())
 }
 
@@ -1059,29 +1079,30 @@ fn record_across_monitors(tmp: &Path) -> R {
     let mut s = session(test_config(tmp), Request { record: true, ..Default::default() }, screens, FakeRecorder { problem: None, span: true });
     s.desktop_found(Desktop { windows: vec![crate::ui::session::window(IRect::new(100, 300, 300, 200), "Left", "left")], active: None, cursor: None });
     s.pointer_enter(0, Point::new(300.0, 300.0));
-    drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(300.0, 250.0), 0);
+    // (under the toolbar: two rows on a monitor this narrow)
+    drag(&mut s, 0, Point::new(100.0, 200.0), Point::new(300.0, 350.0), 0);
     check!(s.st.rec_area.is_some() && s.overlays[0].panel_shown(&s.st), "no area to record");
     // Moved by its middle, most of the way onto the right monitor.
-    drag(&mut s, 0, Point::new(200.0, 175.0), Point::new(850.0, 175.0), 0);
-    check!(s.st.rec_area == Some(Rect::new(750.0, 100.0, 200.0, 150.0)), "{:?}", s.st.rec_area);
+    drag(&mut s, 0, Point::new(200.0, 275.0), Point::new(850.0, 275.0), 0);
+    check!(s.st.rec_area == Some(Rect::new(750.0, 200.0, 200.0, 150.0)), "{:?}", s.st.rec_area);
     check!(
-        s.overlays[0].area(&s.st) == Some(Rect::new(750.0, 100.0, 200.0, 150.0)) && s.overlays[1].area(&s.st) == Some(Rect::new(-50.0, 100.0, 200.0, 150.0))
+        s.overlays[0].area(&s.st) == Some(Rect::new(750.0, 200.0, 200.0, 150.0)) && s.overlays[1].area(&s.st) == Some(Rect::new(-50.0, 200.0, 200.0, 150.0))
     );
     check!(s.st.rec_home == 1 && s.overlays[1].panel_shown(&s.st) && !s.overlays[0].panel_shown(&s.st), "its panel stayed behind");
     // Its right edge is on the right monitor: resized from there.
     s.pointer_leave(0);
-    s.pointer_enter(1, Point::new(150.0, 175.0));
-    s.pointer_motion(1, Point::new(150.0, 175.0), 0, false);
+    s.pointer_enter(1, Point::new(150.0, 275.0));
+    s.pointer_motion(1, Point::new(150.0, 275.0), 0, false);
     check!(s.cursor(1) == CursorShape::ResizeEW, "{:?}", s.cursor(1));
-    drag(&mut s, 1, Point::new(150.0, 175.0), Point::new(250.0, 175.0), 0);
-    check!(s.st.rec_area == Some(Rect::new(750.0, 100.0, 300.0, 150.0)), "resized from the right monitor: {:?}", s.st.rec_area);
+    drag(&mut s, 1, Point::new(150.0, 275.0), Point::new(250.0, 275.0), 0);
+    check!(s.st.rec_area == Some(Rect::new(750.0, 200.0, 300.0, 150.0)), "resized from the right monitor: {:?}", s.st.rec_area);
     // Its part on the left monitor moves it too.
     s.pointer_leave(1);
-    s.pointer_enter(0, Point::new(780.0, 175.0));
-    s.pointer_motion(0, Point::new(780.0, 175.0), 0, false);
+    s.pointer_enter(0, Point::new(780.0, 275.0));
+    s.pointer_motion(0, Point::new(780.0, 275.0), 0, false);
     check!(s.cursor(0) == CursorShape::Move, "{:?}", s.cursor(0));
-    drag(&mut s, 0, Point::new(780.0, 175.0), Point::new(680.0, 195.0), 0);
-    check!(s.st.rec_area == Some(Rect::new(650.0, 120.0, 300.0, 150.0)), "moved from the left monitor: {:?}", s.st.rec_area);
+    drag(&mut s, 0, Point::new(780.0, 275.0), Point::new(680.0, 295.0), 0);
+    check!(s.st.rec_area == Some(Rect::new(650.0, 220.0, 300.0, 150.0)), "moved from the left monitor: {:?}", s.st.rec_area);
     // Nothing is shaded, and the windows still light up, on either monitor.
     let f = frame(&mut s, 0)?;
     check!(f.pixel(20, 590) == 0xFF404040, "shaded: {:08X}", f.pixel(20, 590));
@@ -1195,13 +1216,14 @@ fn hidpi(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     tap(&mut s, 0, 0x4D, "m", 0);
     check!(!s.st.show_pointer && s.overlays[0].base.pixel(410, 410) == desktop.pixel(410, 410) && s.overlays[0].with_pointer.is_none());
     tap(&mut s, 0, 0x42, "b", 0);
-    drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(300.0, 200.0), 0);
+    // (under the toolbar: two rows on a monitor this narrow)
+    drag(&mut s, 0, Point::new(100.0, 250.0), Point::new(300.0, 350.0), 0);
     save_png(&frame(&mut s, 0)?, out, "overlay-hidpi.png")?;
     tap(&mut s, 0, 0x52, "r", 0);
-    drag(&mut s, 0, Point::new(50.0, 50.0), Point::new(350.0, 250.0), 0);
+    drag(&mut s, 0, Point::new(50.0, 200.0), Point::new(350.0, 400.0), 0);
     match s.take_outcome() {
         Some(Outcome::Image { image, at, shot, .. }) => {
-            check!(image.size() == (600, 400) && at == Some(IRect::new(50, 50, 300, 200)) && shot.monitor == "eDP-1", "{:?} {at:?}", image.size());
+            check!(image.size() == (600, 400) && at == Some(IRect::new(50, 200, 300, 200)) && shot.monitor == "eDP-1", "{:?} {at:?}", image.size());
             // The box's stroke is in picture pixels: at 2x, where 100, 100 is.
             let (r, g, b, _) = image::unpack(image.pixel(100, 100));
             let ember = theme::SWATCHES[0];
