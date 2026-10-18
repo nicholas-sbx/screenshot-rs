@@ -2,7 +2,8 @@
 # audit, so new security advisories show up). A push to main whose Cargo.toml
 # version has no v<version> tag yet also builds the packages, installs
 # them on Debian, Ubuntu, Fedora and Arch, publishes them as a GitHub
-# release, and updates the pacman repository (the "pacman" release).
+# release, and updates the pacman and apt repositories (the "pacman" and
+# "apt" releases).
 # "Run workflow" in the Actions tab does the same on demand.
 name: build
 
@@ -207,10 +208,11 @@ jobs:
     # A pacman repository on the fixed "pacman" release, updated by each
     # release:
     #   [flatshot-rs]
-    #   SigLevel = Optional TrustAll
     #   Server = https://github.com/<owner>/<repo>/releases/download/pacman
-    # With a PACMAN_GPG_KEY secret (an armored private key), the packages
-    # and the database are signed too.
+    # With a REPO_GPG_KEY secret (an armored private key without a
+    # passphrase; PACMAN_GPG_KEY, its old name, also works), the packages
+    # and the database are signed, and its public key is published with
+    # them (flatshot-rs.asc). Without one, they aren't.
     needs: [version, release]
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
@@ -224,19 +226,22 @@ jobs:
           name: packages
           path: dist
       - name: Build the repository database
+        id: repo
         env:
-          PACMAN_GPG_KEY: ${{ secrets.PACMAN_GPG_KEY }}
+          REPO_GPG_KEY: ${{ secrets.REPO_GPG_KEY || secrets.PACMAN_GPG_KEY }}
         run: |
           pacman -Syu --noconfirm --needed gnupg
           mkdir repo
           cp dist/*.pkg.tar.zst repo/
           cd repo
           sign=()
-          if [ -n "${PACMAN_GPG_KEY:-}" ]; then
-            printf '%s\n' "$PACMAN_GPG_KEY" | gpg --batch --import
+          if [ -n "${REPO_GPG_KEY:-}" ]; then
+            printf '%s\n' "$REPO_GPG_KEY" | gpg --batch --import
             key=$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
             for p in ./*.pkg.tar.zst; do gpg --batch --yes --detach-sign --local-user "$key" "$p"; done
             sign=(--sign --key "$key")
+            gpg --batch --armor --export "$key" > flatshot-rs.asc
+            echo "fingerprint=$key" >> "$GITHUB_OUTPUT"
           fi
           repo-add "${sign[@]}" flatshot-rs.db.tar.gz ./*.pkg.tar.zst
           # Release assets can't be links: real copies under the names pacman asks for.
@@ -246,9 +251,19 @@ jobs:
             [ -f "$f.tar.gz.sig" ] && cp "$f.tar.gz.sig" "$f.sig"
           done
           ls -l
-      - name: Install from the repository with pacman
+      - name: Install from the repository with pacman (as the README says)
+        env:
+          FINGERPRINT: ${{ steps.repo.outputs.fingerprint }}
         run: |
-          printf '\n[flatshot-rs]\nSigLevel = Optional TrustAll\nServer = file://%s/repo\n' "$PWD" >> /etc/pacman.conf
+          if [ -n "$FINGERPRINT" ]; then
+            # Signed: only packages and a database signed with this key.
+            pacman-key --add repo/flatshot-rs.asc
+            pacman-key --lsign-key "$FINGERPRINT"
+            level=Required
+          else
+            level=Never
+          fi
+          printf '\n[flatshot-rs]\nSigLevel = %s\nServer = file://%s/repo\n' "$level" "$PWD" >> /etc/pacman.conf
           pacman -Sy --noconfirm flatshot-rs
           flatshot-rs --version
           flatshot-rs --self-test
@@ -263,9 +278,99 @@ jobs:
 
             ```ini
             [flatshot-rs]
-            SigLevel = Optional TrustAll
+            SigLevel = ${{ steps.repo.outputs.fingerprint && 'Required' || 'Never' }}
             Server = https://github.com/${{ github.repository }}/releases/download/pacman
             ```
 
-            Then `sudo pacman -Sy flatshot-rs`. New versions arrive with `sudo pacman -Syu`.
+            ${{ steps.repo.outputs.fingerprint && format('The packages and the database are signed with the key `{0}` (`flatshot-rs.asc` here): add it first with `sudo pacman-key --add flatshot-rs.asc` and `sudo pacman-key --lsign-key {0}`. To skip the signatures, use `SigLevel = Never`.', steps.repo.outputs.fingerprint) || 'The packages are not signed.' }}
+
+            Then `sudo pacman -Sy flatshot-rs`. New versions arrive with `sudo pacman -Syu`. The README has the details.
+          files: repo/*
+
+  apt-repo:
+    # A flat apt repository on the fixed "apt" release, updated by each
+    # release:
+    #   deb [signed-by=/usr/share/keyrings/flatshot-rs.gpg] https://github.com/<owner>/<repo>/releases/download/apt ./
+    # Signed (InRelease, Release.gpg) with the same REPO_GPG_KEY as the
+    # pacman repository, whose public key is published with it
+    # (flatshot-rs.gpg for apt's signed-by, flatshot-rs.asc armored).
+    # Without one it isn't, and apt only takes it with [trusted=yes].
+    needs: [version, release]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container: public.ecr.aws/docker/library/ubuntu:24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: Build the repository index
+        id: repo
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          REPO_GPG_KEY: ${{ secrets.REPO_GPG_KEY || secrets.PACMAN_GPG_KEY }}
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends dpkg-dev apt-utils gnupg
+          mkdir repo
+          cp dist/*.deb repo/
+          cd repo
+          # Filenames relative to the repository (a flat one: no ./ needed).
+          dpkg-scanpackages --multiversion . /dev/null | sed 's|^Filename: \./|Filename: |' > Packages
+          gzip -9kn Packages
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=flatshot-rs \
+            -o APT::FTPArchive::Release::Label="Flatshot RS" \
+            -o APT::FTPArchive::Release::Description="Flatshot RS releases" \
+            release . > ../Release
+          mv ../Release Release
+          if [ -n "${REPO_GPG_KEY:-}" ]; then
+            printf '%s\n' "$REPO_GPG_KEY" | gpg --batch --import
+            key=$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
+            gpg --batch --yes --local-user "$key" --clearsign -o InRelease Release
+            gpg --batch --yes --local-user "$key" --armor --detach-sign -o Release.gpg Release
+            gpg --batch --export "$key" > flatshot-rs.gpg
+            gpg --batch --armor --export "$key" > flatshot-rs.asc
+            echo "fingerprint=$key" >> "$GITHUB_OUTPUT"
+          fi
+          ls -l
+          cat Release
+      - name: Install from the repository with apt (as the README says)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          FINGERPRINT: ${{ steps.repo.outputs.fingerprint }}
+        run: |
+          if [ -n "$FINGERPRINT" ]; then
+            install -Dm644 repo/flatshot-rs.gpg /usr/share/keyrings/flatshot-rs.gpg
+            opts="signed-by=/usr/share/keyrings/flatshot-rs.gpg"
+          else
+            opts="trusted=yes"
+          fi
+          # (somewhere apt's unprivileged downloader can read)
+          cp -r repo /srv/flatshot-rs
+          chmod -R a+rX /srv/flatshot-rs
+          echo "deb [$opts] file:///srv/flatshot-rs ./" > /etc/apt/sources.list.d/flatshot-rs.list
+          apt-get update -q
+          apt-get install -y -q flatshot-rs
+          flatshot-rs --version
+          flatshot-rs --self-test
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apt
+          name: Apt repository
+          prerelease: true
+          make_latest: false
+          body: |
+            Flatshot RS's apt repository (Debian 12+, Ubuntu 22.04+, KDE neon). ${{ steps.repo.outputs.fingerprint && format('Signed with the key `{0}` (`flatshot-rs.gpg` here):', steps.repo.outputs.fingerprint) || 'Not signed yet:' }}
+
+            ```sh
+            ${{ steps.repo.outputs.fingerprint && format('curl -fsSL https://github.com/{0}/releases/download/apt/flatshot-rs.gpg | sudo tee /usr/share/keyrings/flatshot-rs.gpg >/dev/null', github.repository) || '' }}
+            echo "deb [${{ steps.repo.outputs.fingerprint && 'signed-by=/usr/share/keyrings/flatshot-rs.gpg' || 'trusted=yes' }}] https://github.com/${{ github.repository }}/releases/download/apt ./" | sudo tee /etc/apt/sources.list.d/flatshot-rs.list
+            sudo apt update && sudo apt install flatshot-rs
+            ```
+
+            New versions arrive with `sudo apt upgrade`. The README has the details, and how to use it without the signatures.
           files: repo/*
