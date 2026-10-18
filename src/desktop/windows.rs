@@ -5,7 +5,7 @@
 //! Wayland gives programs no window list, so on KDE a small KWin script
 //! (loaded over KWin's scripting D-Bus API) reads the stacking order and
 //! calls back with every visible window. Sway and Hyprland answer through
-//! their IPC sockets.
+//! their IPC sockets (and say less about which window is over which).
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -216,16 +216,18 @@ fn window_from_row(row: &Value) -> Option<Window> {
 
 // -- sway ------------------------------------------------------------------------------
 
-/// Sway's tree over its IPC socket (i3's protocol): the focused window, the
-/// visible ones (for the overlay's hover), and the focused output's middle
-/// for the pointer (sway can't be asked where the pointer is).
+/// Sway's tree over its IPC socket (i3's protocol).
 fn sway(sock: &std::path::Path) -> Option<Desktop> {
     let tree = i3_ipc(sock, 4, b"")?;
-    let tree: Value = serde_json::from_slice(&tree).ok()?;
-    let mut windows = Vec::new();
+    Some(parse_sway(&serde_json::from_slice(&tree).ok()?))
+}
+
+/// Sway's tree as a Desktop: the focused window, the visible ones (for the
+/// overlay's hover), floating ones above the tiled, and the focused
+/// output's middle for the pointer (sway can't be asked where it is).
+pub fn parse_sway(tree: &Value) -> Desktop {
     let mut active = None;
     let mut cursor = None;
-    // Visible workspaces' windows: floating ones above the tiled.
     fn walk(node: &Value, visible: bool, output: Option<&Value>, out: &mut Vec<(bool, Window)>, active: &mut Option<Window>, cursor: &mut Option<Point>) {
         let kind = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
         let output = if kind == "output" { Some(node) } else { output };
@@ -233,7 +235,7 @@ fn sway(sock: &std::path::Path) -> Option<Desktop> {
         let visible = node.get("visible").and_then(|v| v.as_bool()).unwrap_or(visible);
         let r = node.get("rect");
         let rect = r.and_then(|r| {
-            let g = |k: &str| r.get(k)?.as_i64().map(|v| v as i32);
+            let g = |k: &str| r.get(k)?.as_i64().filter(|v| v.abs() < 1 << 20).map(|v| v as i32);
             Some(IRect::new(g("x")?, g("y")?, g("width")?, g("height")?))
         });
         let is_window = (kind == "con" || kind == "floating_con") && node.get("pid").is_some();
@@ -244,7 +246,7 @@ fn sway(sock: &std::path::Path) -> Option<Desktop> {
             if node.get("focused").and_then(|v| v.as_bool()).unwrap_or(false) {
                 *active = Some(w.clone());
                 if let Some(o) = output.and_then(|o| o.get("rect")) {
-                    let g = |k: &str| o.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as f32;
+                    let g = |k: &str| o.get(k).and_then(|v| v.as_i64()).filter(|v| v.abs() < 1 << 20).unwrap_or(0) as f32;
                     *cursor = Some(Point::new(g("x") + g("width") / 2.0, g("y") + g("height") / 2.0));
                 }
             }
@@ -261,12 +263,10 @@ fn sway(sock: &std::path::Path) -> Option<Desktop> {
         }
     }
     let mut found = Vec::new();
-    walk(&tree, false, None, &mut found, &mut active, &mut cursor);
-    let _ = &mut windows;
+    walk(tree, false, None, &mut found, &mut active, &mut cursor);
     // Topmost first: floating windows, then the tiled.
     found.sort_by_key(|(floating, _)| !*floating);
-    windows.extend(found.into_iter().map(|(_, w)| w));
-    Some(Desktop { windows, active, cursor })
+    Desktop { windows: found.into_iter().map(|(_, w)| w).collect(), active, cursor }
 }
 
 /// One i3-ipc request and its reply (at most 32 MiB).
@@ -318,16 +318,70 @@ fn hyprland() -> Option<Desktop> {
         s.take(8 << 20).read_to_end(&mut out).ok()?;
         serde_json::from_slice(&out).ok()
     };
-    let win = ask("activewindow");
-    let active = win.as_ref().and_then(|w| {
-        let at = w.get("at")?.as_array()?;
-        let size = w.get("size")?.as_array()?;
-        let rect = IRect::new(at.first()?.as_i64()? as i32, at.get(1)?.as_i64()? as i32, size.first()?.as_i64()? as i32, size.get(1)?.as_i64()? as i32);
-        let s = |k: &str| w.get(k).and_then(|v| v.as_str()).unwrap_or("").chars().take(MAX_TITLE).collect::<String>();
-        (rect.w > 0 && rect.h > 0).then(|| Window { rect, title: s("title"), app: s("class"), own: false })
+    let active = ask("activewindow").as_ref().and_then(hyprland_window);
+    let cursor = ask("cursorpos").and_then(|p| {
+        let n = |k: &str| p.get(k)?.as_f64().filter(|v| v.abs() < 1e6);
+        Some(Point::new(n("x")? as f32, n("y")? as f32))
     });
-    let cursor = ask("cursorpos").and_then(|p| Some(Point::new(p.get("x")?.as_f64()? as f32, p.get("y")?.as_f64()? as f32)));
-    Some(Desktop { windows: active.iter().cloned().collect(), active, cursor })
+    // Every window on the workspaces shown; the active one alone if that
+    // can't be had.
+    let mut windows = match (ask("clients"), ask("monitors")) {
+        (Some(clients), Some(monitors)) => parse_hyprland(&clients, &monitors),
+        _ => Vec::new(),
+    };
+    if let Some(a) = active.as_ref().filter(|a| !windows.iter().any(|w| w.rect == a.rect && w.title == a.title)) {
+        windows.insert(0, a.clone());
+    }
+    Some(Desktop { windows, active, cursor })
+}
+
+/// Hyprland's clients (`j/clients`) on the workspaces its monitors show
+/// (`j/monitors`), topmost first as near as it says: a special workspace's
+/// (shown over the rest), then fullscreen, floating and tiled ones, each
+/// the most recently focused first.
+pub fn parse_hyprland(clients: &Value, monitors: &Value) -> Vec<Window> {
+    let shown: Vec<i64> = monitors
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|m| [m.pointer("/activeWorkspace/id"), m.pointer("/specialWorkspace/id")])
+        .filter_map(|id| id?.as_i64())
+        .filter(|id| *id != 0)
+        .collect();
+    let mut found: Vec<(u8, i64, Window)> = Vec::new();
+    for c in clients.as_array().into_iter().flatten().take(4 * MAX_WINDOWS) {
+        let workspace = c.pointer("/workspace/id").and_then(Value::as_i64);
+        let flag = |k: &str| c.get(k).and_then(Value::as_bool);
+        if flag("mapped") == Some(false) || flag("hidden") == Some(true) || !workspace.is_some_and(|w| shown.contains(&w)) {
+            continue;
+        }
+        let Some(mut w) = hyprland_window(c) else { continue };
+        w.own = c.get("pid").and_then(Value::as_u64) == Some(std::process::id() as u64);
+        // (older versions say true or false, newer how: 0 is not)
+        let fullscreen = c.get("fullscreen").is_some_and(|f| f.as_bool().unwrap_or(false) || f.as_i64().is_some_and(|n| n > 0));
+        let layer = if workspace.is_some_and(|w| w < 0) {
+            0
+        } else if fullscreen {
+            1
+        } else if flag("floating") == Some(true) {
+            2
+        } else {
+            3
+        };
+        let recent = c.get("focusHistoryID").and_then(Value::as_i64).unwrap_or(i64::MAX);
+        found.push((layer, recent, w));
+    }
+    found.sort_by_key(|(layer, recent, _)| (*layer, *recent));
+    found.into_iter().take(MAX_WINDOWS).map(|(_, _, w)| w).collect()
+}
+
+/// A Hyprland window (a client, or the active window) from its `at` and `size`.
+fn hyprland_window(w: &Value) -> Option<Window> {
+    let (at, size) = (w.get("at")?.as_array()?, w.get("size")?.as_array()?);
+    let n = |v: Option<&Value>| v?.as_i64().filter(|v| v.abs() < 1 << 20).map(|v| v as i32);
+    let rect = IRect::new(n(at.first())?, n(at.get(1))?, n(size.first())?, n(size.get(1))?);
+    let s = |k: &str| w.get(k).and_then(|v| v.as_str()).unwrap_or("").chars().take(MAX_TITLE).collect::<String>();
+    (rect.w > 0 && rect.h > 0).then(|| Window { rect, title: s("title"), app: s("class"), own: false })
 }
 
 #[cfg(test)]
@@ -346,5 +400,62 @@ mod tests {
         assert_eq!(parse_kwin("not json"), Desktop::default());
         let long = format!(r#"{{"windows": [[0, 0, 10, 10, "{}", "a"]]}}"#, "x".repeat(5000));
         assert_eq!(parse_kwin(&long).windows[0].title.len(), MAX_TITLE);
+    }
+
+    #[test]
+    fn sway_tree() {
+        let tree: Value = serde_json::from_str(
+            r#"{"type": "root", "rect": {"x": 0, "y": 0, "width": 3840, "height": 1080}, "nodes": [
+                {"type": "output", "name": "DP-1", "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080}, "nodes": [
+                    {"type": "workspace", "name": "1", "visible": true, "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+                     "nodes": [{"type": "con", "pid": 10, "app_id": "foot", "name": "~", "visible": true, "focused": true, "rect": {"x": 0, "y": 0, "width": 960, "height": 1080}}],
+                     "floating_nodes": [{"type": "floating_con", "pid": 11, "app_id": null, "window_properties": {"class": "Gimp"}, "name": "GIMP", "visible": true, "rect": {"x": 400, "y": 300, "width": 600, "height": 400}}]},
+                    {"type": "workspace", "name": "2", "visible": false, "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+                     "nodes": [{"type": "con", "pid": 12, "app_id": "code", "name": "elsewhere", "visible": false, "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080}}]}]},
+                {"type": "output", "name": "DP-2", "rect": {"x": 1920, "y": 0, "width": 1920, "height": 1080}, "nodes": [
+                    {"type": "workspace", "name": "3", "visible": true, "rect": {"x": 1920, "y": 0, "width": 1920, "height": 1080},
+                     "nodes": [{"type": "con", "name": "no pid: a split", "rect": {"x": 1920, "y": 0, "width": 1920, "height": 1080},
+                                "nodes": [{"type": "con", "pid": 13, "app_id": "firefox", "name": "Web", "visible": true, "rect": {"x": 1920, "y": 0, "width": 1920, "height": 1080}}]}]}]}]}"#,
+        )
+        .unwrap();
+        let d = parse_sway(&tree);
+        // Floating first; hidden workspaces left out; containers aren't windows.
+        assert_eq!(d.windows.iter().map(|w| w.title.as_str()).collect::<Vec<_>>(), ["GIMP", "~", "Web"]);
+        assert_eq!(d.windows[0].app, "Gimp");
+        assert_eq!(d.active.as_ref().map(|w| w.app.as_str()), Some("foot"));
+        assert_eq!(d.cursor, Some(Point::new(960.0, 540.0)), "the focused output's middle");
+        assert_eq!(parse_sway(&Value::Null), Desktop::default());
+    }
+
+    #[test]
+    fn hyprland_clients() {
+        let clients: Value = serde_json::from_str(
+            r#"[
+            {"address": "0x1", "mapped": true, "hidden": false, "at": [10, 50], "size": [940, 1020], "workspace": {"id": 1, "name": "1"}, "floating": false, "class": "kitty", "title": "~", "pid": 1234, "fullscreen": 0, "focusHistoryID": 1},
+            {"address": "0x2", "mapped": true, "hidden": false, "at": [970, 50], "size": [940, 1020], "workspace": {"id": 1, "name": "1"}, "floating": false, "class": "firefox", "title": "Web", "pid": 1300, "fullscreen": 0, "focusHistoryID": 0},
+            {"address": "0x3", "mapped": true, "hidden": false, "at": [600, 300], "size": [500, 400], "workspace": {"id": 1, "name": "1"}, "floating": true, "class": "pavucontrol", "title": "Volume", "pid": 1400, "fullscreen": 0, "focusHistoryID": 2},
+            {"address": "0x4", "mapped": true, "hidden": false, "at": [10, 50], "size": [1900, 1020], "workspace": {"id": 2, "name": "2"}, "floating": false, "class": "code", "title": "not shown", "pid": 1500, "fullscreen": 0, "focusHistoryID": 3},
+            {"address": "0x5", "mapped": true, "hidden": false, "at": [2000, 100], "size": [800, 600], "workspace": {"id": -98, "name": "special:scratch"}, "floating": true, "class": "foot", "title": "scratch", "pid": 1600, "fullscreen": 0, "focusHistoryID": 4},
+            {"address": "0x6", "mapped": true, "hidden": true, "at": [1930, 50], "size": [1880, 1020], "workspace": {"id": 5, "name": "5"}, "floating": false, "class": "tab", "title": "behind in its group", "pid": 1700, "fullscreen": 0, "focusHistoryID": 5},
+            {"address": "0x7", "mapped": true, "hidden": false, "at": [1930, 50], "size": [1880, 1020], "workspace": {"id": 5, "name": "5"}, "floating": false, "class": "mpv", "title": "video", "pid": 1800, "fullscreen": 2, "focusHistoryID": 6},
+            {"address": "0x8", "mapped": false, "hidden": false, "at": [0, 0], "size": [100, 100], "workspace": {"id": 1, "name": "1"}, "class": "x", "title": "unmapped", "focusHistoryID": 7},
+            {"address": "0x9", "mapped": true, "hidden": false, "at": [0, 0], "size": [0, 100], "workspace": {"id": 1, "name": "1"}, "class": "x", "title": "empty"}
+            ]"#,
+        )
+        .unwrap();
+        let monitors: Value = serde_json::from_str(
+            r#"[{"id": 0, "name": "DP-1", "x": 0, "y": 0, "activeWorkspace": {"id": 1, "name": "1"}, "specialWorkspace": {"id": 0, "name": ""}},
+                {"id": 1, "name": "DP-2", "x": 1920, "y": 0, "activeWorkspace": {"id": 5, "name": "5"}, "specialWorkspace": {"id": -98, "name": "special:scratch"}}]"#,
+        )
+        .unwrap();
+        let w = parse_hyprland(&clients, &monitors);
+        // The special workspace over all, then fullscreen, floating, and the tiled most recently focused first.
+        assert_eq!(w.iter().map(|w| w.title.as_str()).collect::<Vec<_>>(), ["scratch", "video", "Volume", "Web", "~"]);
+        assert_eq!((w[3].rect, w[3].app.as_str()), (IRect::new(970, 50, 940, 1020), "firefox"));
+        // (an older version's fullscreen: true)
+        let old: Value = serde_json::from_str(r#"[{"at": [0, 0], "size": [10, 10], "workspace": {"id": 1}, "title": "a", "focusHistoryID": 1},
+                                                 {"at": [0, 0], "size": [10, 10], "workspace": {"id": 1}, "title": "b", "fullscreen": true, "focusHistoryID": 2}]"#).unwrap();
+        assert_eq!(parse_hyprland(&old, &monitors).iter().map(|w| w.title.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+        assert!(parse_hyprland(&Value::Null, &monitors).is_empty() && parse_hyprland(&clients, &Value::Null).is_empty());
     }
 }

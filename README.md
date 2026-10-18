@@ -195,7 +195,7 @@ Exit codes: 0 captured, 1 cancelled, 2 failed.
 |---|---|---|---|---|
 | Taking the screen | KWin's ScreenShot2 API, raw pixels over a pipe | wlr-screencopy, into shared memory | the screenshot portal | MIT-SHM, straight into shared memory |
 | The overlay | a layer-shell surface (no window animations) | layer-shell | a full-screen window | a window per monitor the window manager never sees, holding the keyboard and pointer |
-| Window detection | a KWin script | sway IPC / Hyprland IPC | — | what the window manager publishes (EWMH) |
+| Window detection | a KWin script | sway IPC / Hyprland IPC (every window on the workspaces shown) | — | what the window manager publishes (EWMH) |
 | Shortcuts | KGlobalAccel | your compositor's key bindings | your desktop's key bindings | KGlobalAccel on KDE, else your desktop's key bindings |
 | Clipboard | data-control (after the overlay is gone) | data-control | while the overlay has the keyboard | the CLIPBOARD selection (big pictures in pieces) |
 | Tray icon | StatusNotifierItem | StatusNotifierItem | StatusNotifierItem (with the AppIndicator extension) | StatusNotifierItem, else the panel's tray (XEmbed) |
