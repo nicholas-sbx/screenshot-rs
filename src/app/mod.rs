@@ -247,10 +247,12 @@ impl App {
     fn timeout(&self) -> Option<Duration> {
         let session = self.session.as_ref().and_then(|s| s.next_deadline());
         let taken = self.taken.as_ref().map(|t| t.wait_until);
-        let deadline = [session, self.hold_until, taken, self.editors_deadline(), self.recording_deadline(), self.dpy.next_deadline(), self.blink.deadline()]
-            .into_iter()
-            .flatten()
-            .min()?;
+        let settings = self.settings.as_ref().and_then(|w| w.s.next_deadline());
+        let deadline =
+            [session, self.hold_until, taken, self.editors_deadline(), settings, self.recording_deadline(), self.dpy.next_deadline(), self.blink.deadline()]
+                .into_iter()
+                .flatten()
+                .min()?;
         Some(deadline.saturating_duration_since(Instant::now()))
     }
 

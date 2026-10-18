@@ -8,6 +8,7 @@
 
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use crate::config::{self, Config};
 use crate::desktop::{autostart, shortcuts, sound};
@@ -16,7 +17,7 @@ use crate::image::Canvas;
 use crate::keys::{self, KeyPress};
 use crate::keyseq::{self, key};
 use crate::render::Painter;
-use crate::render::paint::{Align, Pen};
+use crate::render::paint::{Align, Pen, rounded_rect_path};
 use crate::render::text::{self, DEMIBOLD, MEDIUM, NORMAL};
 use crate::render::theme::{self, Color, THEMES};
 use crate::template::{self, Shot};
@@ -216,6 +217,8 @@ fn control_size(c: &Control) -> (f32, f32) {
 
 /// A palette's line: its height, gap included.
 const PALETTE_LINE: f32 = 38.0;
+/// How far the shadow of the palette line held reaches past it.
+const SHADOW: f32 = 8.0;
 const PALETTE_W: f32 = 340.0;
 const ADD_COLOUR: &str = "Add colour";
 
@@ -230,6 +233,13 @@ fn palette_parts(rect: Rect, n: usize) -> (Vec<(Rect, Rect)>, Rect) {
         })
         .collect();
     (lines, Rect::new(rect.x, rect.y + n as f32 * PALETTE_LINE, button_width(ADD_COLOUR), 30.0))
+}
+
+/// Where the top of the palette line held is drawn with the pointer at
+/// `y`: under the pointer as it was held, but in the list (of `n` lines,
+/// the first's top at `first`).
+fn held_top(grab: f32, y: f32, first: f32, n: usize) -> f32 {
+    (y - grab).clamp(first, first + n.saturating_sub(1) as f32 * PALETTE_LINE)
 }
 
 /// A colour to add to `colors`: a default one not there yet, else a new hue.
@@ -306,17 +316,47 @@ pub struct Settings {
     picker_held: bool,
     /// a palette colour pressed, to be dragged up or down the list
     reorder: Option<Reorder>,
+    /// the palette's lines on their way to their places
+    glides: Option<Glides>,
+    /// the time drawn at (the latest event's or tick's)
+    clock: Instant,
 }
 
 /// A palette colour held: where it is in the list now, where the press
-/// was, and whether it's moved far enough to be dragged (not a click).
+/// was and how far below its line's top, and whether it's moved far
+/// enough to be dragged (not a click).
 #[derive(Clone, Copy, Debug)]
 struct Reorder {
     b: usize,
     r: usize,
     at: usize,
     start: Point,
+    grab: f32,
     moving: bool,
+}
+
+/// How long a palette line takes to glide to its place.
+const GLIDE: Duration = Duration::from_millis(180);
+/// How often the lines are drawn while they glide (60 Hz).
+const FRAME: Duration = Duration::from_millis(16);
+
+/// Palette lines drawn away from their places, gliding there: for each (in
+/// the palette's order), how far below its place it was when it set off
+/// (logical pixels, negative above), and when; and the one let go, landing
+/// (over the others).
+#[derive(Clone, Debug)]
+struct Glides {
+    b: usize,
+    r: usize,
+    lines: Vec<(f32, Instant)>,
+    landing: Option<usize>,
+}
+
+/// How far below its place a line that set off `from` below it at `since`
+/// is at `now`: quickly at first, slowing as it arrives.
+fn glided(from: f32, since: Instant, now: Instant) -> f32 {
+    let t = (now.saturating_duration_since(since).as_secs_f32() / GLIDE.as_secs_f32()).min(1.0);
+    from * (1.0 - t).powi(3)
 }
 
 impl Settings {
@@ -346,6 +386,8 @@ impl Settings {
             picker: None,
             picker_held: false,
             reorder: None,
+            glides: None,
+            clock: Instant::now(),
             cfg,
         };
         s.pages = s.build();
@@ -665,6 +707,60 @@ impl Settings {
         d
     }
 
+    /// When it next needs drawing on its own: while palette lines glide.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.glides.as_ref().map(|_| self.clock + FRAME)
+    }
+
+    pub fn on_timer(&mut self, now: Instant) {
+        self.clock = self.clock.max(now);
+        let Some(g) = &self.glides else { return };
+        let (b, r) = (g.b, g.r);
+        let arrived = g.lines.iter().all(|&(from, since)| from == 0.0 || self.clock >= since + GLIDE);
+        self.touch_palette(b, r);
+        if arrived {
+            self.glides = None;
+        }
+    }
+
+    /// The time now, for what starts moving now.
+    fn now(&mut self) -> Instant {
+        self.clock = self.clock.max(Instant::now());
+        self.clock
+    }
+
+    /// The palette at (b, r)'s lines are drawn again (where they glide,
+    /// and the shadow of the one held).
+    fn touch_palette(&mut self, b: usize, r: usize) {
+        if let Some((first, n)) = self.palette_lines(b, r) {
+            self.touch_lines(first, n);
+        }
+    }
+
+    /// The `n` lines from `first` on are drawn again (and their shadows).
+    fn touch_lines(&mut self, first: Rect, n: usize) {
+        let all = Rect::new(first.x, first.y, first.w, n.saturating_sub(1) as f32 * PALETTE_LINE + first.h);
+        self.touched.push(all.adjusted(-SHADOW, -SHADOW, SHADOW, SHADOW));
+    }
+
+    /// How far below its place line `i` of the palette at (b, r) is drawn.
+    fn glide_offset(&self, b: usize, r: usize, i: usize) -> f32 {
+        match &self.glides {
+            Some(g) if (g.b, g.r) == (b, r) => g.lines.get(i).map_or(0.0, |&(from, since)| glided(from, since, self.clock)),
+            _ => 0.0,
+        }
+    }
+
+    /// The palette at (b, r)'s glides, `n` lines of them.
+    fn glides_mut(&mut self, b: usize, r: usize, n: usize) -> &mut Glides {
+        let now = self.clock;
+        let g = self.glides.get_or_insert_with(|| Glides { b, r, lines: Vec::new(), landing: None });
+        if (g.b, g.r) != (b, r) || g.lines.len() != n {
+            *g = Glides { b, r, lines: vec![(0.0, now); n], landing: None };
+        }
+        g
+    }
+
     /// The pointer is over something else: only those two are drawn again.
     fn hover(&mut self, hovered: Option<Hit>) {
         if hovered == self.hovered {
@@ -713,6 +809,8 @@ impl Settings {
         self.page = index.min(self.pages.len() - 1);
         self.scroll = 0.0;
         self.combo = None;
+        self.reorder = None;
+        self.glides = None;
         self.damaged = true;
     }
 
@@ -1061,6 +1159,7 @@ impl Settings {
                 d.moving = true;
                 self.pressed = None;
                 self.hover(None);
+                self.touch_palette(d.b, d.r);
             }
             if d.moving {
                 self.drag_colour(&mut d, at);
@@ -1148,7 +1247,11 @@ impl Settings {
                 && d.moving
             {
                 self.pressed = None;
+                self.drop_colour(&d, at.y);
+                // (only its lines changed, and they're drawn as they glide)
+                let damaged = self.damaged;
                 self.save_palette();
+                self.damaged = damaged;
                 return;
             }
             if let Some((_, _, panning)) = self.pan.take() {
@@ -1207,7 +1310,8 @@ impl Settings {
         let hit = self.hit_at(at);
         if let Some(Hit::Row(b, r, Part::Swatch(i))) = hit {
             // (held: dragged up or down it moves, else it's a click)
-            self.reorder = Some(Reorder { b, r, at: i, start: at, moving: false });
+            let top = self.layout().hits.into_iter().find(|(h, _)| *h == Hit::Row(b, r, Part::Swatch(i))).map_or(at.y, |h| h.1.y);
+            self.reorder = Some(Reorder { b, r, at: i, start: at, grab: at.y - top, moving: false });
         } else if self.finger {
             self.pan = Some((at, self.scroll, false));
         }
@@ -1324,12 +1428,14 @@ impl Settings {
             }
             (Part::Control, Control::Button(_), Control::Palette(colors)) => {
                 *colors = theme::SWATCHES.to_vec();
+                self.glides = None;
                 self.save_palette();
             }
             (Part::Swatch(i), _, Control::Palette(_)) => self.open_picker(b, r, i),
             (Part::Remove(i), _, Control::Palette(colors)) => {
                 if colors.len() > 1 && i < colors.len() {
                     colors.remove(i);
+                    self.glides = None;
                     self.save_palette();
                 }
             }
@@ -1337,6 +1443,7 @@ impl Settings {
                 if colors.len() < config::MAX_PALETTE {
                     let n = colors.len();
                     colors.push(next_colour(colors));
+                    self.glides = None;
                     self.save_palette();
                     self.open_picker(b, r, n);
                 }
@@ -1383,17 +1490,63 @@ impl Settings {
         self.set("palette", Value::Array(hex));
     }
 
-    /// The colour held is dragged to `at`: it moves to the line there.
+    /// The colour held is dragged to `at`: drawn there, over the others,
+    /// it takes the place its middle is nearest, and the lines it passes
+    /// glide out of its way.
     fn drag_colour(&mut self, d: &mut Reorder, at: Point) {
-        let Some(first) = self.layout().hits.into_iter().find(|(h, _)| *h == Hit::Row(d.b, d.r, Part::Swatch(0))).map(|h| h.1) else { return };
+        let now = self.now();
+        let Some((line, n)) = self.palette_lines(d.b, d.r) else { return };
+        let (first, top) = (line.y, held_top(d.grab, at.y, line.y, n));
+        self.touch_lines(line, n);
         let Some(Row { below: Control::Palette(colors), .. }) = self.row_mut(d.b, d.r) else { return };
-        let to = (((at.y - first.y) / PALETTE_LINE).floor().max(0.0) as usize).min(colors.len().saturating_sub(1));
-        if to != d.at && d.at < colors.len() {
-            let c = colors.remove(d.at);
-            colors.insert(to, c);
-            d.at = to;
-            self.damaged = true;
+        let to = (((top - first) / PALETTE_LINE).round().max(0.0) as usize).min(n.saturating_sub(1));
+        if to == d.at || d.at >= n {
+            return;
         }
+        let c = colors.remove(d.at);
+        colors.insert(to, c);
+        let g = self.glides_mut(d.b, d.r, n);
+        g.landing = None;
+        let held = g.lines.remove(d.at);
+        g.lines.insert(to, held);
+        // (each passed is drawn where it was, a line up or down, and sets off from there)
+        let (passed, from) = if to > d.at { (d.at..to, PALETTE_LINE) } else { (to + 1..d.at + 1, -PALETTE_LINE) };
+        for line in &mut g.lines[passed] {
+            *line = (glided(line.0, line.1, now) + from, now);
+        }
+        d.at = to;
+    }
+
+    /// The palette at (b, r): where its first line is, and how many.
+    fn palette_lines(&self, b: usize, r: usize) -> Option<(Rect, usize)> {
+        let n = match self.row(b, r).map(|row| &row.below) {
+            Some(Control::Palette(colors)) => colors.len(),
+            _ => return None,
+        };
+        Some((self.layout().hits.into_iter().find(|(h, _)| *h == Hit::Row(b, r, Part::Swatch(0)))?.1, n))
+    }
+
+    /// The colour held is let go at `y`: it glides from there to its place.
+    fn drop_colour(&mut self, d: &Reorder, y: f32) {
+        let now = self.now();
+        let Some((line, n)) = self.palette_lines(d.b, d.r) else { return };
+        let (top, place) = (held_top(d.grab, y, line.y, n), line.y + d.at as f32 * PALETTE_LINE);
+        let g = self.glides_mut(d.b, d.r, n);
+        if let Some(glide) = g.lines.get_mut(d.at) {
+            *glide = (top - place, now);
+            g.landing = Some(d.at);
+        }
+        self.touch_lines(line, n);
+    }
+
+    /// The palette line at (b, r) landing after it was let go, and how much
+    /// of its way it has left (1 to 0).
+    fn landing(&self, b: usize, r: usize) -> Option<(usize, f32)> {
+        let g = self.glides.as_ref().filter(|g| (g.b, g.r) == (b, r))?;
+        let i = g.landing?;
+        let (from, since) = *g.lines.get(i)?;
+        let t = (self.clock.saturating_duration_since(since).as_secs_f32() / GLIDE.as_secs_f32()).min(1.0);
+        (from != 0.0).then_some((i, (1.0 - t).powi(3)))
     }
 
     /// The picker for palette colour `i` (row (b, r)), under its line, or
@@ -1656,10 +1809,14 @@ impl Settings {
 
     // -- painting --------------------------------------------------------------------------
 
-    pub fn paint(&self, target: &mut Canvas<'_>, origin: (i32, i32), _region: IRect) {
+    pub fn paint(&self, target: &mut Canvas<'_>, origin: (i32, i32), region: IRect) {
         let c = theme::c();
         let mut p = Painter::for_region(target.pixmap_mut(), self.scale, origin);
         p.fill_rect(Rect::new(0.0, 0.0, self.view.0, self.view.1), c.base);
+        // (what's drawn, window logical: the rest isn't)
+        let k = self.scale;
+        let region = Rect::new(region.x as f32 / k, region.y as f32 / k, region.w as f32 / k, region.h as f32 / k).adjusted(-2.0, -2.0, 2.0, 2.0);
+        let shows = |y: f32, h: f32| y + h > region.y && y < region.bottom();
         // The page.
         p.save();
         p.clip_rect(Rect::new(NAV_W, 0.0, self.view.0 - NAV_W, self.view.1));
@@ -1667,42 +1824,54 @@ impl Settings {
         let (x, w) = (self.content_x(), self.content_w());
         let mut y = 22.0 - self.scroll;
         let title = text::font(18.0, DEMIBOLD);
-        p.draw_text(Rect::new(x, y, w, line_height(title)), Align::Left, self.pages[self.page].name, title, c.text);
+        if shows(y, line_height(title)) {
+            p.draw_text(Rect::new(x, y, w, line_height(title)), Align::Left, self.pages[self.page].name, title, c.text);
+        }
         y += line_height(title) + 6.0 + 8.0;
         for (b, block) in self.pages[self.page].blocks.iter().enumerate() {
             match block {
                 Block::Title(t) => {
                     y += 16.0;
-                    p.draw_text(Rect::new(x, y, w, line_height(title)), Align::Left, t, title, c.text);
+                    if shows(y, line_height(title)) {
+                        p.draw_text(Rect::new(x, y, w, line_height(title)), Align::Left, t, title, c.text);
+                    }
                     y += line_height(title) + 8.0;
                 }
                 Block::Note(t) => {
                     for l in text::wrap(t, hint_font(), w) {
-                        p.draw_text(Rect::new(x, y, w, line_height(hint_font())), Align::Left, &l, hint_font(), c.muted);
+                        if shows(y, line_height(hint_font())) {
+                            p.draw_text(Rect::new(x, y, w, line_height(hint_font())), Align::Left, &l, hint_font(), c.muted);
+                        }
                         y += line_height(hint_font());
                     }
                     y += 8.0;
                 }
                 Block::Reset => {
                     let r = Rect::new(x, y, button_width("Reset all to defaults"), 30.0);
-                    paint_button(&mut p, r, "Reset all to defaults", self.hovered == Some(Hit::Reset), true);
+                    if shows(y, 30.0) {
+                        paint_button(&mut p, r, "Reset all to defaults", self.hovered == Some(Hit::Reset), true);
+                    }
                     y += 38.0;
                 }
                 Block::Card { heading, rows } => {
                     if !heading.is_empty() {
                         y += 8.0;
-                        p.draw_text(Rect::new(x, y, w, line_height(hint_font())), Align::Left, heading, hint_font(), c.muted);
+                        if shows(y, line_height(hint_font())) {
+                            p.draw_text(Rect::new(x, y, w, line_height(hint_font())), Align::Left, heading, hint_font(), c.muted);
+                        }
                         y += line_height(hint_font()) + 4.0;
                     }
                     let shown: Vec<(usize, &Row)> = rows.iter().enumerate().filter(|(_, r)| r.visible).collect();
                     let heights: Vec<(f32, RowParts)> = shown.iter().map(|(_, row)| Self::row_layout(row, w)).collect();
                     let total: f32 = heights.iter().map(|h| h.0).sum();
-                    p.draw_rounded_rect(Rect::new(x + 0.5, y + 0.5, w - 1.0, total - 1.0), 8.0, Some(c.raised), Some(Pen::new(c.line, 1.0)));
+                    if shows(y, total) {
+                        p.draw_rounded_rect(Rect::new(x + 0.5, y + 0.5, w - 1.0, total - 1.0), 8.0, Some(c.raised), Some(Pen::new(c.line, 1.0)));
+                    }
                     for (n, ((r, row), (h, parts))) in shown.iter().zip(heights).enumerate() {
                         if n > 0 {
                             p.fill_rect(Rect::new(x + 14.0, y, w - 28.0, 1.0), c.line);
                         }
-                        if y + h > 0.0 && y < self.view.1 {
+                        if shows(y, h) {
                             self.paint_row(&mut p, b, *r, row, &parts, Point::new(x, y));
                         }
                         y += h;
@@ -1720,7 +1889,7 @@ impl Settings {
         }
         // The sidebar.
         p.fill_rect(Rect::new(0.0, 0.0, NAV_W, self.view.1), c.ink);
-        for (i, page) in self.pages.iter().enumerate() {
+        for (i, page) in self.pages.iter().enumerate().filter(|_| region.x < NAV_W) {
             let r = Rect::new(12.0, 18.0 + i as f32 * 34.0, NAV_W - 24.0, 32.0);
             let selected = i == self.page;
             if selected || self.hovered == Some(Hit::Nav(i)) {
@@ -1728,13 +1897,15 @@ impl Settings {
             }
             p.draw_text(r.adjusted(12.0, 0.0, 0.0, 0.0), Align::Left, page.name, control_font(), if selected { c.text } else { c.muted });
         }
-        p.draw_text(
-            Rect::new(24.0, self.view.1 - 34.0, NAV_W - 36.0, 20.0),
-            Align::Left,
-            &format!("{} {}", crate::APP_NAME, crate::cli::VERSION),
-            hint_font(),
-            c.muted,
-        );
+        if region.x < NAV_W {
+            p.draw_text(
+                Rect::new(24.0, self.view.1 - 34.0, NAV_W - 36.0, 20.0),
+                Align::Left,
+                &format!("{} {}", crate::APP_NAME, crate::cli::VERSION),
+                hint_font(),
+                c.muted,
+            );
+        }
         // The open dropdown, over everything.
         if let Some((b, r)) = self.combo
             && let Some(Control::Combo { options, value }) = self.row(b, r).map(|row| &row.control)
@@ -1874,9 +2045,37 @@ impl Settings {
             Control::Palette(colors) => {
                 let (lines, add) = palette_parts(rect, colors.len());
                 let keymap = keys::Keymap::new(&self.cfg.keys);
-                let editing = self.picker.as_ref().map(|p| p.0).or(self.reorder.filter(|d| d.moving && (d.b, d.r) == (b, r)).map(|d| d.at));
-                for (i, ((line, remove), color)) in lines.into_iter().zip(colors).enumerate() {
-                    let edge = if editing == Some(i) || hovered(Part::Swatch(i)) { c.muted } else { c.line };
+                let held = self.reorder.filter(|d| d.moving && (d.b, d.r) == (b, r));
+                let landing = if held.is_some() { None } else { self.landing(b, r) };
+                let picked = self.picker.as_ref().map(|p| p.0);
+                // (each where it glides; the one held, or landing, last: over the others)
+                let top = held.map(|d| d.at).or(landing.map(|l| l.0));
+                let order = (0..colors.len()).filter(|&i| top != Some(i)).chain(top);
+                for i in order {
+                    let (Some(&(line, remove)), Some(color)) = (lines.get(i), colors.get(i)) else { continue };
+                    let lifted = top == Some(i);
+                    let dy = match (held, self.pointer) {
+                        (Some(d), Some(at)) if lifted => held_top(d.grab, at.y, rect.y, colors.len()) - line.y,
+                        _ => self.glide_offset(b, r, i),
+                    };
+                    let (line, remove) = (line.translated(Point::new(0.0, dy)), remove.translated(Point::new(0.0, dy)));
+                    if lifted {
+                        // (a soft shadow: lifted off the list, fading as it lands; only
+                        // round the line, which hides the rest)
+                        let alpha = (20.0 * landing.map_or(1.0, |l| l.1)).round() as u8;
+                        let inside = rounded_rect_path(line, 6.0);
+                        for k in 1..=4 {
+                            let k = k as f32 * 1.5;
+                            let mut ring = tiny_skia::PathBuilder::new();
+                            for path in [rounded_rect_path(line.adjusted(-k, 2.0 - k, k, 2.0 + k), 6.0 + k), inside.clone()].iter().flatten() {
+                                ring.push_path(path);
+                            }
+                            if let Some(ring) = ring.finish() {
+                                p.fill_path_rule(&ring, Color::rgba(0, 0, 0, alpha), true);
+                            }
+                        }
+                    }
+                    let edge = if lifted || picked == Some(i) || (held.is_none() && hovered(Part::Swatch(i))) { c.muted } else { c.line };
                     p.draw_rounded_rect(line.adjusted(0.5, 0.5, -0.5, -0.5), 6.0, Some(c.ink), Some(Pen::new(edge, 1.0)));
                     // (a grip: the line is dragged up or down by it, or anywhere)
                     for col in 0..2 {
@@ -2205,6 +2404,52 @@ mod tests {
         // Reset.
         click(&mut s, Hit::Row(b, r, Part::Control));
         assert_eq!(palette(&s), config::default_palette());
+    }
+
+    #[test]
+    fn dragged_colours_glide_to_their_places() {
+        let mut s = settings();
+        s.show_page(1);
+        let (b, r) = row_at(&s, "palette");
+        let first = hit_point(&s, Hit::Row(b, r, Part::Swatch(0)));
+        s.pointer_motion(first, false);
+        s.button(Button::Left, true, first, 0);
+        s.pointer_motion(Point::new(first.x, first.y + 10.0), false);
+        assert!(s.next_deadline().is_none(), "nothing glides yet");
+        // Past the middle of the next line: they swap, and the one passed is
+        // drawn where it was, setting off up to its place.
+        let past = Point::new(first.x, first.y + 0.6 * PALETTE_LINE);
+        s.pointer_motion(past, false);
+        assert_eq!(s.glide_offset(b, r, 0), PALETTE_LINE);
+        assert!(s.next_deadline().is_some_and(|t| t <= s.clock + FRAME));
+        // Halfway through its glide it's most of the way there; then there.
+        s.on_timer(s.clock + GLIDE / 2);
+        let half = s.glide_offset(b, r, 0);
+        assert!(half > 0.0 && half < PALETTE_LINE / 4.0, "{half}");
+        s.on_timer(s.clock + GLIDE);
+        assert_eq!(s.glide_offset(b, r, 0), 0.0);
+        assert!(s.next_deadline().is_none() && s.glides.is_none());
+        // Let go between two places: saved, and it lands, from where it was
+        // let go (0.4 lines above its place), over the others.
+        s.button(Button::Left, false, past, 0);
+        let defaults = config::default_palette();
+        assert_eq!(&s.cfg.palette[..2], [defaults[1].clone(), defaults[0].clone()]);
+        assert_eq!(s.landing(b, r).map(|l| l.0), Some(1));
+        assert!((s.glide_offset(b, r, 1) + 0.4 * PALETTE_LINE).abs() < 0.01, "{}", s.glide_offset(b, r, 1));
+        s.on_timer(s.clock + GLIDE);
+        assert!(s.landing(b, r).is_none() && s.next_deadline().is_none());
+        // Dragged back up past both: each passed glides down from its old place.
+        let second = hit_point(&s, Hit::Row(b, r, Part::Swatch(1)));
+        s.pointer_motion(second, false);
+        s.button(Button::Left, true, second, 0);
+        s.pointer_motion(Point::new(second.x, second.y - 10.0), false);
+        s.pointer_motion(Point::new(second.x, second.y - 3.0 * PALETTE_LINE), false);
+        assert_eq!(s.glide_offset(b, r, 1), -PALETTE_LINE);
+        s.button(Button::Left, false, Point::new(second.x, second.y - 3.0 * PALETTE_LINE), 0);
+        assert_eq!(&s.cfg.palette[..2], [defaults[0].clone(), defaults[1].clone()]);
+        // Removing a colour meanwhile: no glides for lines that aren't there.
+        click(&mut s, Hit::Row(b, r, Part::Remove(3)));
+        assert!(s.glides.is_none());
     }
 
     #[test]

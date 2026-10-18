@@ -291,6 +291,10 @@ impl App {
     /// Answers from dialogs, the clipboard and the shortcut service.
     pub(super) fn poll_settings(&mut self) {
         let Some(w) = &mut self.settings else { return };
+        let now = Instant::now();
+        if w.s.next_deadline().is_some_and(|t| t <= now) {
+            w.s.on_timer(now);
+        }
         if let Some(rx) = &w.paste
             && let Ok(text) = rx.try_recv()
         {
