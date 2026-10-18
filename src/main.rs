@@ -45,6 +45,8 @@ fn main() -> std::process::ExitCode {
                 flatshot::app::run_editor(&args)
             } else if args.settings {
                 flatshot::app::run_settings()
+            } else if args.recent {
+                flatshot::app::run_recent()
             } else {
                 flatshot::app::run_once(&args)
             };

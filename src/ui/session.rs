@@ -1028,6 +1028,11 @@ impl Session {
         self.clock.step("drawn", format!("{} × {} across monitors", image.width(), image.height()));
         let mut shot = Shot::new(if window.is_some() { "window" } else { "region" });
         self.name_source(&mut shot, window);
+        for ov in &self.overlays {
+            let g = ov.output.rect.top_left().to_f();
+            shot.drawings += ov.annotations.iter().filter(|s| !s.hidden).count();
+            shot.codes += ov.codes.iter().filter(|(_, poly)| area.to_f().contains(poly_bounds(poly).center() + g)).count();
+        }
         let pin = self.st.pin_mode;
         self.close_overlays();
         self.finish(Outcome::Image { image, shot, at: Some(area), pin });
@@ -1854,6 +1859,8 @@ impl Session {
             "monitor"
         });
         shot.monitor = ov.output.name.clone();
+        shot.drawings = ov.annotations.iter().filter(|s| !s.hidden).count();
+        shot.codes = ov.codes.iter().filter(|(_, poly)| rect.is_none_or(|r| r.contains(poly_bounds(poly).center()))).count();
         let g = ov.output.rect;
         let at = if self.request.image { None } else { Some(rect.map(|r| r.aligned()).unwrap_or(IRect::new(0, 0, g.w, g.h)).translated(g.x, g.y)) };
         self.name_source(&mut shot, window);

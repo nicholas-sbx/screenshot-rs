@@ -22,6 +22,7 @@ pub mod deliver;
 pub mod desktop;
 pub mod diagnose;
 pub mod geom;
+pub mod history;
 pub mod image;
 pub mod ipc;
 pub mod keys;

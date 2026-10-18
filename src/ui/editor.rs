@@ -77,6 +77,9 @@ pub enum Request {
     ChooseImage(PathBuf),
     /// the window can close now
     Close,
+    /// the picture was saved to this file, at this size (for the Recent
+    /// captures list)
+    Saved(PathBuf, (u32, u32)),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1923,9 +1926,11 @@ impl Editor {
 
     fn save_in(&mut self, target: Result<SaveTarget, String>) -> bool {
         let mut clock = crate::timing::Clock::new("editor save");
+        let mut size = (0, 0);
         let written = target.and_then(|target| {
             let img = self.render()?;
             clock.step("drawn", format!("{} × {}, {} drawings", img.width(), img.height(), self.shapes.len()));
+            size = img.size();
             let result = write_picture(&img, &target, &self.cfg, img.has_alpha());
             self.target = Some(target);
             result
@@ -1933,6 +1938,7 @@ impl Editor {
         match written {
             Ok(()) => {
                 let path = self.target.as_ref().map(|t| t.path.clone()).unwrap_or_default();
+                self.requests.push(Request::Saved(path.clone(), size));
                 clock.step("saved", path.display().to_string());
                 self.say(format!("Saved to {}", path.display()));
                 self.path = path;

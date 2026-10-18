@@ -183,6 +183,18 @@ else
     echo "skip: copying text (no tesseract)"
 fi
 
+# 5c. Recent captures: what was saved (the region, the picture saved from
+# the editor) is listed; the window shows the list, and Esc closes it.
+recent=$XDG_STATE_HOME/flatshot-rs/recent.jsonl
+grep -q "$(basename "$(newest)")" "$recent" 2>/dev/null && pass "the capture is listed as recent" || fail "the capture isn't listed as recent"
+grep -q '"path":"'"$work"'/edit.png".*"edited":true' "$recent" 2>/dev/null && pass "the editor's save is listed as edited" || fail "the editor's save isn't listed: $(cat "$recent" 2>/dev/null)"
+$BIN --recent -v > "$work/recent.log" 2>&1 &
+pid=$!
+up "$work/recent.log" || true
+$EX/inject move 300 300 sleep 300 key Escape sleep 300
+finish $pid 3
+[ $code = 0 ] && pass "recent captures window closed with Esc" || fail "the recent captures window didn't close (exit $code)"
+
 # 6. Screen recording: an area chosen on the overlay, recorded by
 # wf-recorder, stopped from the bar under it (or by Ctrl+C), saved.
 video_check() { # what, file, "WxH"

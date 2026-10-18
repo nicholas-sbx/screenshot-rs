@@ -136,6 +136,12 @@ The keys can be changed in Settings → Shortcuts → Keys in Flatshot RS (so ca
 - **QR codes** are looked for while they're shown (<kbd>Q</kbd>); hidden at the start, the capture isn't looked through until you show them.
 - **Tray icon styles** (Settings → General → Tray icon): the app's colours, your theme's, a plain white or black outline for panels with symbolic icons, or Auto (white or black, following the desktop's light or dark scheme). The tray menu has every capture with its key, **Restart Flatshot RS** (after an upgrade) and **Quit Flatshot RS**.
 
+### Recent captures
+
+**Recent captures…** in the tray menu (or `flatshot-rs --recent`) opens a window of the last 100 captures, recordings and pictures saved from the editor, newest first. Each card shows the capture and what's known about it: what was captured (region, window, monitor, all screens, recording and its length), the window it came from, its size in pixels and on disk, when, and whether it was copied, had QR codes in it, drawings on it, or was edited since. Point at one (or choose it with the arrow keys) to open it (or double-click, or <kbd>Enter</kbd>), annotate it, copy it (<kbd>Ctrl</kbd>+<kbd>C</kbd>: the picture, or a recording's file), show it in its folder, or take it off the list (<kbd>Delete</kbd>). A file that has since gone is marked so.
+
+Only the list is kept (`~/.local/state/flatshot-rs/recent.jsonl`, private to you), never another copy of a capture: the cards' pictures are made from the files themselves while the window is open, only for the cards in view, and let go when it closes. Taking a capture off the list, or clearing it, leaves its file where it is.
+
 ### Recording the screen
 
 Choose **Record screen** in the tray menu (or its shortcut, or <kbd>V</kbd> on the overlay, or `flatshot-rs --record`), pick an area or a window or a whole monitor, set MP4, WebM or GIF, sound and frame rate in the panel under it, and press <kbd>Enter</kbd>. Until then you can drag another area or click another window on any monitor; an area across monitors has its handles on each, so it's moved and resized from either, and the panel goes with most of it. The frame rate **Native** records the frames as the screen gives them (the screen-cast stream's own rate; on X11, the monitor's refresh rate). A small bar under the area (outside it, so it's never in the video) shows the time and has pause, stop and discard; red marks show the area's corners. Stop with the bar, the tray icon, the shortcut again, or <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal: the video is saved to `~/Videos/Screencasts` (settings: Recording), copied as a file, and announced.
@@ -166,6 +172,7 @@ flatshot-rs --record             record an area (stops the recording in progress
 flatshot-rs --ocr                copy the text in an area (needs tesseract)
 flatshot-rs -i picture.png       annotate a picture
 flatshot-rs --settings           the settings window
+flatshot-rs --recent             the recent captures
 flatshot-rs --tray               the tray app
 flatshot-rs --quit               stop the tray app
 flatshot-rs -v                   how long each step takes, on stderr

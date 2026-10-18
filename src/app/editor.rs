@@ -192,6 +192,10 @@ impl App {
                     });
                     self.editors[i].image_dialog = Some(rx);
                 }
+                Request::Saved(path, size) => {
+                    crate::history::edited(&std::path::absolute(&path).unwrap_or(path), size);
+                    self.recent_changed();
+                }
                 Request::Close => {
                     self.dpy.remove(Owner::Editor(id));
                     self.editors.remove(i);

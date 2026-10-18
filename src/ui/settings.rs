@@ -917,7 +917,7 @@ impl Settings {
                 self.cfg.format.clone(),
             )
         };
-        let shot = Shot { mode: "region".into(), app: "firefox".into(), title: "Example page".into(), monitor: "DP-1".into() };
+        let shot = Shot { mode: "region".into(), app: "firefox".into(), title: "Example page".into(), monitor: "DP-1".into(), ..Default::default() };
         let path = template::target_path(&dir, &name, &shot, (1920, 1080), &ext, true);
         format!("Example: {}", path.display())
     }

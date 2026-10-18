@@ -20,6 +20,10 @@ pub struct Shot {
     pub title: String,
     /// connector name (DP-1, ...) when the capture is one monitor
     pub monitor: String,
+    /// (for the Recent captures list) QR codes and barcodes in it, and
+    /// the drawings made on it
+    pub codes: usize,
+    pub drawings: usize,
 }
 
 impl Shot {
@@ -276,7 +280,7 @@ mod tests {
 
     #[test]
     fn templates() {
-        let shot = Shot { mode: "region".into(), app: "firefox".into(), title: "../etc/passwd".into(), monitor: "DP-1".into() };
+        let shot = Shot { mode: "region".into(), app: "firefox".into(), title: "../etc/passwd".into(), monitor: "DP-1".into(), ..Default::default() };
         let p = target_path("/shots/{app}", "{title}_{mode}_{w}x{h}", &shot, (800, 600), "png", true);
         assert_eq!(p, PathBuf::from("/shots/firefox/etc_passwd_region_800x600.png"));
         let p = target_path("/shots", "{{literal}}_100%%", &shot, (1, 1), "jpg", true);

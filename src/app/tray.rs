@@ -86,7 +86,7 @@ struct Embedded {
 }
 
 /// The menu's keys, as the popup menu has them.
-const MENU_KEYS: [&str; 15] = [
+const MENU_KEYS: [&str; 16] = [
     "region",
     "window",
     "monitor",
@@ -98,6 +98,7 @@ const MENU_KEYS: [&str; 15] = [
     "region-delayed",
     "window-delayed",
     "annotate",
+    "recent",
     "folder",
     "settings",
     "restart",
@@ -162,6 +163,7 @@ fn menu_items(keys: &HashMap<String, String>, recording: bool) -> Vec<MenuItem> 
         MenuItem::new("window-delayed", "Capture active window in 3 seconds", ""),
         MenuItem::separator(),
         MenuItem::new("annotate", "Annotate an image…", ""),
+        MenuItem::new("recent", "Recent captures…", ""),
         MenuItem::new("folder", "Open screenshots folder", ""),
         MenuItem::new("settings", "Settings…", ""),
         MenuItem::separator(),
@@ -342,6 +344,7 @@ impl App {
                     crate::deliver::open_file(&folder);
                 }
                 "settings" => self.show_settings(),
+                "recent" => self.show_recent(),
                 "restart" => self.restart(),
                 "quit" => self.quit(),
                 action => self.shortcut(action, MENU_DELAY, Instant::now()),
@@ -518,6 +521,7 @@ impl App {
                 self.edit(path);
             }
             "settings" => self.show_settings(),
+            "recent" => self.show_recent(),
             "restart" => self.restart(),
             "quit" => self.quit(),
             "record" => self.record(delay),

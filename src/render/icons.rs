@@ -32,6 +32,7 @@ pub const NAMES: &[&str] = &[
     "screen",
     "copy",
     "open",
+    "folder",
     "close",
     "check",
     "codes",
@@ -356,6 +357,12 @@ fn draw_icon(c: &mut Ctx<'_, '_>, name: &str) {
             &[(13.0, 5.0), (19.0, 5.0), (19.0, 11.0)],
             &[(19.0, 5.0), (11.0, 13.0)],
         ]),
+        // (a folder: its tab at the top left, its flap across)
+        "folder" => {
+            let body = c.closed(&[(4.0, 6.5), (9.5, 6.5), (11.5, 8.5), (20.0, 8.5), (20.0, 18.5), (4.0, 18.5)]);
+            c.stroke(body);
+            c.line((4.0, 11.5), (20.0, 11.5));
+        }
         "close" => c.lines(&[&[(6.5, 6.5), (17.5, 17.5)], &[(17.5, 6.5), (6.5, 17.5)]]),
         "check" => c.lines(&[&[(5.0, 12.5), (10.0, 17.5), (19.0, 7.0)]]),
         "codes" => codes(c, color),

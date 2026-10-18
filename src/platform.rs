@@ -61,6 +61,8 @@ pub enum Owner {
     Editor(u32),
     /// the settings window
     Settings,
+    /// the Recent captures window
+    Recent,
     /// the bar with a recording's controls
     RecBar,
     /// a corner mark round the area being recorded (0-3)

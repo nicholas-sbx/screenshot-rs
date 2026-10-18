@@ -101,7 +101,7 @@ impl App {
     /// long enough, no pins left)?
     pub(super) fn may_exit(&self) -> bool {
         let holding = self.dpy.holds() && self.hold_until.is_some_and(|t| Instant::now() < t);
-        !holding && !self.has_pins() && !self.has_editors() && !self.has_settings() && !self.is_recording() && !self.is_reading()
+        !holding && !self.has_pins() && !self.has_editors() && !self.has_settings() && !self.has_recent() && !self.is_recording() && !self.is_reading()
     }
 
     /// Will a one-off capture hand what it copies to wl-copy (so it can
@@ -220,6 +220,29 @@ impl App {
             }
         };
         self.dpy.flush();
+        if result.saved
+            && let Some(p) = &result.path
+        {
+            let (width, height) = result.size;
+            crate::history::add(&crate::history::Entry {
+                path: std::path::absolute(p).unwrap_or_else(|_| p.clone()),
+                time: util::now_ms(),
+                kind: shot.mode.clone(),
+                width,
+                height,
+                bytes: std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+                app: shot.app.clone(),
+                title: shot.title.clone(),
+                monitor: shot.monitor.clone(),
+                area: at,
+                copied: if copied { self.cfg.clipboard.clone() } else { String::new() },
+                codes: shot.codes,
+                drawings: shot.drawings,
+                beautified: self.cfg.beautify,
+                ..Default::default()
+            });
+            self.recent_changed();
+        }
         if self.cfg.sound {
             sound::play(&self.cfg.sound_file);
         }

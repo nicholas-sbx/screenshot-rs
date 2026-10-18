@@ -10,7 +10,7 @@ Categories=Graphics;Utility;
 Keywords=screenshot;capture;snip;qr;barcode;annotate;ocr;text;flatshot;
 StartupNotify=false
 StartupWMClass=flatshot-rs
-Actions=Region;Monitor;Full;LastRegion;Pin;CopyText;Settings;
+Actions=Region;Monitor;Full;LastRegion;Pin;CopyText;Recent;Settings;
 
 [Desktop Action Region]
 Name=Capture Region
@@ -35,6 +35,10 @@ Exec=flatshot-rs --pin
 [Desktop Action CopyText]
 Name=Copy Text from Screen
 Exec=flatshot-rs --ocr
+
+[Desktop Action Recent]
+Name=Recent Captures
+Exec=flatshot-rs --recent
 
 [Desktop Action Settings]
 Name=Settings

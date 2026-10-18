@@ -23,6 +23,7 @@ pub struct Args {
     pub no_scan: bool,
     pub tray: bool,
     pub settings: bool,
+    pub recent: bool,
     pub quit: bool,
     pub print_config: bool,
     pub diagnose: bool,
@@ -43,7 +44,7 @@ fn usage() -> String {
     format!(
         "usage: flatshot-rs [-h] [-d SEC] [-f | -m | -w | -l | -r WxH+X+Y] [--pin] [--record] [--ocr] [-o FILE]\n\
          \x20               [-i FILE] [--backend {{{}}}]\n\
-         \x20               [--no-copy] [--no-save] [--no-scan] [--tray] [--settings] [--quit]\n\
+         \x20               [--no-copy] [--no-save] [--no-scan] [--tray] [--settings] [--recent] [--quit]\n\
          \x20               [--print-config] [--diagnose] [-v] [--version]",
         crate::config::BACKENDS.join(",")
     )
@@ -72,6 +73,7 @@ options:
   --no-scan             don't look for QR codes / barcodes
   --tray                run in the system tray with global shortcuts
   --settings            open the settings window
+  --recent              open the recent captures window
   --quit                stop the running tray app
   --print-config        print the effective config and exit
   --diagnose            show what this Flatshot and the running tray app use (layer-shell, capture, recorder)
@@ -141,6 +143,7 @@ const FLAGS: &[(&str, &str)] = &[
     ("", "--no-scan"),
     ("", "--tray"),
     ("", "--settings"),
+    ("", "--recent"),
     ("", "--quit"),
     ("", "--print-config"),
     ("", "--diagnose"),
@@ -254,6 +257,7 @@ pub fn parse(argv: &[String]) -> Parsed {
                 "--no-scan" => a.no_scan = true,
                 "--tray" => a.tray = true,
                 "--settings" => a.settings = true,
+                "--recent" => a.recent = true,
                 "--quit" => a.quit = true,
                 "--print-config" => a.print_config = true,
                 "--diagnose" => a.diagnose = true,
@@ -315,12 +319,15 @@ impl Args {
             || self.no_copy
             || self.no_save
             || self.no_scan
-            || (self.verbose && !(self.tray || self.settings || self.quit))
+            || (self.verbose && !(self.tray || self.settings || self.recent || self.quit))
         {
             return None; // one-off options: handled in this process
         }
         if self.quit {
             return Some("quit".into());
+        }
+        if self.recent {
+            return Some("recent".into());
         }
         if self.settings || self.tray {
             return Some("settings".into()); // already running: show something useful
@@ -397,6 +404,7 @@ mod tests {
         assert_eq!(run(&["--record"]).forwardable().as_deref(), Some("record 0"));
         assert_eq!(run(&["--ocr", "-d", "2"]).forwardable().as_deref(), Some("ocr 2"));
         assert_eq!(run(&["--tray"]).forwardable().as_deref(), Some("settings"));
+        assert_eq!(run(&["--recent"]).forwardable().as_deref(), Some("recent"));
         assert_eq!(run(&["--no-save"]).forwardable(), None);
         assert_eq!(run(&["-v"]).forwardable(), None);
         assert_eq!(run(&["-d", "0.5"]).forwardable().as_deref(), Some("region 0.5"));
