@@ -768,8 +768,9 @@ fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     check!(s.st.countdown == Some(2) && (0.55..0.76).contains(&s.st.countdown_ring), "{:?} {}", s.st.countdown, s.st.countdown_ring);
     let later = frame(&mut s, 0)?;
     save_png(&later, out, "overlay-countdown-later.png")?;
-    // (the area's middle is (450, 350), the ring 76 out: a quarter gone, from its top going left)
-    check!(full.pixel(374, 350) != later.pixel(374, 350) && full.pixel(526, 350) == later.pixel(526, 350), "the ring didn't run down");
+    // (the area's middle is (450, 350), the ring 76 out: gone from its top going left,
+    // past 45° up there, still lit round the right)
+    check!(full.pixel(396, 296) != later.pixel(396, 296) && full.pixel(526, 350) == later.pixel(526, 350), "the ring didn't run down");
     s.on_timer(Instant::now() + Duration::from_secs(1));
     check!(s.st.countdown == Some(1));
     s.on_timer(Instant::now() + Duration::from_secs(3));
