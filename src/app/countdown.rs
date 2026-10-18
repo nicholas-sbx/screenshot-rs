@@ -25,8 +25,12 @@ const ABOVE: i32 = 72;
 /// How long before the picture it goes: off the screen by then, a desktop
 /// that fades it out included.
 const GONE_BEFORE: Duration = Duration::from_millis(350);
-/// How often the ring is drawn as it runs down.
-const FRAME: Duration = Duration::from_millis(33);
+/// How often the ring moves on where the display doesn't pace it (X11; on
+/// Wayland each frame shown asks for the next).
+const FRAME: Duration = Duration::from_millis(16);
+/// The steps the ring is drawn in, round the whole of it (a quarter of a
+/// degree: well under a pixel, so it runs down smoothly).
+const RING_STEPS: f32 = 1440.0;
 
 /// A delayed capture counting down.
 pub(super) struct Countdown {
@@ -41,7 +45,7 @@ pub(super) struct Countdown {
     dials: Vec<(u8, f32, Option<Shows>)>,
 }
 
-/// What a dial shows: the seconds left, and its ring (in half degrees).
+/// What a dial shows: the seconds left, and its ring (in RING_STEPS).
 type Shows = (u64, u16);
 
 impl Countdown {
@@ -159,7 +163,7 @@ impl App {
         let Some(cd) = &mut self.countdown else { return };
         let (left, fraction) = cd.left(Instant::now());
         let seconds = left.ceil().max(1.0) as u64;
-        let key = (seconds, (fraction * 720.0).round() as u16);
+        let key = (seconds, (fraction * RING_STEPS).round() as u16);
         for (i, scale, drawn) in &mut cd.dials {
             let Some((_, s)) = self.dpy.surface(Owner::Countdown(*i)) else { continue };
             if *drawn == Some(key) && *scale == s {

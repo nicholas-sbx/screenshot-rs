@@ -749,6 +749,15 @@ fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     check!(s.st.countdown == Some(2), "{:?}", s.st.countdown);
     check!(!s.overlays[0].toolbar_visible, "the toolbar shows during the countdown");
     save_png(&frame(&mut s, 0)?, out, "overlay-countdown.png")?;
+    let full = frame(&mut s, 0)?;
+    // The ring runs down smoothly in between, the number a whole second at a time.
+    s.on_timer(Instant::now() + Duration::from_millis(500));
+    // (half a second on, and the time the frames took: neither full nor a whole second's worth gone)
+    check!(s.st.countdown == Some(2) && (0.55..0.76).contains(&s.st.countdown_ring), "{:?} {}", s.st.countdown, s.st.countdown_ring);
+    let later = frame(&mut s, 0)?;
+    save_png(&later, out, "overlay-countdown-later.png")?;
+    // (the area's middle is (450, 350), the ring 76 out: a quarter gone, from its top going left)
+    check!(full.pixel(374, 350) != later.pixel(374, 350) && full.pixel(526, 350) == later.pixel(526, 350), "the ring didn't run down");
     s.on_timer(Instant::now() + Duration::from_secs(1));
     check!(s.st.countdown == Some(1));
     s.on_timer(Instant::now() + Duration::from_secs(3));

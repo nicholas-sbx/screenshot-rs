@@ -33,6 +33,9 @@ use crate::ui::widgets::Look;
 pub const RECORD_FORMATS: &[(&str, &str)] = &[("mp4", "MP4"), ("webm", "WebM"), ("gif", "GIF")];
 const SCAN_AFTER: Duration = Duration::from_millis(60);
 const RAINBOW_EVERY: Duration = Duration::from_millis(50);
+/// How often the countdown's ring moves on where the display doesn't pace
+/// it (X11; on Wayland each frame shown asks for the next).
+const COUNTDOWN_FRAME: Duration = Duration::from_millis(16);
 /// How long the toolbar waits to learn which monitor the pointer is on
 /// before it shows on the primary one.
 const TOOLBAR_WAIT: Duration = Duration::from_millis(300);
@@ -175,7 +178,10 @@ enum Background {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Timer {
+    /// the countdown's end: recording starts
     Countdown,
+    /// the countdown's ring moved on (where frames don't come by themselves)
+    CountdownFrame,
     Rainbow,
     Scan,
     Toolbar,
@@ -257,6 +263,8 @@ pub struct Session {
     primary: usize,
     timers: Vec<(Instant, Timer)>,
     started: Instant,
+    /// when the countdown before recording began
+    countdown_began: Option<Instant>,
     pub clock: Clock,
     tx: mpsc::Sender<Background>,
     rx: mpsc::Receiver<Background>,
@@ -334,6 +342,7 @@ impl Session {
             primary: primary.min(n.saturating_sub(1)),
             timers: Vec::new(),
             started: Instant::now(),
+            countdown_began: None,
             clock: Clock::new(what),
             tx,
             rx,
@@ -503,6 +512,8 @@ impl Session {
 
     /// Work done in the background (codes found, edge maps) is ready.
     pub fn poll(&mut self) {
+        // (each frame: the countdown's ring where it is now)
+        self.count_down(Instant::now());
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Background::Codes(o, codes) => self.codes_found(o, codes),
@@ -527,6 +538,12 @@ impl Session {
             }
             match t {
                 Timer::Countdown => self.tick(),
+                Timer::CountdownFrame => {
+                    self.count_down(now);
+                    if self.st.countdown.is_some() {
+                        self.schedule(Timer::CountdownFrame, COUNTDOWN_FRAME);
+                    }
+                }
                 Timer::Rainbow => {
                     self.st.rainbow_t = now.duration_since(self.started).as_secs_f32();
                     self.schedule(Timer::Rainbow, RAINBOW_EVERY);
@@ -1454,12 +1471,14 @@ impl Session {
             self.start_recording();
             return;
         }
-        self.st.countdown = Some(self.st.cfg.record_countdown);
+        let total = self.st.cfg.record_countdown;
+        (self.st.countdown, self.st.countdown_ring, self.countdown_began) = (Some(total), 1.0, Some(Instant::now()));
         // (nothing is chosen any more: the window that was under the pointer goes)
         for o in 0..self.overlays.len() {
             self.update_hover(o);
         }
-        self.schedule(Timer::Countdown, Duration::from_secs(1));
+        self.schedule(Timer::Countdown, Duration::from_secs(total as u64));
+        self.schedule(Timer::CountdownFrame, COUNTDOWN_FRAME);
         self.refresh();
     }
 
@@ -1467,21 +1486,33 @@ impl Session {
         if self.st.countdown.is_none() {
             return false;
         }
-        self.timers.retain(|t| t.1 != Timer::Countdown);
-        self.st.countdown = None;
+        self.timers.retain(|t| !matches!(t.1, Timer::Countdown | Timer::CountdownFrame));
+        (self.st.countdown, self.countdown_began) = (None, None);
         self.refresh();
         true
     }
 
-    fn tick(&mut self) {
-        let Some(n) = self.st.countdown else { return };
-        if n > 1 {
-            self.st.countdown = Some(n - 1);
-            self.schedule(Timer::Countdown, Duration::from_secs(1));
+    /// The countdown as of `now`: its ring running down smoothly, its
+    /// number a whole second at a time.
+    fn count_down(&mut self, now: Instant) {
+        let (Some(n), Some(began)) = (self.st.countdown, self.countdown_began) else { return };
+        let total = self.st.cfg.record_countdown.max(1) as f32;
+        let left = (total - now.saturating_duration_since(began).as_secs_f32()).max(0.0);
+        self.st.countdown_ring = left / total;
+        let shown = (left.ceil() as i64).max(1);
+        if shown != n {
+            self.st.countdown = Some(shown);
             self.refresh();
+        }
+    }
+
+    /// The countdown's end: recording starts.
+    fn tick(&mut self) {
+        if self.st.countdown.take().is_none() {
             return;
         }
-        self.st.countdown = None;
+        self.countdown_began = None;
+        self.timers.retain(|t| t.1 != Timer::CountdownFrame);
         self.start_recording();
     }
 
