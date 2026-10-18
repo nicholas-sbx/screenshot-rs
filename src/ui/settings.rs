@@ -22,6 +22,7 @@ use crate::render::theme::{self, Color, THEMES};
 use crate::template::{self, Shot};
 use crate::ui::panels::{ColorPicker, LineEdit, PICKER_SIZE, PickerEvent};
 use crate::ui::session::{Button, CursorShape};
+use crate::ui::state::{CUSTOM, key_for_color};
 use crate::ui::textedit::KeyResult;
 
 const NAV_W: f32 = 184.0;
@@ -422,7 +423,7 @@ impl Settings {
                     Row::new(
                         "palette",
                         "Drawing colours",
-                        "On the toolbar and in the editor, in this order: keys 1 to 7 pick the first seven. Click one to change it, drag it to move it.",
+                        "On the toolbar and in the editor, in this order, with your own colour after them. Click one to change it, drag it to move it.",
                         Control::Button("Reset to default"),
                     )
                     .below(Control::Palette(crate::ui::state::palette(&c.palette))),
@@ -1886,7 +1887,7 @@ impl Settings {
                     let swatch = Rect::new(line.x + 24.0, line.center().y - 10.0, 20.0, 20.0);
                     p.draw_rounded_rect(swatch, 5.0, Some(*color), Some(Pen::new(c.line, 1.0)));
                     p.draw_text(Rect::new(swatch.right() + 10.0, line.y, 90.0, line.h), Align::Left, &color.hex(), text::mono(13.0, NORMAL), c.text);
-                    let key = if i < 7 { keymap.label(&format!("color.{}", i + 1)) } else { String::new() };
+                    let key = keymap.label(&key_for_color(i, colors.len()));
                     if !key.is_empty() {
                         p.draw_text(Rect::new(remove.x - 110.0, line.y, 100.0, line.h), Align::Right, &format!("Key {key}"), hint_font(), c.muted);
                     }
@@ -1902,6 +1903,13 @@ impl Settings {
                     }
                 }
                 paint_button(p, add, ADD_COLOUR, hovered(Part::Add), colors.len() < config::MAX_PALETTE);
+                let own = keymap.label(&key_for_color(CUSTOM, colors.len()));
+                if !own.is_empty() {
+                    // (right-aligned under the colours' keys)
+                    let right = rect.x + rect.w.min(PALETTE_W) - 40.0;
+                    let at = Rect::new(add.right() + 14.0, add.y, right - add.right() - 14.0, add.h);
+                    p.draw_text(at, Align::Right, &format!("Your own colour: key {own}"), hint_font(), c.muted);
+                }
             }
             Control::Combo { options, value } => {
                 let open = self.combo == Some((b, r));

@@ -111,7 +111,7 @@ Both come with the same default keys. KDE gives a key to whichever registered it
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> | Beautify: put this and later captures on a background |
 | <kbd>P</kbd> <kbd>L</kbd> <kbd>A</kbd> <kbd>B</kbd> <kbd>F</kbd> <kbd>E</kbd> <kbd>H</kbd> <kbd>T</kbd> <kbd>X</kbd> <kbd>U</kbd> <kbd>N</kbd> | pen, line, arrow, box, filled box, ellipse, highlighter, text, pixelate, blur, counter |
 | <kbd>Shift</kbd> / <kbd>Ctrl</kbd> / <kbd>Alt</kbd> while drawing | square / from the middle / move without resizing |
-| <kbd>1</kbd>–<kbd>7</kbd>, <kbd>8</kbd> | colour, your own colour |
+| <kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd>, <kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>3</kbd> | the toolbar's colours from the left, then your own (<kbd>8</kbd> with the default seven colours) |
 | <kbd>[</kbd> <kbd>]</kbd> | stroke size |
 | <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> | undo / redo |
 
@@ -120,7 +120,7 @@ The keys can be changed in Settings → Shortcuts → Keys in Flatshot RS (so ca
 ### Drawing and editing
 
 - **Select, move and resize drawings** (<kbd>S</kbd>, on the toolbar and in the editor): click a drawing to select it (<kbd>Alt</kbd>+click for the one under it), drag it to move it (<kbd>Shift</kbd>: straight across or down), drag a handle to resize it (<kbd>Shift</kbd> keeps its shape, <kbd>Ctrl</kbd> from the middle; lines and arrows by their ends), nudge it with the arrow keys (<kbd>Shift</kbd>: 10 px), or press <kbd>Delete</kbd> (or its trash button, for a finger). The colour and size buttons restyle it. Every change can be undone.
-- **Your own toolbar colours** (Settings → Capture → Toolbar colours): add up to 12, remove them, change each with a colour picker or its hex code, or reset to the default palette. The toolbar grows or shrinks to fit them, in the capture screen and the editor; <kbd>1</kbd>–<kbd>7</kbd> pick the first seven.
+- **Your own toolbar colours** (Settings → Capture → Toolbar colours): add up to 12, remove them, change each with a colour picker or its hex code, or reset to the default palette. The toolbar grows or shrinks to fit them, in the capture screen and the editor. Every swatch has a key, in toolbar order: <kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd>, then <kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>3</kbd>, with your own colour on the key after your last colour (<kbd>8</kbd> with the default seven).
 - **Text**: click to type; <kbd>Enter</kbd> starts a new line; <kbd>Esc</kbd>, <kbd>Ctrl</kbd>+<kbd>Enter</kbd> or a click elsewhere finishes (with the text tool, that click starts the next text there). A text left blank goes. Drag across the text to select some of it. Click text you've placed to change it; the select tool moves it.
 - **Across monitors**: drawings can run from one monitor onto another with every tool: they show on each, stacked alike (the last drawn or changed on top), the select tool picks them up (and frames and resizes them) from either, and text can be typed and changed from either. The toolbar follows the pointer from monitor to monitor, during a drag too. Edges snap on whichever monitor a drag reaches. A window across monitors is outlined on each, with its label on the one you're pointing at. A pin of an area across monitors shows on each, and pins and the recording bar can be dragged onto any monitor.
 - **The annotation editor** (**Annotate** on a notification, in the tray menu, or `flatshot-rs -i picture.png`) has the same tools, and:

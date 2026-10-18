@@ -256,7 +256,7 @@ mod tests {
         // three more swatches of 26, with their gaps of 2
         assert_eq!(t.size.0, seven + 3.0 * 28.0);
         assert_eq!(t.items.iter().filter(|i| matches!(i.look, Look::Swatch(_))).count(), 10);
-        assert_eq!(t.items.iter().find(|i| i.id == "swatch.9").unwrap().hint, "Colour");
+        assert_eq!(t.items.iter().find(|i| i.id == "swatch.9").unwrap().hint, "Colour  ·  0");
         let two = Toolbar::new(&view(&km, &ten[..2])).size.0;
         assert_eq!(two, seven - 5.0 * 28.0);
     }

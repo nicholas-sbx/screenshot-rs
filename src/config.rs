@@ -90,7 +90,7 @@ pub struct Config {
     /// The pointer when picking a region: hidden | shown | toggle
     pub region_pointer: String,
     pub default_tool: String,
-    /// the toolbar's colours (#RRGGBB, in order: keys 1-7 for the first seven)
+    /// the toolbar's colours (#RRGGBB, in order: keys 1-9, 0, Alt+1... then your own)
     pub palette: Vec<String>,
     /// an index into `palette`; at or past its end, your own (custom_color)
     pub default_color: i64,

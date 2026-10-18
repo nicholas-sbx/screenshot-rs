@@ -21,7 +21,7 @@ use crate::scanner;
 use crate::ui::overlay::{Output, Window};
 use crate::ui::session::{Button, CursorShape, Effect, Outcome, RecordSupport, Request, Screen, Session, Setup, Waker};
 use crate::ui::shapes::Tool;
-use crate::ui::state::{CUSTOM, Desktop};
+use crate::ui::state::{CUSTOM, Desktop, OWN_SWATCH};
 use crate::ui::toolbar::CodeScan;
 
 pub const TEST_URL: &str = "https://github.com/nicholas-sbx/screenshot";
@@ -509,7 +509,7 @@ fn pointer_and_panels(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) ->
     tap(&mut s, 0, 0x38, "8", 0);
     check!(s.st.color_index == CUSTOM && Some(s.st.custom_color) == Color::parse(&config::load().custom_color), "{:?}", s.st.custom_color);
     s.set_tool(Tool::Region);
-    let swatch = toolbar_item(&s, 0, "color.8")?;
+    let swatch = toolbar_item(&s, 0, OWN_SWATCH)?;
     click(&mut s, 0, swatch, 0);
     check!(s.overlays[0].picker_open() && s.st.tool == s.st.colour_tool, "the custom swatch doesn't open the picker");
     let at = s.overlays[0].picker.as_ref().ok_or("no picker")?.pos;
@@ -560,7 +560,7 @@ fn pointer_and_panels(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) ->
     drag(&mut s, 0, grip + Point::new(-40.0, 60.0), Point::new(-500.0, -500.0), 0);
     let bar = s.overlays[0].toolbar.as_ref().ok_or("no toolbar")?.rect();
     check!((bar.x, bar.y) == (8.0, 8.0), "{bar:?}");
-    let swatch = toolbar_item(&s, 0, "color.8")?;
+    let swatch = toolbar_item(&s, 0, OWN_SWATCH)?;
     click(&mut s, 0, swatch, 0);
     let (bar, p) = (s.overlays[0].toolbar.as_ref().ok_or("no toolbar")?.rect(), s.overlays[0].picker.as_ref().ok_or("no picker")?);
     check!(p.pos.y == bar.bottom() + 8.0, "the picker isn't under the toolbar: {:?} {bar:?}", p.pos);

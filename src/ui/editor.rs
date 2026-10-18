@@ -31,7 +31,7 @@ use crate::ui::selection::{Drawings, DrawingsMut, Selection};
 use crate::ui::session::{Button, CursorShape};
 use crate::ui::shapes::{self, Mods, Shape, TOOLS, Tool, copy_for_editing};
 use crate::ui::snapping::EdgeMaps;
-use crate::ui::state::{CUSTOM, color_for_key, default_color_index, swatch_index, swatch_items};
+use crate::ui::state::{CUSTOM, OWN_SWATCH, color_for_key, default_color_index, swatch_index, swatch_items};
 use crate::ui::textedit::KeyResult;
 use crate::ui::widgets::{Item, Look, Pointer, layout_row, paint_item};
 
@@ -785,7 +785,7 @@ impl Editor {
                 self.save();
             }
             "size" => self.set_size((self.size + 1) % SIZES.len()),
-            "color.8" => self.toggle_picker(),
+            OWN_SWATCH => self.toggle_picker(),
             _ => {
                 if let Some(t) = Tool::from_id(id) {
                     self.set_tool(t);
@@ -1012,7 +1012,7 @@ impl Editor {
         }
         self.set_color(CUSTOM);
         let mut picker = ColorPicker::new(self.custom_color);
-        let swatch = self.bar.iter().find(|it| it.id == "color.8").map(|it| it.rect).unwrap_or_default();
+        let swatch = self.bar.iter().find(|it| it.id == OWN_SWATCH).map(|it| it.rect).unwrap_or_default();
         let x = (swatch.center().x - PICKER_SIZE.0 / 2.0).clamp(8.0, (self.view.0 - PICKER_SIZE.0 - 8.0).max(8.0));
         picker.pos = Point::new(x.round(), BAR_H + 6.0);
         self.picker = Some(picker);
@@ -1412,7 +1412,7 @@ impl Editor {
                 self.picker_event(ev);
                 return;
             }
-            if self.bar_item_at(at) != Some("color.8") {
+            if self.bar_item_at(at) != Some(OWN_SWATCH) {
                 self.close_picker();
             }
         }

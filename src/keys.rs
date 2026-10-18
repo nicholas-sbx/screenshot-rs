@@ -32,6 +32,8 @@ pub const BINDINGS: &[(&str, &str, &str, Where)] = &[
     ("tool.blur", "Blur", "U", Where::Both),
     ("tool.counter", "Counter", "N", Where::Both),
     ("tool.crop", "Crop, cut out, rotate and resize", "C", Where::Editor),
+    // (the toolbar's swatches from the left: its colours, then your own,
+    // so with the 7 it starts with, 8 is your own; ui::state::color_for_key)
     ("color.1", "Toolbar colour 1", "1", Where::Both),
     ("color.2", "Toolbar colour 2", "2", Where::Both),
     ("color.3", "Toolbar colour 3", "3", Where::Both),
@@ -39,7 +41,12 @@ pub const BINDINGS: &[(&str, &str, &str, Where)] = &[
     ("color.5", "Toolbar colour 5", "5", Where::Both),
     ("color.6", "Toolbar colour 6", "6", Where::Both),
     ("color.7", "Toolbar colour 7", "7", Where::Both),
-    ("color.8", "Your own colour", "8", Where::Both),
+    ("color.8", "Toolbar colour 8", "8", Where::Both),
+    ("color.9", "Toolbar colour 9", "9", Where::Both),
+    ("color.10", "Toolbar colour 10", "0", Where::Both),
+    ("color.11", "Toolbar colour 11", "Alt+1", Where::Both),
+    ("color.12", "Toolbar colour 12", "Alt+2", Where::Both),
+    ("color.13", "Toolbar colour 13", "Alt+3", Where::Both),
     ("size.down", "Thinner", "[", Where::Both),
     ("size.up", "Thicker", "]", Where::Both),
     ("undo", "Undo", "Ctrl+Z", Where::Both),
@@ -194,6 +201,13 @@ mod tests {
         assert_eq!(km.action(&press(key::S, CTRL), Where::Editor), Some("save"));
         assert_eq!(km.label("redo"), "Ctrl+Shift+Z");
         assert_eq!(km.hint("Undo", "undo"), "Undo  ·  Ctrl+Z");
+        // Every toolbar swatch: 1-9, 0, then Alt+1... (Shift too, as on AZERTY).
+        assert_eq!(km.action(&press(0x39, 0), Where::Editor), Some("color.9"));
+        assert_eq!(km.action(&press(0x30, 0), Where::Capture), Some("color.10"));
+        assert_eq!(km.action(&press(0x31, keyseq::ALT), Where::Capture), Some("color.11"));
+        assert_eq!(km.action(&press(0x33, keyseq::ALT | SHIFT), Where::Editor), Some("color.13"));
+        assert_eq!(km.action(&press(0x31, SHIFT), Where::Editor), Some("color.1"));
+        assert_eq!(km.action(&press(0x30, CTRL), Where::Editor), Some("fit"));
     }
 
     #[test]

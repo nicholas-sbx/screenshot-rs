@@ -234,7 +234,7 @@ pub const OUTLINE_DARK: Color = Color::rgb(0x121218);
 /// frame around the area being recorded. The same red in every theme.
 pub const REC: Color = Color::rgb(0xFF4747);
 
-/// The toolbar's colours to start with, in order (keys 1-7); the
+/// The toolbar's colours to start with, in order (keys 1-7, 8 your own); the
 /// settings can change them (`config::DEFAULT_PALETTE`, as hex).
 pub const SWATCHES: [Color; 7] = [
     Color::rgb(0xFF6A3D), // ember

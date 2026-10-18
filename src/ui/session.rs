@@ -24,7 +24,7 @@ use crate::ui::panels::{CodeChip, ColorPicker, PickerEvent, RecordPanel, RecordV
 use crate::ui::selection::Selection;
 use crate::ui::shapes::{self, Mods, Shape, Tool, copy_for_editing};
 use crate::ui::snapping::{self, EdgeMaps, py_round};
-use crate::ui::state::{CUSTOM, Desktop, State, color_for_key, swatch_index};
+use crate::ui::state::{CUSTOM, Desktop, OWN_SWATCH, State, color_for_key, swatch_index};
 use crate::ui::textedit::KeyResult;
 use crate::ui::toolbar::{CodeScan, Toolbar, View};
 use crate::ui::widgets::Look;
@@ -2006,7 +2006,7 @@ impl Session {
         let (mut x, mut y) = (8.0, 8.0);
         if let Some(tb) = &ov.toolbar {
             let bar = tb.rect();
-            if let Some(sw) = tb.items.iter().find(|it| it.id == "color.8") {
+            if let Some(sw) = tb.items.iter().find(|it| it.id == OWN_SWATCH) {
                 x = (tb.pos.x + sw.rect.x + (sw.rect.w / 2.0).floor()).floor() - (pw / 2.0).floor();
             }
             y = if bar.bottom() + 8.0 + ph <= h - 8.0 { bar.bottom() + 8.0 } else { bar.top() - 8.0 - ph };
@@ -2342,7 +2342,7 @@ impl Session {
     fn on_custom_swatch(&self, o: usize, pos: Point) -> bool {
         let ov = &self.overlays[o];
         ov.toolbar_visible
-            && ov.toolbar.as_ref().and_then(|t| t.item_at(pos)).is_some_and(|it| it.id == "color.8")
+            && ov.toolbar.as_ref().and_then(|t| t.item_at(pos)).is_some_and(|it| it.id == OWN_SWATCH)
             && self.float_at(o, pos) == Some(Float::Toolbar)
     }
 
@@ -2494,7 +2494,7 @@ impl Session {
 
     fn toolbar_click(&mut self, o: usize, id: &str) {
         match id {
-            "color.8" => self.toggle_picker(o),
+            OWN_SWATCH => self.toggle_picker(o),
             "size" => self.cycle_size(),
             "codes" => self.toggle_codes(),
             "snap" => self.toggle_snap(),
