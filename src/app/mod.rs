@@ -332,7 +332,7 @@ impl App {
         self.update_text_input();
         self.dpy.flush();
         // (events read meanwhile, while waiting for a reply, are no longer
-        // on the socket for the loop to hear: another round for them)
+        // on the socket for the loop to hear: the wake handles them)
         if let Display::X11(x) = &mut self.dpy
             && x.has_events()
         {
@@ -472,7 +472,14 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         crate::warn!("event loop: {e}");
         2
     })?;
-    let _ = event_loop.handle().insert_source(ping_source, |_, _, _| {});
+    // (a wake from a thread, or from after_dispatch for X events read while
+    // waiting for a reply: those are no longer on the socket, so the X
+    // source won't fire for them, and they're handled here)
+    let _ = event_loop.handle().insert_source(ping_source, |_, _, app: &mut App| {
+        if matches!(app.dpy, Display::X11(_)) {
+            app.x11_dispatch();
+        }
+    });
     if let Some(fd) = crate::signals::fd() {
         let source = calloop::generic::Generic::new(fd, calloop::Interest::READ, calloop::Mode::Level);
         let _ = event_loop.handle().insert_source(source, |_, fd, app: &mut App| {
