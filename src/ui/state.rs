@@ -183,10 +183,11 @@ impl State {
         self.palette.get(self.color_index).copied().unwrap_or(self.custom_color)
     }
 
-    /// Are the drawings out of sight? While choosing what to record: a
-    /// video has none. They're kept, and show again with any other tool.
+    /// Are the drawings out of sight? While choosing what to record or
+    /// read the text of: neither has any. They're kept, and show again
+    /// with any other tool.
     pub fn drawings_hidden(&self) -> bool {
-        self.tool == Tool::Record
+        self.tool.hides_drawings()
     }
 }
 

@@ -801,11 +801,20 @@ fn copying_text(tmp: &Path, desktop: Arc<Image>) -> R {
     };
     let mut s = start(Request { ocr: true, ..Default::default() });
     check!(s.st.tool == Tool::Ocr, "{:?}", s.st.tool);
-    // A box drawn first, then O: what's read is the screen as it is.
+    // A box drawn first, then O: what's read is the screen as it is, and
+    // the box is out of sight meanwhile (undo can't touch it), back with
+    // another tool.
     tap(&mut s, 0, 0x42, "b", 0);
     drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(300.0, 250.0), 0);
+    let drawn = frame(&mut s, 0)?.pixel(200, 100);
+    check!(drawn != desktop.pixel(200, 100), "the box wasn't drawn");
     tap(&mut s, 0, 0x4f, "o", 0);
     check!(s.st.tool == Tool::Ocr, "{:?}", s.st.tool);
+    check!(frame(&mut s, 0)?.pixel(200, 100) == desktop.pixel(200, 100) && !s.can_undo(), "a drawing shows while choosing text to copy");
+    tap(&mut s, 0, key::Z, "", CTRL);
+    tap(&mut s, 0, 0x50, "p", 0);
+    check!(frame(&mut s, 0)?.pixel(200, 100) == drawn && s.can_undo(), "the drawing didn't come back");
+    tap(&mut s, 0, 0x4f, "o", 0);
     drag(&mut s, 0, Point::new(50.0, 60.0), Point::new(450.0, 360.0), 0);
     match s.take_outcome() {
         Some(Outcome::ReadText { image, dpr }) => {

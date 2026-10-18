@@ -102,6 +102,12 @@ impl Tool {
         matches!(self, Tool::Region | Tool::Record | Tool::Ocr)
     }
 
+    /// The tools that put the drawings out of sight while chosen: what
+    /// they take (a video, the text read) has none.
+    pub fn hides_drawings(self) -> bool {
+        matches!(self, Tool::Record | Tool::Ocr)
+    }
+
     /// Tools dragged out from a corner (Shift/Ctrl/Alt change them).
     pub fn is_drag(self) -> bool {
         matches!(self, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Solid | Tool::Ellipse | Tool::Pixelate | Tool::Blur | Tool::Spotlight | Tool::Magnify)

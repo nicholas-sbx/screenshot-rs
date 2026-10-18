@@ -1205,7 +1205,7 @@ impl Session {
         if tool != Tool::Select {
             self.select_on(None);
         }
-        if tool == Tool::Record {
+        if tool.hides_drawings() {
             // (the drawings go out of sight, and what's for them with them)
             self.close_picker();
         }
@@ -1762,12 +1762,13 @@ impl Session {
         self.selection_changed(o, len);
     }
 
+    /// (nothing's undone out of sight)
     pub fn can_undo(&self) -> bool {
-        !self.history.is_empty() || self.st.text_edit.is_some()
+        !self.st.drawings_hidden() && (!self.history.is_empty() || self.st.text_edit.is_some())
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
+        !self.st.drawings_hidden() && !self.redo_stack.is_empty()
     }
 
     pub fn undo(&mut self) {
