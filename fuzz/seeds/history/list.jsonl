@@ -1,0 +1,4 @@
+{"path":"/home/u/Pictures/a.png","time":1700000000,"kind":"region","width":640,"height":480,"bytes":12345,"app":"firefox","title":"Page","area":[1,2,3,4],"codes":2,"seconds":2.5,"thumbnail":"/tmp/t.png"}
+{"path":"/home/u/Pictures/a.png","time":1700000100,"kind":"edited","width":600,"height":400,"bytes":999}
+{"path":"/home/u/Videos/b.mp4","time":1700000200,"kind":"recording","seconds":12.0,"copied":"file"}
+not json

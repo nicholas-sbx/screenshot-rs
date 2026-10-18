@@ -195,9 +195,8 @@ pub fn parse_kwin(report: &str) -> Desktop {
     }
     windows.reverse();
     let cursor = data.get("cursor").and_then(|c| c.as_array()).and_then(|c| {
-        let x = c.first()?.as_f64()?;
-        let y = c.get(1)?.as_f64()?;
-        (x.is_finite() && y.is_finite()).then(|| Point::new(x as f32, y as f32))
+        let n = |v: &Value| v.as_f64().filter(|v| v.abs() < 1e6);
+        Some(Point::new(n(c.first()?)? as f32, n(c.get(1)?)? as f32))
     });
     Desktop { windows, active, cursor }
 }

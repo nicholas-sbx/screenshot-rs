@@ -102,6 +102,12 @@ impl TextEdit {
         best
     }
 
+    /// The nearest grapheme boundary at or after `i`.
+    fn boundary_up(&self, i: usize) -> usize {
+        let b = self.boundary(i);
+        if b == i { b } else { self.next(b) }
+    }
+
     fn prev(&self, i: usize) -> usize {
         self.text[..i].grapheme_indices(true).next_back().map(|(b, _)| b).unwrap_or(0)
     }
@@ -159,7 +165,9 @@ impl TextEdit {
         let typing = s != " " && s != "\n" && s.chars().count() == 1;
         self.snapshot(typing);
         self.text.replace_range(a..b, &s);
-        self.cursor = a + s.len();
+        // After what was typed, and what it joined with: a mark that comes
+        // first (Arabic's number signs) makes one character with the next.
+        self.cursor = self.boundary_up(a + s.len());
         self.anchor = self.cursor;
     }
 
@@ -169,8 +177,9 @@ impl TextEdit {
         }
         self.snapshot(false);
         self.text.replace_range(a..b, "");
-        self.cursor = a;
-        self.anchor = a;
+        // (where it was, or before what the two sides now make together)
+        self.cursor = self.boundary(a);
+        self.anchor = self.cursor;
     }
 
     /// Move the caret to `index`; with `select`, extend the selection.
@@ -436,6 +445,22 @@ mod tests {
         t.key(&press(key::LEFT, 0, ""), &w);
         t.key(&press(key::BACKSPACE, 0, ""), &w);
         assert_eq!(t.text, "x");
+    }
+
+    #[test]
+    fn typing_before_what_it_joins_with() {
+        // U+0600 makes one character with what follows: typing goes on after both.
+        let mut t = TextEdit::new("iq");
+        t.place(0, false);
+        t.insert("\u{600}");
+        assert_eq!((t.text.as_str(), t.cursor), ("\u{600}iq", 3));
+        t.insert("x");
+        assert_eq!(t.text, "\u{600}ixq");
+        // Two sides that join once what's between them goes: before them.
+        let mut t = TextEdit::new("\u{600}\nz");
+        t.place(3, false);
+        t.key(&press(key::BACKSPACE, 0, ""), &w);
+        assert_eq!((t.text.as_str(), t.cursor), ("\u{600}z", 0));
     }
 
     #[test]

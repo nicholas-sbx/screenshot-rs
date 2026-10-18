@@ -107,6 +107,46 @@ jobs:
           path: shots/
           if-no-files-found: ignore
 
+  fuzz:
+    # Weekly and on demand: each fuzz target for a minute (fuzz/README.md).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # (pinned as RUST_VERSION is: cargo-fuzz needs a nightly)
+      NIGHTLY: nightly-2026-10-17
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev
+      - name: Rust and cargo-fuzz
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal
+          cargo install cargo-fuzz --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Build the targets
+        run: cargo "+$NIGHTLY" fuzz build
+      - name: Each target for a minute
+        run: |
+          for t in $(cargo "+$NIGHTLY" fuzz list); do
+            echo "::group::$t"
+            mkdir -p "fuzz/corpus/$t"
+            seeds=()
+            [ -d "fuzz/seeds/$t" ] && seeds=("fuzz/seeds/$t")
+            cargo "+$NIGHTLY" fuzz run "$t" "fuzz/corpus/$t" "${seeds[@]}" -- -max_total_time=60 -rss_limit_mb=2560 -timeout=20
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
   packages:
     needs: version
     # The oldest supported base (glibc 2.35): the binary runs on it and newer.

@@ -184,10 +184,13 @@ pub fn clear() {
 
 /// The captures, newest first, at most MAX.
 pub fn load() -> Vec<Entry> {
-    match read(&file()) {
-        Ok(text) => merge(&text.lines().map(str::to_string).collect::<Vec<_>>()),
-        Err(_) => Vec::new(),
-    }
+    read(&file()).map(|text| parse(&text)).unwrap_or_default()
+}
+
+/// The list's text (a line per change, oldest first) as entries, newest
+/// first; lines that aren't entries are left out.
+pub fn parse(text: &str) -> Vec<Entry> {
+    merge(&text.lines().map(str::to_string).collect::<Vec<_>>())
 }
 
 /// When the list last changed (to know whether to read it again).

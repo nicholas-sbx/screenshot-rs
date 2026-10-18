@@ -885,6 +885,8 @@ pub fn blur_cover(base: &Image, src: IRect, dpr: f32, size: usize) -> Option<Ima
 /// would have to model it).
 pub fn pixelate(base: &Image, src: IRect, dpr: f32, size: usize, seed: Option<u64>) -> Option<Image> {
     let block = (PIXEL_BLOCK[size.min(2)] * dpr).round().max(4.0);
+    // (only what's on the picture)
+    let src = src.intersected(&base.rect());
     let crop = base.crop(src).ok()?;
     let nx = ((src.w as f32 / block).round() as u32).max(1);
     let ny = ((src.h as f32 / block).round() as u32).max(1);
@@ -912,6 +914,10 @@ pub fn pixelate(base: &Image, src: IRect, dpr: f32, size: usize, seed: Option<u6
 /// As `blur_cover`, its grain from `seed` (None: none).
 pub fn blur(base: &Image, src: IRect, dpr: f32, size: usize, seed: Option<u64>) -> Option<Image> {
     let k = (BLUR_STRENGTH[size.min(2)] * dpr).round().max(2.0) as i32;
+    let src = src.intersected(&base.rect());
+    if src.is_empty() {
+        return None;
+    }
     // Blend in what's beside it, so the edges don't show.
     let around = src.adjusted(-2 * k, -2 * k, 2 * k, 2 * k).intersected(&base.rect());
     let crop = base.crop(around).ok()?;

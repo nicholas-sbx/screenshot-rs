@@ -224,7 +224,8 @@ fn key_from_name(name: &str) -> Option<i32> {
     }
     let mut chars = name.chars();
     let c = chars.next()?;
-    if chars.next().is_some() {
+    // (one character, that can be shown: not a control character)
+    if chars.next().is_some() || c.is_control() {
         return None;
     }
     Some(c.to_uppercase().next().unwrap_or(c) as i32)
