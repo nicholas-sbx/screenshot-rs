@@ -221,6 +221,7 @@ fn all(tmp: &Path, out: &Option<PathBuf>) -> R {
     pointer_and_panels(tmp, out, desktop.clone())?;
     snapping(tmp, desktop.clone())?;
     recording(tmp, out, desktop.clone())?;
+    copying_text(tmp, desktop.clone())?;
     multi_monitor(tmp, out, desktop.clone())?;
     hidpi(tmp, out, desktop)?;
     Ok(())
@@ -763,6 +764,47 @@ fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
 
 /// Two monitors side by side: the toolbar follows the pointer, a selection
 /// crosses from one to the other and is cut from both pictures.
+/// The text tool: a drag (or Enter) hands over the screen's own pixels
+/// there, without the drawings, to be read. Without Tesseract nothing is
+/// chosen (its hint says why).
+fn copying_text(tmp: &Path, desktop: Arc<Image>) -> R {
+    println!("self-test: copying text");
+    let start = |request: Request| {
+        let mut s = session(test_config(tmp), request, vec![image_screen(desktop.clone(), (1600, 1000))], FakeRecorder { problem: None, span: false });
+        s.pointer_enter(0, Point::new(800.0, 700.0));
+        s.st.ocr_problem = None; // (whether Tesseract is here doesn't matter)
+        s
+    };
+    let mut s = start(Request { ocr: true, ..Default::default() });
+    check!(s.st.tool == Tool::Ocr, "{:?}", s.st.tool);
+    // A box drawn first, then O: what's read is the screen as it is.
+    tap(&mut s, 0, 0x42, "b", 0);
+    drag(&mut s, 0, Point::new(100.0, 100.0), Point::new(300.0, 250.0), 0);
+    tap(&mut s, 0, 0x4f, "o", 0);
+    check!(s.st.tool == Tool::Ocr, "{:?}", s.st.tool);
+    drag(&mut s, 0, Point::new(50.0, 60.0), Point::new(450.0, 360.0), 0);
+    match s.take_outcome() {
+        Some(Outcome::ReadText { image, dpr }) => {
+            check!(image.size() == (400, 300) && dpr == 1.0, "{:?} {dpr}", image.size());
+            check!(image.pixel(150, 40) == desktop.pixel(200, 100), "the box was read with the screen");
+        }
+        other => return Err(format!("the text tool gave {other:?}")),
+    }
+    // Enter: the whole screen.
+    let mut s = start(Request { ocr: true, ..Default::default() });
+    tap(&mut s, 0, key::RETURN, "\r", 0);
+    match s.take_outcome() {
+        Some(Outcome::ReadText { image, .. }) => check!(image.size() == (1600, 1000), "{:?}", image.size()),
+        other => return Err(format!("Enter with the text tool gave {other:?}")),
+    }
+    // No Tesseract: a drag chooses nothing.
+    let mut s = start(Request { ocr: true, ..Default::default() });
+    s.st.ocr_problem = crate::ocr::problem().or(Some("no Tesseract".into()));
+    drag(&mut s, 0, Point::new(50.0, 60.0), Point::new(450.0, 360.0), 0);
+    check!(!s.done && s.take_outcome().is_none(), "a drag without Tesseract ended the capture");
+    Ok(())
+}
+
 fn multi_monitor(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     let left = Arc::new(desktop.crop(IRect::new(0, 0, 800, 1000))?);
     let right = Arc::new(desktop.crop(IRect::new(800, 0, 800, 1000))?);

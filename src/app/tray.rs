@@ -86,8 +86,23 @@ struct Embedded {
 }
 
 /// The menu's keys, as the popup menu has them.
-const MENU_KEYS: [&str; 14] =
-    ["region", "window", "monitor", "screen", "last", "pin", "record", "region-delayed", "window-delayed", "annotate", "folder", "settings", "restart", "quit"];
+const MENU_KEYS: [&str; 15] = [
+    "region",
+    "window",
+    "monitor",
+    "screen",
+    "last",
+    "pin",
+    "record",
+    "ocr",
+    "region-delayed",
+    "window-delayed",
+    "annotate",
+    "folder",
+    "settings",
+    "restart",
+    "quit",
+];
 
 struct IconPaint<'a> {
     e: &'a mut Embedded,
@@ -140,7 +155,7 @@ fn menu_items(keys: &HashMap<String, String>, recording: bool) -> Vec<MenuItem> 
     let label = |a: &str| if a == "record" && recording { "Stop recording" } else { shortcuts::label(a) };
     // (Active window: the window active before the menu, once the menu has gone.)
     let mut items: Vec<MenuItem> =
-        ["region", "window", "monitor", "screen", "last", "pin", "record"].iter().map(|a| MenuItem::new(a, label(a), &k(a))).collect();
+        ["region", "window", "monitor", "screen", "last", "pin", "record", "ocr"].iter().map(|a| MenuItem::new(a, label(a), &k(a))).collect();
     items.extend([
         MenuItem::separator(),
         MenuItem::new("region-delayed", "Capture region in 3 seconds", ""),
@@ -344,6 +359,7 @@ impl App {
             "last" => (Mode::Last, false),
             "pin" => (Mode::Region, true),
             "record" => return self.record(delay),
+            "ocr" => return self.capture_later(Job { ocr: true, asked: at, ..Job::new(Mode::Region) }, delay),
             _ => return,
         };
         let job = Job { pin, asked: at, ..Job::new(mode) };
@@ -505,6 +521,7 @@ impl App {
             "restart" => self.restart(),
             "quit" => self.quit(),
             "record" => self.record(delay),
+            "ocr" => self.capture_later(Job { ocr: true, ..Job::new(Mode::Region) }, delay),
             _ => {
                 let name = match name {
                     "capture" => "region", // (older invocations)

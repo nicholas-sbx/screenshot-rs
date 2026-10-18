@@ -108,12 +108,25 @@ pub struct Config {
     pub record_system_audio: bool,
     pub record_cursor: bool,
     pub record_countdown: i64,
+    // Copying text (OCR)
+    /// Tesseract's languages, as "eng" or "eng+deu"
+    pub ocr_languages: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config::from_map(&Map::new())
     }
+}
+
+/// Tesseract's language codes in `text` ("eng+deu", "eng, deu" or "eng deu"),
+/// joined as it takes them; "eng" when there are none.
+pub fn ocr_languages(text: &str) -> String {
+    let codes: Vec<&str> = text
+        .split(|c: char| c == '+' || c == ',' || c.is_whitespace())
+        .filter(|c| !c.is_empty() && c.len() <= 32 && c.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .collect();
+    if codes.is_empty() { "eng".into() } else { codes.join("+") }
 }
 
 /// The value for `key` in `data` when it's usable as a bool.
@@ -253,6 +266,7 @@ impl Config {
             record_system_audio: b("record_system_audio", false),
             record_cursor: b("record_cursor", true),
             record_countdown: i("record_countdown", 3).clamp(0, 10),
+            ocr_languages: ocr_languages(&s("ocr_languages", "eng")),
         }
     }
 
@@ -312,6 +326,7 @@ impl Config {
         put("record_system_audio", self.record_system_audio.into());
         put("record_cursor", self.record_cursor.into());
         put("record_countdown", self.record_countdown.into());
+        put("ocr_languages", self.ocr_languages.clone().into());
         m
     }
 
@@ -616,6 +631,14 @@ mod tests {
         assert!(c.notify);
         assert_eq!(c.theme, "nord");
         assert_eq!(c.dim_opacity, 40);
+    }
+
+    #[test]
+    fn ocr_languages_are_cleaned_up() {
+        assert_eq!(Config::default().ocr_languages, "eng");
+        assert_eq!(cfg(json!({"ocr_languages": "eng, deu  chi_sim"})).ocr_languages, "eng+deu+chi_sim");
+        assert_eq!(cfg(json!({"ocr_languages": "eng+../../x; rm"})).ocr_languages, "eng+rm");
+        assert_eq!(cfg(json!({"ocr_languages": "  "})).ocr_languages, "eng");
     }
 
     #[test]

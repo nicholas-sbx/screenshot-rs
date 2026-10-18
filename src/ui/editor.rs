@@ -498,7 +498,7 @@ impl Editor {
     fn refresh_bar(&mut self) {
         let km = &self.keymap;
         let mut items = Vec::new();
-        for (tool, id, label) in TOOLS.iter().filter(|t| !matches!(t.0, Tool::Region | Tool::Record)) {
+        for (tool, id, label) in TOOLS.iter().filter(|t| !t.0.picks_area()) {
             let mut b = Item::new(id, Look::Icon { icon: id, size: 36.0 }, km.hint(label, &format!("tool.{id}")));
             b.active = *tool == self.tool;
             items.push(b);
@@ -803,7 +803,7 @@ impl Editor {
     }
 
     pub fn set_tool(&mut self, tool: Tool) {
-        if matches!(tool, Tool::Region | Tool::Record) {
+        if tool.picks_area() {
             return;
         }
         self.commit_text();

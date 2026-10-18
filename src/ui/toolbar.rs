@@ -117,18 +117,17 @@ fn build(v: &View<'_>) -> Vec<Item> {
     let mut items = vec![Item::new("grip", Look::Grip, "")];
     for (tool, id, label) in TOOLS.iter().filter(|t| t.0 != Tool::Crop) {
         if *tool == Tool::Record && !v.can_record {
-            items.push(Item::new("divider.record", Look::Divider, ""));
             continue;
         }
         let mut b = Item::new(id, Look::Icon { icon: id, size: 36.0 }, km.hint(label, &format!("tool.{id}")));
         b.active = *tool == v.tool;
-        b.dimmed = recording && !matches!(tool, Tool::Region | Tool::Record);
+        b.dimmed = recording && !tool.picks_area();
         if *tool == Tool::Record {
             b.tint = Some(REC);
         }
         items.push(b);
-        if *tool == Tool::Record {
-            items.push(Item::new("divider.record", Look::Divider, ""));
+        if *tool == Tool::Ocr {
+            items.push(Item::new("divider.modes", Look::Divider, ""));
         }
     }
     items.push(Item::new("divider.tools", Look::Divider, ""));
@@ -235,10 +234,10 @@ mod tests {
     fn layout_like_qt() {
         let km = Keymap::new(&BTreeMap::new());
         let t = Toolbar::new(&view(&km, &crate::render::theme::SWATCHES));
-        // grip 18, 14 tools of 36, 4 dividers of 13, 8 swatches of 26,
+        // grip 18, 15 tools of 36, 4 dividers of 13, 8 swatches of 26,
         // size 40, codes + snap + undo + redo + beautify + pin + screen + close (8 x 36)
-        let widths = 18.0 + 14.0 * 36.0 + 4.0 * 13.0 + 8.0 * 26.0 + 40.0 + 8.0 * 36.0;
-        let n = 1 + 14 + 4 + 8 + 1 + 8;
+        let widths = 18.0 + 15.0 * 36.0 + 4.0 * 13.0 + 8.0 * 26.0 + 40.0 + 8.0 * 36.0;
+        let n = 1 + 15 + 4 + 8 + 1 + 8;
         assert_eq!(t.size, (6.0 + widths + 2.0 * (n as f32 - 1.0) + 8.0, 48.0));
         let undo = t.items.iter().find(|i| i.id == "undo").unwrap();
         assert!(!undo.enabled);

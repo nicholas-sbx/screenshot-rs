@@ -88,6 +88,8 @@ pub struct State {
     pub hint: Option<String>,
     /// why recording in the chosen format can't work here
     pub record_problem: Option<String>,
+    /// why text can't be copied from the screen here (no Tesseract)
+    pub ocr_problem: Option<String>,
     /// The area chosen to record (global logical pixels): every monitor
     /// it reaches shows its part, handles and all, so it's moved and
     /// resized from any of them.
@@ -142,6 +144,7 @@ impl State {
             countdown: None,
             hint: None,
             record_problem: None,
+            ocr_problem: None,
             rec_area: None,
             rec_home: 0,
             area_moving: false,

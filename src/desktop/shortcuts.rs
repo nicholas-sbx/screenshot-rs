@@ -26,6 +26,7 @@ pub const ACTIONS: &[(&str, &str, &str)] = &[
     ("last", "Capture last region", ""),
     ("pin", "Pin region to screen", ""),
     ("record", "Record screen", ""),
+    ("ocr", "Copy text from screen", ""),
 ];
 
 // KGlobalAccel::SetShortcutFlag

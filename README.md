@@ -107,6 +107,7 @@ Both come with the same default keys. KDE gives a key to whichever registered it
 | <kbd>R</kbd> | region tool (back to capture mode) |
 | <kbd>M</kbd> | show or hide the mouse pointer in the picture |
 | <kbd>V</kbd>, then <kbd>Ctrl</kbd> while resizing the area | record tool; resize the area about its centre |
+| <kbd>O</kbd> | copy text: drag over text (or click a window) to copy the text in it ([OCR](#copying-text-from-the-screen)) |
 | <kbd>S</kbd> | select tool: click a drawing to move, resize, restyle or delete it (<kbd>Delete</kbd>, arrow keys to nudge) |
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> | Beautify: put this and later captures on a background |
 | <kbd>P</kbd> <kbd>L</kbd> <kbd>A</kbd> <kbd>B</kbd> <kbd>F</kbd> <kbd>E</kbd> <kbd>H</kbd> <kbd>T</kbd> <kbd>X</kbd> <kbd>U</kbd> <kbd>N</kbd> | pen, line, arrow, box, filled box, ellipse, highlighter, text, pixelate, blur, counter |
@@ -146,6 +147,12 @@ Choose **Record screen** in the tray menu (or its shortcut, or <kbd>V</kbd> on t
 
 Pausing and GIFs also need `ffmpeg`. The recorders are programs of their own: no frame passes through Flatshot RS.
 
+### Copying text from the screen
+
+The **copy text** tool (<kbd>O</kbd>, beside capture and record on the toolbar; **Copy text from screen** in the tray menu and as a shortcut; `flatshot-rs --ocr`) reads the text in an area: drag over it, click a window, or press <kbd>Enter</kbd> for the whole monitor. The text is copied, printed on stdout, and shown in a notification. It reads the screen as it is, without your drawings or the pointer.
+
+The reading is done by [Tesseract](https://github.com/tesseract-ocr/tesseract) (install `tesseract` and its English data: `tesseract-ocr-eng` on Debian and Ubuntu, `tesseract-data-eng` on Arch, `tesseract-langpack-eng` on Fedora). It runs only while an area is read, as a program of its own, so the tool costs nothing the rest of the time. Before it reads, the area is made grey, light text on a dark theme is turned dark on light, and small text is enlarged to the size Tesseract reads best, which on screen text at 100% scale gets nearly every character right. Other languages: Settings → Capture → Copying text (Tesseract's codes, such as `eng+deu`, each with its language data installed).
+
 ### Command line
 
 ```
@@ -156,6 +163,7 @@ flatshot-rs -d 3                 after 3 seconds
 flatshot-rs -o file.png          save there ("-" writes PNG to stdout)
 flatshot-rs --no-copy --no-save  just print the path / don't keep a file
 flatshot-rs --record             record an area (stops the recording in progress)
+flatshot-rs --ocr                copy the text in an area (needs tesseract)
 flatshot-rs -i picture.png       annotate a picture
 flatshot-rs --settings           the settings window
 flatshot-rs --tray               the tray app

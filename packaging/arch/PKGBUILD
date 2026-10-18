@@ -23,6 +23,7 @@ optdepends=(
     'ffmpeg: pausing a recording, GIFs, and screen recording on X11'
     'wf-recorder: screen recording on wlroots compositors'
     'xclip: on X11, keep the clipboard after a one-off capture exits'
+    'tesseract-data-eng: copy text from the screen (OCR; other tesseract-data-* for more languages)'
 )
 options=('!lto')
 if [ -z "${FLATSHOT_SRC:-}" ]; then

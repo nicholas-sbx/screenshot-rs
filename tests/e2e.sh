@@ -164,6 +164,25 @@ finish $pid 3
 [ $code = 0 ] && pass "settings closed with Esc" || fail "the settings window didn't close (exit $code)"
 grep -q '"dim_opacity": 15,' "$XDG_CONFIG_HOME/flatshot-rs/config.json" && pass "setting saved" || fail "setting not saved"
 
+# 5b. Copying text (with Tesseract): an area of the settings window's
+# sidebar dragged over with --ocr, its text read and copied.
+if command -v tesseract > /dev/null; then
+    $BIN --settings -v > "$work/settings2.log" 2>&1 &
+    settings=$!
+    up "$work/settings2.log" || true
+    $BIN --ocr -v > "$work/ocr.log" 2>&1 &
+    pid=$!
+    up "$work/ocr.log" || true
+    $EX/inject move 300 300 sleep 200 drag 0 30 240 220
+    finish $pid 30
+    kill $settings 2>/dev/null || true
+    [ $code = 0 ] && pass "--ocr exited 0" || { fail "--ocr exited $code"; cat "$work/ocr.log"; }
+    text=$(wl-paste --no-newline 2>/dev/null || true)
+    case "$text" in *Capture*Recording*) pass "text copied from the screen" ;; *) fail "the text copied: '$text'"; tail -n 5 "$work/ocr.log" ;; esac
+else
+    echo "skip: copying text (no tesseract)"
+fi
+
 # 6. Screen recording: an area chosen on the overlay, recorded by
 # wf-recorder, stopped from the bar under it (or by Ctrl+C), saved.
 video_check() { # what, file, "WxH"

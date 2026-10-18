@@ -7,10 +7,10 @@ Exec=flatshot-rs --tray
 Icon=flatshot-rs
 Terminal=false
 Categories=Graphics;Utility;
-Keywords=screenshot;capture;snip;qr;barcode;annotate;flatshot;
+Keywords=screenshot;capture;snip;qr;barcode;annotate;ocr;text;flatshot;
 StartupNotify=false
 StartupWMClass=flatshot-rs
-Actions=Region;Monitor;Full;LastRegion;Pin;Settings;
+Actions=Region;Monitor;Full;LastRegion;Pin;CopyText;Settings;
 
 [Desktop Action Region]
 Name=Capture Region
@@ -31,6 +31,10 @@ Exec=flatshot-rs --last-region
 [Desktop Action Pin]
 Name=Pin Region to Screen
 Exec=flatshot-rs --pin
+
+[Desktop Action CopyText]
+Name=Copy Text from Screen
+Exec=flatshot-rs --ocr
 
 [Desktop Action Settings]
 Name=Settings

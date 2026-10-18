@@ -160,6 +160,55 @@ pub fn spawn_detached(argv: &[&OsStr], env: &[(&str, &OsStr)]) -> bool {
     }
 }
 
+/// Run `cmd` to the end with `input` on its stdin (at most `timeout`):
+/// what it writes out (at most `max` bytes kept) as the result, its last
+/// line of errors as the failure. Its output and errors are read as they
+/// come, so neither can fill up and stall it.
+pub fn run_with_input(cmd: &mut Command, input: Vec<u8>, timeout: std::time::Duration, max: u64) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    fn drain(pipe: Option<impl Read + Send + 'static>, max: u64) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.by_ref().take(max).read_to_end(&mut kept);
+                let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+            }
+            kept
+        })
+    }
+    let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    let stdin = child.stdin.take();
+    let writer = std::thread::spawn(move || {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(&input); // (and closed: the end of it)
+        }
+    });
+    let (out, err) = (drain(child.stdout.take(), max), drain(child.stderr.take(), 64 << 10));
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err("took too long".to_string());
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            Err(e) => break Err(e.to_string()),
+        }
+    };
+    let _ = writer.join();
+    let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    match status? {
+        s if s.success() => Ok(out),
+        s => {
+            let err = String::from_utf8_lossy(&err);
+            let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+            Err(if last.is_empty() { format!("failed ({s})") } else { displayable(last) })
+        }
+    }
+}
+
 /// [`spawn_detached`] for plain strings.
 pub fn spawn(argv: &[&str]) -> bool {
     let argv: Vec<&OsStr> = argv.iter().map(OsStr::new).collect();

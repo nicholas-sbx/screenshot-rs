@@ -27,6 +27,7 @@ pub mod ipc;
 pub mod keys;
 pub mod keyseq;
 pub mod mem;
+pub mod ocr;
 pub mod platform;
 pub mod record;
 pub mod render;

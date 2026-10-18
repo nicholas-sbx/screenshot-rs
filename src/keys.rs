@@ -19,6 +19,7 @@ pub enum Where {
 pub const BINDINGS: &[(&str, &str, &str, Where)] = &[
     ("tool.region", "Capture region", "R", Where::Capture),
     ("tool.record", "Record screen", "V", Where::Capture),
+    ("tool.ocr", "Copy text from the screen (OCR)", "O", Where::Capture),
     ("tool.select", "Select, move and resize drawings", "S", Where::Both),
     ("tool.pen", "Pen", "P", Where::Both),
     ("tool.line", "Line", "L", Where::Both),

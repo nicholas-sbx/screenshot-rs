@@ -15,6 +15,7 @@ use crate::render::theme::Color;
 /// Every icon's name.
 pub const NAMES: &[&str] = &[
     "region",
+    "ocr",
     "pen",
     "line",
     "arrow",
@@ -160,6 +161,16 @@ fn draw_icon(c: &mut Ctx<'_, '_>, name: &str) {
             &[(9.0, 20.0), (4.0, 20.0), (4.0, 15.0)],
             &[(12.0, 9.5), (12.0, 14.5)],
             &[(9.5, 12.0), (14.5, 12.0)],
+        ]),
+        // (the region's corners round a letter: the text in an area)
+        "ocr" => c.lines(&[
+            &[(4.0, 8.5), (4.0, 4.0), (8.5, 4.0)],
+            &[(15.5, 4.0), (20.0, 4.0), (20.0, 8.5)],
+            &[(20.0, 15.5), (20.0, 20.0), (15.5, 20.0)],
+            &[(8.5, 20.0), (4.0, 20.0), (4.0, 15.5)],
+            &[(8.5, 9.5), (8.5, 8.0), (15.5, 8.0), (15.5, 9.5)],
+            &[(12.0, 8.0), (12.0, 16.0)],
+            &[(10.5, 16.0), (13.5, 16.0)],
         ]),
         // (a move cursor: four arrows out from the middle)
         "select" => c.lines(&[

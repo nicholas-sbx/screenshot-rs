@@ -46,6 +46,8 @@ pub struct Request {
     pub scan: bool,
     /// open with the record tool
     pub record: bool,
+    /// open with the tool that copies text (OCR)
+    pub ocr: bool,
     /// a picture shown for annotating, not the screen
     pub image: bool,
 }
@@ -118,6 +120,12 @@ pub enum Outcome {
     },
     /// A code's text, to copy.
     CodeText(String),
+    /// An area's picture (`dpr` pixels per logical pixel), its text to be
+    /// read and copied.
+    ReadText {
+        image: Image,
+        dpr: f32,
+    },
     /// A code's link, to open.
     OpenLink(String),
     Record(Box<RecordJob>),
@@ -218,6 +226,8 @@ pub struct Session {
     codes: Vec<Code>,
     /// codes are to be looked for, once shown (hidden at the start: not yet)
     scan_pending: bool,
+    /// whether text can be copied here has been found out (st.ocr_problem)
+    ocr_checked: bool,
     /// pictures still being looked through for codes
     scans_left: usize,
     /// the overlay whose select tool holds a drawing being dragged (which
@@ -267,6 +277,8 @@ impl Session {
         }
         if request.record && st.can_record {
             st.tool = Tool::Record;
+        } else if request.ocr {
+            st.tool = Tool::Ocr;
         }
         st.colour_tool = if st.tool.uses_color() { st.tool } else { Tool::Pen };
         st.pin_mode = request.pin;
@@ -275,6 +287,8 @@ impl Session {
             "image"
         } else if st.tool == Tool::Record {
             "recording"
+        } else if st.tool == Tool::Ocr {
+            "text copy"
         } else {
             "region capture"
         };
@@ -323,6 +337,7 @@ impl Session {
             waker,
             cancelled: Arc::new(AtomicBool::new(false)),
             scan_pending: false,
+            ocr_checked: false,
             scans_left: 0,
             drag_owner: None,
             pointer: vec![None; n],
@@ -694,7 +709,7 @@ impl Session {
         if self.done || o >= self.overlays.len() || steps == 0.0 {
             return;
         }
-        if !(matches!(self.st.tool, Tool::Region | Tool::Record) && self.st.cfg.show_loupe) {
+        if !(self.st.tool.picks_area() && self.st.cfg.show_loupe) {
             return;
         }
         self.st.loupe_zoom = (self.st.loupe_zoom * 1.25f32.powf(steps)).clamp(LOUPE_ZOOM.0, LOUPE_ZOOM.1);
@@ -822,7 +837,7 @@ impl Session {
         } else if ctrl && press.key == key::Y {
             self.redo(); // (besides the Redo key)
         } else if enter || save_keys {
-            self.capture(target, None, None);
+            self.whole_screen(target);
         }
     }
 
@@ -1006,7 +1021,7 @@ impl Session {
         self.commit_text();
         self.clock.step("chosen", "");
         let area = area.intersected(&self.virtual_rect);
-        let image = match self.render_desktop(area) {
+        let image = match self.render_desktop(area, true) {
             Ok(img) => img,
             Err(e) => return self.fail(&e),
         };
@@ -1018,9 +1033,45 @@ impl Session {
         self.finish(Outcome::Image { image, shot, at: Some(area), pin });
     }
 
-    /// `area` (global logical) of the whole desktop with the drawings, at
-    /// the highest of the scales of the monitors it's on.
-    fn render_desktop(&self, area: IRect) -> Result<Image, String> {
+    /// Copy the text in `rect` (overlay `o`'s logical pixels; None: all of
+    /// it): it's read from the screen as it is, without the drawings or the
+    /// pointer.
+    fn read_text(&mut self, o: usize, rect: Option<Rect>) {
+        if self.done || self.st.ocr_problem.is_some() {
+            return;
+        }
+        self.commit_text();
+        self.clock.step("chosen", "");
+        let ov = &self.overlays[o];
+        let picture = ov.plain.as_ref().unwrap_or(&ov.base);
+        let (image, dpr) = (picture.crop(ov.render_rect(rect)), ov.dpr);
+        self.close_overlays();
+        match image {
+            Ok(image) => self.finish(Outcome::ReadText { image, dpr }),
+            Err(e) => self.fail(&e),
+        }
+    }
+
+    /// As `read_text`, of `area` (global logical) across monitors.
+    fn read_text_span(&mut self, area: IRect) {
+        if self.done || self.st.ocr_problem.is_some() {
+            return;
+        }
+        self.commit_text();
+        self.clock.step("chosen", "");
+        let area = area.intersected(&self.virtual_rect);
+        let (image, dpr) = (self.render_desktop(area, false), self.st.scale_for(area.to_f()));
+        self.close_overlays();
+        match image {
+            Ok(image) => self.finish(Outcome::ReadText { image, dpr }),
+            Err(e) => self.fail(&e),
+        }
+    }
+
+    /// `area` (global logical) of the whole desktop with the drawings (or
+    /// as the screens are, without them or the pointer), at the highest of
+    /// the scales of the monitors it's on.
+    fn render_desktop(&self, area: IRect, drawings: bool) -> Result<Image, String> {
         let scale = self.st.scale_for(area.to_f());
         let (w, h) = ((area.w as f32 * scale).round().max(1.0) as u32, (area.h as f32 * scale).round().max(1.0) as u32);
         let mut out = Image::filled(w, h, 0xFF00_0000)?;
@@ -1031,9 +1082,10 @@ impl Session {
                 continue;
             }
             let d = ov.dpr;
+            let picture = if drawings { &ov.base } else { ov.plain.as_ref().unwrap_or(&ov.base) };
             let src =
                 IRect::new(py_round((part.x - g.x) as f32 * d), py_round((part.y - g.y) as f32 * d), py_round(part.w as f32 * d), py_round(part.h as f32 * d))
-                    .intersected(&ov.base.rect());
+                    .intersected(&picture.rect());
             let dst = IRect::new(
                 ((part.x - area.x) as f32 * scale).round() as i32,
                 ((part.y - area.y) as f32 * scale).round() as i32,
@@ -1043,7 +1095,7 @@ impl Session {
             if src.is_empty() || dst.is_empty() {
                 continue;
             }
-            let piece = ov.base.crop(src)?;
+            let piece = picture.crop(src)?;
             if (piece.width() as i32, piece.height() as i32) == (dst.w, dst.h) {
                 out.blit(&piece, dst.x, dst.y);
             } else {
@@ -1053,7 +1105,7 @@ impl Session {
         // The drawings, wherever they reach: pixelate and blur take what's
         // under them from this picture of the whole area, so one reaching
         // across monitors covers both parts.
-        if self.overlays.iter().any(|o| o.annotations.iter().any(|s| !s.hidden)) {
+        if drawings && self.overlays.iter().any(|o| o.annotations.iter().any(|s| !s.hidden)) {
             let under = out.clone();
             let mut p = Painter::new(out.pixmap_mut(), scale);
             let mut drawn: Vec<Shape> = Vec::new();
@@ -1093,6 +1145,10 @@ impl Session {
             self.disarm();
         }
         self.st.record_problem = if self.st.tool == Tool::Record { self.record_problem() } else { None };
+        if self.st.tool == Tool::Ocr && !self.ocr_checked {
+            self.ocr_checked = true;
+            self.st.ocr_problem = crate::ocr::problem();
+        }
         self.sync_toolbars();
         self.refresh_toolbars();
         for o in 0..self.overlays.len() {
@@ -1368,6 +1424,8 @@ impl Session {
             self.disarm();
             let r = self.overlays[o].rect();
             self.arm(o, r, None);
+        } else if self.st.tool == Tool::Ocr {
+            self.read_text(o, None);
         } else {
             self.capture(o, None, None);
         }
@@ -1439,7 +1497,7 @@ impl Session {
         shot.monitor = ov.output.name.clone();
         self.name_source(&mut shot, window);
         let spanning = !g.contains_rect(&area);
-        let thumbnail = if spanning && self.may_span { self.render_desktop(area) } else { ov.render(Some(rect)) };
+        let thumbnail = if spanning && self.may_span { self.render_desktop(area, true) } else { ov.render(Some(rect)) };
         let thumbnail = match thumbnail {
             Ok(t) => t,
             Err(e) => return self.fail(&e),
@@ -2582,7 +2640,10 @@ impl Session {
             self.rec_drag = Some((o, h, pos, r));
             self.st.area_moving = true;
             self.refresh();
-        } else if matches!(tool, Tool::Region | Tool::Record) {
+        } else if tool.picks_area() {
+            if tool == Tool::Ocr && self.st.ocr_problem.is_some() {
+                return; // (its hint says why)
+            }
             self.disarm();
             let pos = self.snapped(o, pos, mods);
             self.overlays[o].sel_origin = Some(crate::ui::shapes::Drag::new(pos, false));
@@ -2642,7 +2703,7 @@ impl Session {
             ov.selection.motion(&mut ov.annotations, local, mods);
             return;
         }
-        let selecting = matches!(self.st.tool, Tool::Region | Tool::Record) && self.overlays[o].active.is_none();
+        let selecting = self.st.tool.picks_area() && self.overlays[o].active.is_none();
         // Where the selection would start or end (the crosshair shows it).
         let snap = if selecting && self.st.snap_edges { Some(self.snapped(o, pos, mods)) } else { None };
         self.overlays[o].snap_point = snap;
@@ -2717,6 +2778,13 @@ impl Session {
                 }
                 let r = rect.unwrap_or(self.overlays[o].rect());
                 self.arm(o, r, window);
+            } else if self.st.tool == Tool::Ocr {
+                match (window.and_then(|w| self.st.windows.get(w)), rect) {
+                    // (all of a window, or an area, that crosses monitors)
+                    (Some(win), _) if spans && !g.contains_rect(&win.rect) => self.read_text_span(win.rect),
+                    (_, Some(r)) if spans && !self.overlays[o].rect().contains_rect(&r) => self.read_text_span(r.translated(g.top_left().to_f()).aligned()),
+                    _ => self.read_text(o, rect),
+                }
             } else if let Some(w) = window
                 && spans
                 && let Some(win) = self.st.windows.get(w)

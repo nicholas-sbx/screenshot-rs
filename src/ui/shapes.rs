@@ -35,6 +35,8 @@ impl Mods {
 pub enum Tool {
     Region,
     Record,
+    /// copy the text in an area (OCR)
+    Ocr,
     Select,
     Pen,
     Line,
@@ -55,6 +57,7 @@ pub enum Tool {
 pub const TOOLS: &[(Tool, &str, &str)] = &[
     (Tool::Region, "region", "Capture region"),
     (Tool::Record, "record", "Record screen"),
+    (Tool::Ocr, "ocr", "Copy text from the screen (OCR)"),
     (Tool::Select, "select", "Select, move and resize drawings"),
     (Tool::Pen, "pen", "Pen"),
     (Tool::Line, "line", "Line"),
@@ -82,6 +85,12 @@ impl Tool {
     /// The tools that draw in the chosen colour.
     pub fn uses_color(self) -> bool {
         matches!(self, Tool::Pen | Tool::Line | Tool::Arrow | Tool::Rect | Tool::Solid | Tool::Ellipse | Tool::Marker | Tool::Text | Tool::Counter)
+    }
+
+    /// The tools that choose an area of the screen, not drawings: to
+    /// capture, record or read.
+    pub fn picks_area(self) -> bool {
+        matches!(self, Tool::Region | Tool::Record | Tool::Ocr)
     }
 
     /// Tools dragged out from a corner (Shift/Ctrl/Alt change them).

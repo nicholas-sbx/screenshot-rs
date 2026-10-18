@@ -6,6 +6,7 @@ mod capture;
 mod caret;
 mod editor;
 mod finish;
+mod ocr;
 mod pins;
 mod recording;
 mod settings;
@@ -96,6 +97,8 @@ pub struct App {
     restarting: bool,
     /// the text caret's blink
     blink: caret::Blink,
+    /// areas whose text is being read
+    reading: Vec<ocr::Reading>,
 }
 
 impl Painted for Session {
@@ -279,6 +282,7 @@ impl App {
         self.poll_open_dialog();
         self.poll_settings();
         self.poll_recording();
+        self.poll_reading();
         if let Some(rx) = &self.paste_rx
             && let Ok(text) = rx.try_recv()
         {
@@ -484,6 +488,7 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         quit_after_recording: false,
         restarting: false,
         blink: caret::Blink::default(),
+        reading: Vec::new(),
     };
     match queue {
         Some(mut queue) => {
@@ -556,7 +561,7 @@ pub fn run_once(args: &Args) -> i32 {
         }
         asked = Instant::now();
     }
-    let job = Job { mode, pin: args.pin, record: args.record, scan: !args.no_scan, asked };
+    let job = Job { mode, pin: args.pin, record: args.record, ocr: args.ocr, scan: !args.no_scan, asked };
     app.start_capture(job);
     app.after_dispatch(); // (it may have ended already)
     while app.exit.is_none() {

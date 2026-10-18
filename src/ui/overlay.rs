@@ -310,7 +310,7 @@ impl Overlay {
     }
 
     /// The picture's pixels for `rect` (logical; None: all of it).
-    fn render_rect(&self, rect: Option<Rect>) -> IRect {
+    pub fn render_rect(&self, rect: Option<Rect>) -> IRect {
         let dpr = self.dpr;
         match rect {
             None => self.base.rect(),
@@ -470,7 +470,7 @@ impl Overlay {
 
     fn scene(&self, st: &State) -> Scene {
         let mut elements = Vec::new();
-        let region = matches!(st.tool, Tool::Region | Tool::Record);
+        let region = st.tool.picks_area();
         let selection = self.sel_rect.or(self.span_rect);
         let hover = self.hovered(st);
         let bg_dim = self.dim(st);
@@ -647,10 +647,7 @@ impl Overlay {
     /// the window under the pointer show. Not while the area to record
     /// counts down or is moved, nor over it (its handles move and resize it).
     pub fn picking(&self, st: &State) -> bool {
-        matches!(st.tool, Tool::Region | Tool::Record)
-            && st.countdown.is_none()
-            && !st.area_moving
-            && !self.cursor_pos.is_some_and(|p| self.handle_at(st, p).is_some())
+        st.tool.picks_area() && st.countdown.is_none() && !st.area_moving && !self.cursor_pos.is_some_and(|p| self.handle_at(st, p).is_some())
     }
 
     /// The window under the pointer here, else (across monitors) the one
@@ -757,6 +754,8 @@ impl Overlay {
         let label = format!("{pw} × {ph}");
         if st.tool == Tool::Record {
             format!("Record  ·  {label}")
+        } else if st.tool == Tool::Ocr {
+            format!("Copy text  ·  {label}")
         } else if st.pin_mode {
             format!("Pin  ·  {label}")
         } else {
@@ -814,7 +813,7 @@ impl Overlay {
             snap,
             ((pos.x * 64.0) as i32, (pos.y * 64.0) as i32),
             self.mark_color(st),
-            st.tool == Tool::Region || st.tool == Tool::Record,
+            st.tool.picks_area(),
             st.theme_key,
             Arc::as_ptr(&self.base) as usize,
         ));
@@ -829,7 +828,7 @@ impl Overlay {
         let region_local = region.translated(-origin.0, -origin.1);
         let region_rect = region.to_f();
         let region_logical = Rect::new(region_rect.x / self.dpr, region_rect.y / self.dpr, region_rect.w / self.dpr, region_rect.h / self.dpr);
-        let rtool = matches!(st.tool, Tool::Region | Tool::Record);
+        let rtool = st.tool.picks_area();
         let selection = self.sel_rect.or(self.span_rect);
         let hover = self.hovered(st);
         let dim = self.dim(st);
@@ -1031,7 +1030,7 @@ impl Overlay {
         let around = (a - 2 * u, b - 2 * u, cell + 5 * u, cell + 5 * u);
         let mut marks = cut(ring, hole);
         let mut edges = cut(around, hole);
-        if matches!(st.tool, Tool::Region | Tool::Record) {
+        if st.tool.picks_area() {
             let cap = self.dpr;
             let mut lx = None;
             let mut ly = None;
@@ -1356,6 +1355,8 @@ pub const DRAW_HINT: &str = "Draw on the screen  ·  {tool.region} then drag to 
 pub const RECORD_PICK: &str = "Drag the area to record  ·  Click for whole screen  ·  Esc to cancel";
 pub const RECORD_WINDOWS: &str = "Drag the area to record  ·  Click a window  ·  Enter for whole screen  ·  Esc to cancel";
 pub const RECORD_ARMED: &str = "Drag the edges to adjust  ·  Drag or click elsewhere for another  ·  Enter to start  ·  Esc to go back";
+pub const OCR_PICK: &str = "Drag over text to copy it  ·  Click for whole screen  ·  Esc to cancel";
+pub const OCR_WINDOWS: &str = "Drag over text to copy it  ·  Click a window to copy its text  ·  Esc to cancel";
 
 /// A hint with its {action} keys filled in; a part whose key is unset goes.
 pub fn with_keys(text: &str, keymap: &crate::keys::Keymap) -> String {
@@ -1396,6 +1397,13 @@ fn hint_text(st: &State, o: &Overlay) -> String {
     }
     if st.eyedropper {
         return st.hint.clone().unwrap_or_else(|| EYEDROPPER_HINT.into());
+    }
+    if st.tool == Tool::Ocr {
+        return match (&st.hint, &st.ocr_problem) {
+            (Some(h), _) | (None, Some(h)) => h.clone(),
+            _ if !o.windows.is_empty() => OCR_WINDOWS.into(),
+            _ => OCR_PICK.into(),
+        };
     }
     if let Some(h) = &st.hint {
         return h.clone();

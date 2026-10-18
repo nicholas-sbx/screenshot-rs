@@ -560,6 +560,20 @@ impl Settings {
                 rows: vec![Row::new("show_codes", "Detect and show", "Also toggled with Q or the code button on the toolbar.", Control::Toggle(c.show_codes))],
             },
             Block::Card {
+                heading: "Copying text".into(),
+                rows: vec![{
+                    let mut row = Row::new(
+                        "ocr_languages",
+                        "Languages to read",
+                        "The text tool on the toolbar (O) copies the text in an area, read by Tesseract. Its codes for the languages, such as eng or eng+deu; each needs its language data installed.",
+                        Control::None,
+                    )
+                    .below(line(&c.ocr_languages, "eng", vec![]));
+                    row.error = crate::ocr::problem();
+                    row
+                }],
+            },
+            Block::Card {
                 heading: "Advanced".into(),
                 rows: vec![
                     Row::new(
@@ -2145,6 +2159,7 @@ fn sc_id(action: &str) -> &'static str {
         "last" => "sc.last",
         "pin" => "sc.pin",
         "record" => "sc.record",
+        "ocr" => "sc.ocr",
         _ => "sc.unknown",
     }
 }
