@@ -232,7 +232,7 @@ pub struct Shape {
 pub const TEXT_SIZES_PX: [f32; 3] = [18.0, 26.0, 38.0];
 const TEXT_PAD: f32 = 6.0;
 const COUNTER_RADII: [f32; 3] = [11.0, 14.0, 18.0];
-const BLUR_STRENGTH: [f32; 3] = [5.0, 8.0, 12.0];
+const BLUR_STRENGTH: [f32; 3] = [8.0, 12.0, 18.0];
 
 impl Shape {
     /// A new shape for a press of `tool` at `pos` (None for tools that
@@ -658,13 +658,44 @@ fn paint_cover(p: &mut Painter<'_>, r: Rect, base: &Image, dpr: f32, size: usize
     p.draw_image(cover, target, cover.rect().to_f(), false);
 }
 
-/// Blocks of the average colour of what they cover.
+// Pixelate and blur leave nothing exact behind to match: tools that read
+// pixelated text back render candidates in the same font, pixelate them
+// alike and pick the closest, which works because each block is exactly
+// the average of its own pixels (and a blur is a fixed sum of them).
+// Here each block (and each pixel of the blur's small picture) is the
+// average of a window shifted a little at random, so where it was taken
+// from is unknown just where the glyphs' edges are; it blends into its
+// neighbours; and it gets a little random grain, the same on red, green
+// and blue (so it reads as texture, not coloured specks). The shifts and
+// the grain are what an attacker can't model. A filled rectangle is still
+// the one sure way.
+
+/// A pixelated block's side (logical pixels), by size.
+const PIXEL_BLOCK: [f32; 3] = [10.0, 15.0, 22.0];
+
+/// Blocks of the colour of what's under them and round them, grained.
 pub fn pixelate_cover(base: &Image, src: IRect, dpr: f32, size: usize) -> Option<Image> {
-    let block = ((6.0 + size as f32 * 5.0) * dpr).round().max(4.0) as i32;
+    pixelate(base, src, dpr, size, Some(random_seed()))
+}
+
+/// Blurred past reading, grained.
+pub fn blur_cover(base: &Image, src: IRect, dpr: f32, size: usize) -> Option<Image> {
+    blur(base, src, dpr, size, Some(random_seed()))
+}
+
+/// As `pixelate_cover`, its grain from `seed` (None: none, as an attacker
+/// would have to model it).
+pub fn pixelate(base: &Image, src: IRect, dpr: f32, size: usize, seed: Option<u64>) -> Option<Image> {
+    let block = (PIXEL_BLOCK[size.min(2)] * dpr).round().max(4.0);
     let crop = base.crop(src).ok()?;
-    let nx = (src.w / block).max(1) as u32;
-    let ny = (src.h / block).max(1) as u32;
-    let small = crop.scaled_area(nx, ny).ok()?;
+    let nx = ((src.w as f32 / block).round() as u32).max(1);
+    let ny = ((src.h as f32 / block).round() as u32).max(1);
+    let mut rng = seed.map(Grain::new);
+    let (small, detail) = averages(&crop, nx, ny, rng.as_mut())?;
+    let mut small = tent(&small);
+    if let Some(rng) = &mut rng {
+        rng.add(&mut small, &tent_values(&detail, nx as usize), PIXEL_GRAIN);
+    }
     // Back up to size, each block one colour (nearest neighbour).
     let mut out = Image::new(src.w as u32, src.h as u32).ok()?;
     for y in 0..src.h as u32 {
@@ -680,19 +711,163 @@ pub fn pixelate_cover(base: &Image, src: IRect, dpr: f32, size: usize) -> Option
     Some(out)
 }
 
-/// Blurred past reading: shrunk (averaging), softened, grown back smoothly.
-pub fn blur_cover(base: &Image, src: IRect, dpr: f32, size: usize) -> Option<Image> {
+/// As `blur_cover`, its grain from `seed` (None: none).
+pub fn blur(base: &Image, src: IRect, dpr: f32, size: usize, seed: Option<u64>) -> Option<Image> {
     let k = (BLUR_STRENGTH[size.min(2)] * dpr).round().max(2.0) as i32;
     // Blend in what's beside it, so the edges don't show.
     let around = src.adjusted(-2 * k, -2 * k, 2 * k, 2 * k).intersected(&base.rect());
     let crop = base.crop(around).ok()?;
     let sw = (around.w / k).max(1) as u32;
     let sh = (around.h / k).max(1) as u32;
-    let small = crop.scaled_area(sw, sh).ok()?;
-    let half = small.scaled_area((sw / 2).max(1), (sh / 2).max(1)).ok()?;
-    let softer = half.scaled_bilinear(sw, sh).ok()?;
-    let big = softer.scaled_bilinear(around.w as u32, around.h as u32).ok()?;
+    let mut rng = seed.map(Grain::new);
+    let (small, detail) = averages(&crop, sw, sh, rng.as_mut())?;
+    let mut small = tent(&tent(&small));
+    if let Some(rng) = &mut rng {
+        let detail = tent_values(&tent_values(&detail, sw as usize), sw as usize);
+        rng.add(&mut small, &detail, BLUR_GRAIN);
+    }
+    let big = small.scaled_bilinear(around.w as u32, around.h as u32).ok()?;
     big.crop(src.translated(-around.x, -around.y)).ok()
+}
+
+/// How much grain (in levels of 255, either way) pixelate's blocks and the
+/// blur's small picture get.
+const PIXEL_GRAIN: f32 = 14.0;
+const BLUR_GRAIN: f32 = 14.0;
+
+/// A seed for the grain, from the kernel's generator.
+fn random_seed() -> u64 {
+    u64::from_str_radix(&crate::util::random_hex(8), 16).unwrap_or(0x9E37_79B9_7F4A_7C15)
+}
+
+/// How far (in blocks, either way) a block's window may be shifted.
+const SHIFT: f32 = 0.33;
+
+/// How much detail (the spread of a window's brightness, in levels) gets
+/// all of the grain: flat colour gets none (it hides nothing), text gets
+/// it all.
+const DETAIL: f32 = 24.0;
+
+/// `img` (opaque) as `nx` x `ny` blocks, each the average of the pixels in
+/// its share of it; with `rng`, each window shifted at random (up to SHIFT
+/// of a block, staying in the picture). And for each block, how much
+/// detail is in it (0 to 1).
+fn averages(img: &Image, nx: u32, ny: u32, mut rng: Option<&mut Grain>) -> Option<(Image, Vec<f32>)> {
+    let (w, h) = (img.width() as i64, img.height() as i64);
+    let span = |i: i64, n: u32, len: i64| (i * len / n as i64, ((i + 1) * len / n as i64).max(i * len / n as i64 + 1).min(len));
+    let mut out = Image::new(nx, ny).ok()?;
+    let mut detail = Vec::with_capacity(nx as usize * ny as usize);
+    for j in 0..ny as i64 {
+        for i in 0..nx as i64 {
+            let ((mut x0, mut x1), (mut y0, mut y1)) = (span(i, nx, w), span(j, ny, h));
+            if let Some(rng) = rng.as_deref_mut() {
+                (x0, x1) = shifted(x0, x1, w, rng.next());
+                (y0, y1) = shifted(y0, y1, h, rng.next());
+            }
+            let (mut sum, mut luma, mut luma2) = ([0u64; 3], 0u64, 0u64);
+            for y in y0..y1 {
+                for px in img.row(y as u32)[x0 as usize * 4..x1 as usize * 4].as_chunks::<4>().0 {
+                    for c in 0..3 {
+                        sum[c] += px[c] as u64;
+                    }
+                    let l = (px[0] as u64 * 19 + px[1] as u64 * 183 + px[2] as u64 * 54) >> 8;
+                    luma += l;
+                    luma2 += l * l;
+                }
+            }
+            let n = ((x1 - x0) * (y1 - y0)).max(1) as u64;
+            let row = out.row_mut(j as u32);
+            let at = i as usize * 4;
+            for c in 0..3 {
+                row[at + c] = ((sum[c] + n / 2) / n) as u8;
+            }
+            row[at + 3] = 255;
+            let mean = luma as f32 / n as f32;
+            let spread = (luma2 as f32 / n as f32 - mean * mean).max(0.0).sqrt();
+            detail.push((spread / DETAIL).min(1.0));
+        }
+    }
+    Some((out, detail))
+}
+
+/// `values` (rows `w` long) each blended into its neighbours, as `tent`.
+fn tent_values(values: &[f32], w: usize) -> Vec<f32> {
+    let h = values.len() / w.max(1);
+    let at = |x: usize, y: usize| values[y * w + x];
+    let mut out = Vec::with_capacity(values.len());
+    for y in 0..h {
+        let (y0, y1) = (y.saturating_sub(1), (y + 1).min(h - 1));
+        for x in 0..w {
+            let (x0, x1) = (x.saturating_sub(1), (x + 1).min(w - 1));
+            let across = |y| at(x0, y) + 2.0 * at(x, y) + at(x1, y);
+            out.push((across(y0) + 2.0 * across(y) + across(y1)) / 16.0);
+        }
+    }
+    out
+}
+
+/// [lo, hi) moved by up to SHIFT of its length (`r` from 0 to 1: as far as
+/// it goes one way to the other), staying in [0, max).
+fn shifted(lo: i64, hi: i64, max: i64, r: f32) -> (i64, i64) {
+    let d = ((r * 2.0 - 1.0) * SHIFT * (hi - lo) as f32).round() as i64;
+    let d = d.clamp(-lo, max - hi);
+    (lo + d, hi + d)
+}
+
+/// `img` (opaque) with each pixel blended into its neighbours: a 3 x 3
+/// tent (1 2 1 across and down), the edges repeated.
+fn tent(img: &Image) -> Image {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let mut out = img.clone();
+    let px = |x: usize, y: usize, c: usize| img.row(y as u32)[x * 4 + c] as u32;
+    for y in 0..h {
+        let (y0, y1) = (y.saturating_sub(1), (y + 1).min(h - 1));
+        let row = out.row_mut(y as u32);
+        for x in 0..w {
+            let (x0, x1) = (x.saturating_sub(1), (x + 1).min(w - 1));
+            for c in 0..3 {
+                let across = |y| px(x0, y, c) + 2 * px(x, y, c) + px(x1, y, c);
+                row[x * 4 + c] = ((across(y0) + 2 * across(y) + across(y1) + 8) / 16) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// The random shifts and grain of a cover (xorshift64*: plenty for these;
+/// it's seeded from the kernel's generator).
+struct Grain(u64);
+
+impl Grain {
+    fn new(seed: u64) -> Grain {
+        Grain(seed | 1)
+    }
+
+    /// The next number, from 0 to 1.
+    fn next(&mut self) -> f32 {
+        let s = &mut self.0;
+        *s ^= *s >> 12;
+        *s ^= *s << 25;
+        *s ^= *s >> 27;
+        (s.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32 / (1u64 << 24) as f32
+    }
+
+    /// Add grain to each pixel of `img` (the same on its three colours):
+    /// up to `amount` levels where `detail` (one for each pixel, 0 to 1)
+    /// says there's all of it, none where there's none.
+    fn add(&mut self, img: &mut Image, detail: &[f32], amount: f32) {
+        for y in 0..img.height() {
+            let w = img.width() as usize;
+            for x in 0..w {
+                let k = detail.get(y as usize * w + x).copied().unwrap_or(1.0);
+                let n = ((self.next() * 2.0 - 1.0) * amount * k).round() as i32;
+                let row = img.row_mut(y);
+                for c in 0..3 {
+                    row[x * 4 + c] = (row[x * 4 + c] as i32 + n).clamp(0, 255) as u8;
+                }
+            }
+        }
+    }
 }
 
 // -- text ---------------------------------------------------------------------------
@@ -840,6 +1015,59 @@ fn paint_text(p: &mut Painter<'_>, t: &TextShape, color: Color, size: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn covers_leave_flat_colour_clean_and_grain_detail() {
+        let flat = Image::filled(120, 80, 0xFF33_6699).unwrap();
+        let r = IRect::new(0, 0, 120, 80);
+        for img in [pixelate(&flat, r, 1.0, 1, Some(7)).unwrap(), blur(&flat, r, 1.0, 1, Some(7)).unwrap()] {
+            assert!(img.data().as_chunks::<4>().0.iter().all(|px| *px == [0x99, 0x66, 0x33, 0xFF]), "grain on flat colour");
+        }
+        // Text: grained, the same for the same seed, not for another.
+        crate::render::text::warm_up();
+        let text = pin("7351", 1.0);
+        let r = text.rect();
+        let (a, b, c) =
+            (pixelate(&text, r, 1.0, 0, Some(1)).unwrap(), pixelate(&text, r, 1.0, 0, Some(1)).unwrap(), pixelate(&text, r, 1.0, 0, Some(2)).unwrap());
+        assert!(a.data() == b.data() && a.data() != c.data());
+        let model = pixelate(&text, r, 1.0, 0, None).unwrap();
+        assert!(model.data() != a.data());
+    }
+
+    /// A PIN in the app's font, dark on white.
+    fn pin(digits: &str, dpr: f32) -> Image {
+        let mut img = Image::filled((110.0 * dpr) as u32, (32.0 * dpr) as u32, 0xFFFF_FFFF).unwrap();
+        {
+            let mut p = Painter::new(img.pixmap_mut(), dpr);
+            p.draw_text(
+                Rect::new(6.0, 0.0, 100.0, 32.0),
+                crate::render::paint::Align::Left,
+                &format!("PIN {digits}"),
+                text::font(16.0, text::NORMAL),
+                Color::rgb(0x202020),
+            );
+        }
+        img
+    }
+
+    #[test]
+    fn covers_cant_be_matched_back() {
+        // An attacker who knows the font and the algorithm (but not the
+        // grain) covers each candidate alike and picks the closest: the
+        // PIN mustn't come out on top among its neighbours. (Covers that
+        // were exact averages put it first every time.)
+        crate::render::text::warm_up();
+        let distance = |a: &Image, b: &Image| a.data().iter().zip(b.data()).map(|(x, y)| (*x as i64 - *y as i64).pow(2)).sum::<i64>();
+        for blurred in [false, true] {
+            let cover = |img: &Image, seed| if blurred { blur(img, img.rect(), 1.0, 1, seed) } else { pixelate(img, img.rect(), 1.0, 1, seed) }.unwrap();
+            let models: Vec<(String, Image)> = (7300..7500).map(|n| (n.to_string(), cover(&pin(&n.to_string(), 1.0), None))).collect();
+            for seed in 1..=3 {
+                let target = cover(&pin("7351", 1.0), Some(seed));
+                let best = models.iter().min_by_key(|(_, m)| distance(m, &target)).map(|(n, _)| n.as_str());
+                assert_ne!(best, Some("7351"), "matched back (blur: {blurred}, seed {seed})");
+            }
+        }
+    }
 
     #[test]
     fn drags_and_modifiers() {
