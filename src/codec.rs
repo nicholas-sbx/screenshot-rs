@@ -67,6 +67,19 @@ pub fn decode_file(path: &Path) -> Result<Image, String> {
     }
 }
 
+/// A picture from memory (a PNG, JPEG, WebP, GIF or BMP).
+pub fn decode_bytes(bytes: &[u8]) -> Result<Image, String> {
+    match sniff(bytes) {
+        Some(Kind::Png) => decode_png(bytes),
+        Some(Kind::Jpeg) => decode_jpeg(bytes),
+        Some(Kind::Webp) => decode_webp(bytes),
+        Some(Kind::Gif) => decode_gif(bytes),
+        Some(Kind::Bmp) => decode_bmp(bytes),
+        Some(Kind::Avif | Kind::Jxl) => Err("AVIF and JPEG XL pictures can only be opened from a file".into()),
+        None => Err("not a picture Flatshot RS can open".into()),
+    }
+}
+
 pub fn decode_png(bytes: &[u8]) -> Result<Image, String> {
     let mut dec = png::Decoder::new_with_limits(Cursor::new(bytes), png::Limits { bytes: MAX_BYTES });
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);

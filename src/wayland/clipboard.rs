@@ -28,7 +28,7 @@ use wayland_protocols_wlr::data_control::v1::client::{
 
 use super::protocols::NoEvents;
 use crate::app::App;
-use crate::clipboard::{Slot, TEXT_MIMES, WAIT_FOR_DATA, read_for};
+use crate::clipboard::{MAX_PASTE, Slot, TEXT_MIMES, WAIT_FOR_DATA, read_for};
 
 /// An offer of the current selection: its types, as they come.
 #[derive(Default)]
@@ -201,7 +201,20 @@ impl Clipboard {
     /// comes on the returned channel (None if there's none).
     pub fn paste_text(&self, wake: crate::ui::session::Waker) -> mpsc::Receiver<Option<String>> {
         let (tx, rx) = mpsc::channel();
-        let mime_of = |mimes: &[String]| TEXT_MIMES.iter().find(|t| mimes.iter().any(|m| m == *t)).map(|t| t.to_string());
+        let bytes = self.paste(TEXT_MIMES, MAX_PASTE, Arc::new(|| {}));
+        let _ = std::thread::Builder::new().name("flatshot-paste".into()).spawn(move || {
+            let text = bytes.recv().ok().flatten().map(|(_, b)| String::from_utf8_lossy(&b).into_owned());
+            let _ = tx.send(text);
+            wake();
+        });
+        rx
+    }
+
+    /// What's on the clipboard as the first of `mimes` it's offered as (at
+    /// most `max` bytes), read in the background: the type and the data.
+    pub fn paste(&self, mimes: &'static [&'static str], max: u64, wake: crate::ui::session::Waker) -> crate::clipboard::Pasted {
+        let (tx, rx) = mpsc::channel();
+        let mime_of = |offered: &[String]| mimes.iter().find(|t| offered.iter().any(|m| m == *t)).map(|t| t.to_string());
         let receive: Option<(String, OwnedFd)> = (|| {
             let (r, w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).ok()?;
             match &self.incoming {
@@ -224,16 +237,17 @@ impl Clipboard {
             }
         })();
         match receive {
-            Some((_, fd)) => {
+            Some((mime, fd)) => {
                 let _ = std::thread::Builder::new().name("flatshot-paste".into()).spawn(move || {
-                    let mut text = Vec::new();
-                    let ok = read_for(std::fs::File::from(fd), &mut text, WAIT_FOR_DATA).is_ok();
-                    let _ = tx.send(ok.then(|| String::from_utf8_lossy(&text).into_owned()));
+                    let mut data = Vec::new();
+                    let ok = read_for(std::fs::File::from(fd), &mut data, WAIT_FOR_DATA, max).is_ok();
+                    let _ = tx.send(ok.then_some((mime, data)));
                     wake();
                 });
             }
             None => {
                 let _ = tx.send(None);
+                wake(); // (the loop may be asleep, waiting for this)
             }
         }
         rx

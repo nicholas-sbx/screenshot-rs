@@ -346,6 +346,12 @@ impl Display {
         each!(self, d => d.paste_text(wake))
     }
 
+    /// What's on the clipboard as the first of `mimes` it's offered as (at
+    /// most `max` bytes), read in the background: its type and data.
+    pub fn paste(&mut self, mimes: &'static [&'static str], max: u64, wake: Waker) -> crate::clipboard::Pasted {
+        each!(self, d => d.paste(mimes, max, wake))
+    }
+
     // -- taking the screen through the connection --------------------------------------
 
     pub fn has_screencopy(&self) -> bool {

@@ -154,6 +154,21 @@ finish $pid 3
 [ "$(md5sum < "$work/edit.png")" != "$before" ] && pass "editor saved the drawing" || fail "editor didn't save"
 expect_size "edited picture" "$work/edit.png" "256 256"
 
+# 4b. The picture on the clipboard, annotated: saved as a new capture.
+wl-copy --type image/png < assets/flatshot-rs.png
+before=$(ls "$shots" | wc -l)
+$BIN --from-clipboard -v > "$work/clip-editor.log" 2>&1 &
+pid=$!
+up "$work/clip-editor.log" || true
+$EX/inject move 700 500 key b drag 700 450 850 580 sleep 200 key ctrl+s sleep 400 key ctrl+w sleep 300
+finish $pid 3
+[ $code = 0 ] && pass "clipboard picture's editor closed" || { fail "the clipboard picture's editor didn't close (exit $code)"; tail -n 5 "$work/clip-editor.log"; }
+[ $(( $(ls "$shots" | wc -l) - before )) = 1 ] && expect_size "clipboard picture saved as a capture" "$(newest)" "256 256" || fail "the clipboard picture wasn't saved in $shots"
+# Text on the clipboard: no picture to annotate (exit 1).
+printf 'just text' | wl-copy
+$BIN --from-clipboard > /dev/null 2>&1 && code=0 || code=$?
+[ $code = 1 ] && pass "no picture on the clipboard: exit 1" || fail "no picture on the clipboard: exit $code"
+
 # 5. The settings window: a change is saved at once; Esc closes it.
 $BIN --settings -v > "$work/settings.log" 2>&1 &
 pid=$!

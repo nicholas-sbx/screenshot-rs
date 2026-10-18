@@ -24,6 +24,7 @@ pub struct Args {
     pub tray: bool,
     pub settings: bool,
     pub recent: bool,
+    pub from_clipboard: bool,
     pub quit: bool,
     pub print_config: bool,
     pub diagnose: bool,
@@ -43,7 +44,7 @@ pub enum Parsed {
 fn usage() -> String {
     format!(
         "usage: flatshot-rs [-h] [-d SEC] [-f | -m | -w | -l | -r WxH+X+Y] [--pin] [--record] [--ocr] [-o FILE]\n\
-         \x20               [-i FILE] [--backend {{{}}}]\n\
+         \x20               [-i FILE | --from-clipboard] [--backend {{{}}}]\n\
          \x20               [--no-copy] [--no-save] [--no-scan] [--tray] [--settings] [--recent] [--quit]\n\
          \x20               [--print-config] [--diagnose] [-v] [--version]",
         crate::config::BACKENDS.join(",")
@@ -66,6 +67,7 @@ options:
                         save to this file instead of the screenshot folder ('-' writes PNG to stdout)
   -i FILE, --image FILE
                         open an image in the annotation editor (Save writes back to it, or to --output)
+  --from-clipboard      open the picture on the clipboard in the annotation editor
   --backend {{{backends}}}
                         screen capture helper (default: from settings, else auto)
   --no-copy             don't copy the result to the clipboard
@@ -144,6 +146,7 @@ const FLAGS: &[(&str, &str)] = &[
     ("", "--tray"),
     ("", "--settings"),
     ("", "--recent"),
+    ("", "--from-clipboard"),
     ("", "--quit"),
     ("", "--print-config"),
     ("", "--diagnose"),
@@ -258,6 +261,7 @@ pub fn parse(argv: &[String]) -> Parsed {
                 "--tray" => a.tray = true,
                 "--settings" => a.settings = true,
                 "--recent" => a.recent = true,
+                "--from-clipboard" => a.from_clipboard = true,
                 "--quit" => a.quit = true,
                 "--print-config" => a.print_config = true,
                 "--diagnose" => a.diagnose = true,
@@ -274,6 +278,9 @@ pub fn parse(argv: &[String]) -> Parsed {
     }
     if a.record && (a.mode() != "region" || a.pin || a.image.is_some() || a.output.is_some()) {
         return error("--record picks its area on screen; it doesn't combine with instant captures, --pin, -i or -o");
+    }
+    if a.from_clipboard && a.image.is_some() {
+        return error("--from-clipboard and -i each open a picture: one or the other");
     }
     if a.ocr && (a.mode() != "region" || a.pin || a.record || a.image.is_some() || a.output.is_some()) {
         return error("--ocr picks its area on screen; it doesn't combine with instant captures, --pin, --record, -i or -o");
@@ -328,6 +335,9 @@ impl Args {
         }
         if self.recent {
             return Some("recent".into());
+        }
+        if self.from_clipboard {
+            return Some("annotate-clipboard".into());
         }
         if self.settings || self.tray {
             return Some("settings".into()); // already running: show something useful
@@ -405,6 +415,7 @@ mod tests {
         assert_eq!(run(&["--ocr", "-d", "2"]).forwardable().as_deref(), Some("ocr 2"));
         assert_eq!(run(&["--tray"]).forwardable().as_deref(), Some("settings"));
         assert_eq!(run(&["--recent"]).forwardable().as_deref(), Some("recent"));
+        assert_eq!(run(&["--from-clipboard"]).forwardable().as_deref(), Some("annotate-clipboard"));
         assert_eq!(run(&["--no-save"]).forwardable(), None);
         assert_eq!(run(&["-v"]).forwardable(), None);
         assert_eq!(run(&["-d", "0.5"]).forwardable().as_deref(), Some("region 0.5"));

@@ -737,6 +737,10 @@ impl Wayland {
         self.clipboard.paste_text(wake)
     }
 
+    pub fn paste(&mut self, mimes: &'static [&'static str], max: u64, wake: crate::ui::session::Waker) -> crate::clipboard::Pasted {
+        self.clipboard.paste(mimes, max, wake)
+    }
+
     pub fn tick(&mut self) {
         // (long since forgotten by the compositor: safe to drop here)
         self.retired.retain(|(t, _)| t.elapsed() < std::time::Duration::from_secs(5));

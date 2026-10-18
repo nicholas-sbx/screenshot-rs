@@ -86,7 +86,7 @@ struct Embedded {
 }
 
 /// The menu's keys, as the popup menu has them.
-const MENU_KEYS: [&str; 16] = [
+const MENU_KEYS: [&str; 17] = [
     "region",
     "window",
     "monitor",
@@ -98,6 +98,7 @@ const MENU_KEYS: [&str; 16] = [
     "region-delayed",
     "window-delayed",
     "annotate",
+    "annotate-clipboard",
     "recent",
     "folder",
     "settings",
@@ -163,6 +164,7 @@ fn menu_items(keys: &HashMap<String, String>, recording: bool) -> Vec<MenuItem> 
         MenuItem::new("window-delayed", "Capture active window in 3 seconds", ""),
         MenuItem::separator(),
         MenuItem::new("annotate", "Annotate an image…", ""),
+        MenuItem::new("annotate-clipboard", "Annotate clipboard image", ""),
         MenuItem::new("recent", "Recent captures…", ""),
         MenuItem::new("folder", "Open screenshots folder", ""),
         MenuItem::new("settings", "Settings…", ""),
@@ -338,6 +340,7 @@ impl App {
                 "region-delayed" => self.capture_later(Job::new(Mode::Region), Duration::from_secs(3)),
                 "window-delayed" => self.capture_later(Job::new(Mode::Window), Duration::from_secs(3)),
                 "annotate" => self.choose_image(),
+                "annotate-clipboard" => self.annotate_clipboard(),
                 "folder" => {
                     let folder = crate::template::base_folder(&config::load().save_dir);
                     let _ = std::fs::create_dir_all(&folder);
@@ -522,6 +525,7 @@ impl App {
             }
             "settings" => self.show_settings(),
             "recent" => self.show_recent(),
+            "annotate-clipboard" => self.annotate_clipboard(),
             "restart" => self.restart(),
             "quit" => self.quit(),
             "record" => self.record(delay),

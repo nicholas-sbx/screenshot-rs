@@ -101,7 +101,14 @@ impl App {
     /// long enough, no pins left)?
     pub(super) fn may_exit(&self) -> bool {
         let holding = self.dpy.holds() && self.hold_until.is_some_and(|t| Instant::now() < t);
-        !holding && !self.has_pins() && !self.has_editors() && !self.has_settings() && !self.has_recent() && !self.is_recording() && !self.is_reading()
+        !holding
+            && !self.has_pins()
+            && !self.has_editors()
+            && !self.has_settings()
+            && !self.has_recent()
+            && !self.is_recording()
+            && !self.is_reading()
+            && !self.reading_clipboard()
     }
 
     /// Will a one-off capture hand what it copies to wl-copy (so it can

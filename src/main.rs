@@ -41,7 +41,7 @@ fn main() -> std::process::ExitCode {
             flatshot::signals::take();
             let code = if args.tray {
                 flatshot::app::run_tray(&args)
-            } else if args.image.is_some() {
+            } else if args.image.is_some() || args.from_clipboard {
                 flatshot::app::run_editor(&args)
             } else if args.settings {
                 flatshot::app::run_settings()

@@ -103,6 +103,9 @@ pub struct App {
     reading: Vec<ocr::Reading>,
     /// the Recent captures window
     recent: Option<recent::RecentWin>,
+    /// "Annotate clipboard image": the clipboard's picture being read (and
+    /// whether by wl-paste, the second try)
+    clipboard_image: Option<(crate::clipboard::Pasted, bool)>,
 }
 
 impl Painted for Session {
@@ -295,6 +298,7 @@ impl App {
         self.poll_notifications();
         self.poll_editors();
         self.poll_open_dialog();
+        self.poll_clipboard_image();
         self.poll_settings();
         self.poll_recording();
         self.poll_reading();
@@ -511,6 +515,7 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         blink: caret::Blink::default(),
         reading: Vec::new(),
         recent: None,
+        clipboard_image: None,
     };
     match queue {
         Some(mut queue) => {
@@ -607,11 +612,15 @@ pub fn run_editor(args: &Args) -> i32 {
         Ok(x) => x,
         Err(code) => return code,
     };
-    let Some(image) = &args.image else { return 2 };
-    let path = std::path::PathBuf::from(config::expand_user(image));
-    let save_to = args.output.as_ref().map(|o| std::path::PathBuf::from(config::expand_user(o)));
-    if !app.open_editor(&path, save_to) {
-        return 2;
+    if args.from_clipboard {
+        app.annotate_clipboard();
+    } else {
+        let Some(image) = &args.image else { return 2 };
+        let path = std::path::PathBuf::from(config::expand_user(image));
+        let save_to = args.output.as_ref().map(|o| std::path::PathBuf::from(config::expand_user(o)));
+        if !app.open_editor(&path, save_to) {
+            return 2;
+        }
     }
     app.finished = Some(0);
     while app.exit.is_none() {
