@@ -40,28 +40,58 @@ Each release has packages for Debian/Ubuntu (`.deb`), Fedora/openSUSE (`.rpm`) a
 
 | Distro | Install |
 |---|---|
-| Debian 12+, Ubuntu 22.04+, KDE neon | `sudo apt install ./flatshot-rs_*_amd64.deb` |
+| Debian 12+, Ubuntu 22.04+, KDE neon | `sudo apt install ./flatshot-rs_*_amd64.deb`, or the apt repository below |
 | Fedora / openSUSE | `sudo dnf install ./flatshot-rs-*.x86_64.rpm` |
 | Arch / Manjaro / EndeavourOS | `sudo pacman -U flatshot-rs-*-x86_64.pkg.tar.zst`, or the pacman repository below |
 
 ### Arch: pacman repository
 
-Each release also updates a pacman repository, so Flatshot RS updates with the rest of your system:
+Each release also updates a pacman repository, so Flatshot RS updates with the rest of your system. Trust its signing key first (check the fingerprint against the one on the [repository's release page](https://github.com/nicholas-sbx/screenshot-rs/releases/tag/pacman)):
+
+```sh
+curl -fsSLo /tmp/flatshot-rs.asc https://github.com/nicholas-sbx/screenshot-rs/releases/download/pacman/flatshot-rs.asc
+gpg --show-keys /tmp/flatshot-rs.asc
+sudo pacman-key --add /tmp/flatshot-rs.asc
+sudo pacman-key --lsign-key "$(gpg --with-colons --show-keys /tmp/flatshot-rs.asc | awk -F: '/^fpr/ {print $10; exit}')"
+```
+
+Then add the repository:
 
 ```sh
 sudo tee -a /etc/pacman.conf <<'EOF'
 
 [flatshot-rs]
-SigLevel = Optional TrustAll
+SigLevel = Required
 Server = https://github.com/nicholas-sbx/screenshot-rs/releases/download/pacman
 EOF
 sudo pacman -Sy flatshot-rs
 ```
 
-`sudo pacman -Syu` then picks up new versions. To remove it, delete the `[flatshot-rs]` block and `sudo pacman -R flatshot-rs`.
+`sudo pacman -Syu` then picks up new versions. To remove it, delete the `[flatshot-rs]` block, `sudo pacman -R flatshot-rs`, and `sudo pacman-key --delete` the key.
 
-- **The repository has to be public** for pacman to download from it: GitHub only serves a private repository's releases to people signed in.
-- The packages are signed when the release workflow has a `PACMAN_GPG_KEY` secret; until then `SigLevel = Optional TrustAll` accepts them unsigned.
+- **Without the signatures:** skip the key and use `SigLevel = Never`. pacman then installs whatever the server sends, so only do this if you trust the download path.
+- **Set up before signing?** `SigLevel = Optional TrustAll` from older instructions fails once the packages are signed (pacman checks a signature it finds, and doesn't know the key): add the key as above and switch to `SigLevel = Required`, or use `SigLevel = Never`.
+
+### Debian / Ubuntu: apt repository
+
+The same releases, as an apt repository signed with the same key, so Flatshot RS updates with `sudo apt upgrade`:
+
+```sh
+curl -fsSL https://github.com/nicholas-sbx/screenshot-rs/releases/download/apt/flatshot-rs.gpg \
+  | sudo tee /usr/share/keyrings/flatshot-rs.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/flatshot-rs.gpg] https://github.com/nicholas-sbx/screenshot-rs/releases/download/apt ./" \
+  | sudo tee /etc/apt/sources.list.d/flatshot-rs.list
+sudo apt update && sudo apt install flatshot-rs
+```
+
+`gpg --show-keys /usr/share/keyrings/flatshot-rs.gpg` shows the fingerprint, to compare with the [repository's release page](https://github.com/nicholas-sbx/screenshot-rs/releases/tag/apt). To remove it, delete those two files and `sudo apt remove flatshot-rs`.
+
+- **Without the signatures:** skip the key and write `[trusted=yes]` in place of `[signed-by=...]`. apt then accepts whatever the server sends.
+
+### About the repositories
+
+- **The repository has to be public** for pacman and apt to download from it: GitHub only serves a private repository's releases to people signed in.
+- The release workflow signs both repositories with the `REPO_GPG_KEY` secret (an armored private key without a passphrase; `PACMAN_GPG_KEY` also works) and publishes its public key with them. Without the secret they're published unsigned, and only the "without the signatures" settings work. To make a key: `gpg --batch --passphrase '' --quick-gen-key "Flatshot RS packages" ed25519 sign never`, then `gpg --armor --export-secret-keys <fingerprint>` is the secret's value. Keep a copy offline: a new key means everyone re-adds it.
 
 ### From source
 
