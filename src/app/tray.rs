@@ -16,6 +16,7 @@ use super::{App, Input, Job, Mode};
 use crate::cli::{self, Args};
 use crate::config;
 use crate::desktop::notify::{self, NoteEvent, Notifier};
+use crate::desktop::portal_shortcuts;
 use crate::desktop::shortcuts::{self, ShortcutEvent};
 use crate::desktop::tray::{MenuItem, Tray, TrayEvent};
 use crate::geom::{Damage, IRect, Point};
@@ -40,6 +41,8 @@ pub enum Event {
     Keys(HashMap<String, String>),
     /// KDE's shortcuts are registered, or can't be
     ShortcutsReady(bool),
+    /// the desktop's portal gave the shortcuts (and their keys), or didn't
+    Portal(Result<(portal_shortcuts::Session, HashMap<String, String>), String>),
     /// no D-Bus tray: why
     NoTray(String),
     /// the desktop's colour scheme changed (for the "auto" icon)
@@ -65,6 +68,8 @@ pub struct TrayState {
     ipc: Option<ipc::Server>,
     /// KDE's shortcuts are registered (None: still at it)
     pub shortcuts: Option<bool>,
+    /// the shortcuts the desktop's portal gave, where KDE's aren't
+    portal: Option<portal_shortcuts::Session>,
     /// their keys, for the menu
     keys: HashMap<String, String>,
     /// the icon in an X11 panel's tray (XEmbed), without a D-Bus tray
@@ -180,6 +185,21 @@ fn shortcut_keys() -> HashMap<String, String> {
     shortcuts::ACTIONS.iter().map(|(a, _, _)| (a.to_string(), shortcuts::get(a))).filter(|(_, k)| !k.is_empty()).collect()
 }
 
+/// Ask the desktop's portal for the global shortcuts (where KDE's service
+/// isn't): their presses, and how asking went, come back as events.
+/// Blocks while the desktop answers (it may ask you first).
+fn ask_portal(tx: &channel::Sender<Event>) {
+    if !portal_shortcuts::supported() {
+        let _ = tx.send(Event::Portal(Err("its portal has no global shortcuts".into())));
+        return;
+    }
+    let to_main = tx.clone();
+    let got = portal_shortcuts::start(move |e| {
+        let _ = to_main.send(Event::Shortcut(e, Instant::now()));
+    });
+    let _ = tx.send(Event::Portal(got));
+}
+
 /// The "status" reply: which Flatshot this is.
 fn status() -> String {
     let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
@@ -285,6 +305,11 @@ impl App {
                 Err(e) => {
                     crate::warn!("global shortcuts unavailable ({e})");
                     let _ = tx.send(Event::ShortcutsReady(false));
+                    // (on a thread of its own: the desktop may wait on you)
+                    let tx = tx.clone();
+                    if config::load().portal_shortcuts {
+                        let _ = std::thread::Builder::new().name("flatshot-portal".into()).spawn(move || ask_portal(&tx));
+                    }
                 }
             }
             notify::install_events();
@@ -323,6 +348,22 @@ impl App {
             Event::ShortcutsReady(ok) => {
                 self.tray.shortcuts = Some(ok);
                 self.shortcuts_ready(ok);
+            }
+            Event::Portal(Ok((session, keys))) => {
+                timing::log(format!("global shortcuts from the desktop's portal: {keys:?}"));
+                // (unless they were turned off meanwhile)
+                if config::load().portal_shortcuts {
+                    self.tray.portal = Some(session);
+                    self.tray.keys = keys;
+                    self.refresh_tray_menu();
+                    let keys = self.tray.keys.clone();
+                    self.portal_keys(&keys);
+                }
+                self.portal_answer(None);
+            }
+            Event::Portal(Err(e)) => {
+                crate::warn!("no global shortcuts from the desktop's portal ({e})");
+                self.portal_answer(Some(e));
             }
             Event::SchemeChanged => {
                 if self.tray.icon_style == "auto" {
@@ -590,6 +631,29 @@ impl App {
             }
         }
         self.tray.targets.insert(token, target);
+    }
+
+    /// The keys the desktop's portal gave the shortcuts, while it holds them.
+    pub(super) fn portal_keys_given(&self) -> Option<&HashMap<String, String>> {
+        self.tray.portal.as_ref().map(|_| &self.tray.keys)
+    }
+
+    /// The desktop portal's shortcuts turned on or off in Settings.
+    pub(super) fn portal_shortcuts_wanted(&mut self, on: bool) {
+        if !on {
+            if self.tray.portal.take().is_some() {
+                self.tray.keys.clear();
+                self.refresh_tray_menu();
+                self.portal_keys(&HashMap::new());
+            }
+            return;
+        }
+        // (not where KDE's are, or once there; nor without a tray app to hold them)
+        if self.tray.shortcuts != Some(false) || self.tray.portal.is_some() {
+            return;
+        }
+        let Some(tx) = self.events.clone() else { return };
+        let _ = std::thread::Builder::new().name("flatshot-portal".into()).spawn(move || ask_portal(&tx));
     }
 
     /// Open `path` in the annotation editor.

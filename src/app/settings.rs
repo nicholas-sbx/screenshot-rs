@@ -2,7 +2,7 @@
 //! and what it asks of the desktop: file dialogs, KDE's shortcut service
 //! (on a thread of its own, in order) and the clipboard.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
@@ -26,6 +26,8 @@ pub(super) enum KdeJob {
     Start,
     /// load the actions' keys
     Load,
+    /// find out whether the desktop's portal offers global shortcuts
+    Portal,
     Block(bool),
     Assign(&'static str, String),
 }
@@ -33,6 +35,8 @@ pub(super) enum KdeJob {
 enum KdeAnswer {
     /// the actions' keys (None: no shortcut service)
     Keys(Option<BTreeMap<String, String>>),
+    /// whether the desktop's portal offers global shortcuts (with no KDE service)
+    Portal(bool),
     /// they were changed (in System Settings, say)
     Changed,
     /// an action's keys now, and why not the ones asked for
@@ -89,9 +93,13 @@ fn kde_worker(jobs: mpsc::Receiver<KdeJob>, answers: mpsc::Sender<KdeAnswer>, wa
                     .map_err(|e| crate::warn!("global shortcuts unavailable ({e})"))
                     .is_ok();
                 started |= ok;
+                if !ok && answers.send(KdeAnswer::Portal(crate::desktop::portal_shortcuts::supported())).is_err() {
+                    return;
+                }
                 Some(KdeAnswer::Keys(ok.then(global_keys)))
             }
             KdeJob::Load => Some(KdeAnswer::Keys(Some(global_keys()))),
+            KdeJob::Portal => Some(KdeAnswer::Portal(crate::desktop::portal_shortcuts::supported())),
             KdeJob::Block(on) => {
                 shortcuts::block(on);
                 None
@@ -163,7 +171,13 @@ impl App {
             Some(true) => {
                 let _ = kde.send(KdeJob::Load);
             }
-            Some(false) => s.set_global(None),
+            Some(false) => {
+                s.set_global(None);
+                let _ = kde.send(KdeJob::Portal);
+                if let Some(keys) = self.portal_keys_given() {
+                    s.portal_keys(keys);
+                }
+            }
             None => {} // (when it's done: shortcuts_ready)
         }
         let format = crate::config::load().record_format;
@@ -183,7 +197,23 @@ impl App {
                 let _ = w.kde.send(KdeJob::Load);
             } else {
                 w.s.set_global(None);
+                let _ = w.kde.send(KdeJob::Portal);
             }
+        }
+    }
+
+    /// The keys the desktop's portal gave, for the settings window if it's open.
+    pub(super) fn portal_keys(&mut self, keys: &HashMap<String, String>) {
+        if let Some(w) = &mut self.settings {
+            w.s.portal_keys(keys);
+        }
+    }
+
+    /// How asking the desktop's portal for the shortcuts went, for the
+    /// settings window if it's open.
+    pub(super) fn portal_answer(&mut self, error: Option<String>) {
+        if let Some(w) = &mut self.settings {
+            w.s.portal_answer(error);
         }
     }
 
@@ -272,6 +302,7 @@ impl App {
                     self.update_tray_icon(None); // (the theme style's colours)
                 }
                 Request::TrayIconChanged(style) => self.update_tray_icon(Some(style)),
+                Request::PortalShortcuts(on) => self.portal_shortcuts_wanted(on),
                 Request::CopyText(text) => {
                     let mimes = TEXT_MIMES.iter().map(|m| m.to_string()).collect();
                     self.dpy.offer(mimes, Slot::ready(Arc::new(text.into_bytes())));
@@ -325,6 +356,7 @@ impl App {
         while let Ok(a) = w.answers.try_recv() {
             match a {
                 KdeAnswer::Keys(keys) => w.s.set_global(keys),
+                KdeAnswer::Portal(offered) => w.s.set_portal(offered),
                 KdeAnswer::Changed => {
                     let _ = w.kde.send(KdeJob::Load);
                 }

@@ -4,6 +4,7 @@
 pub mod autostart;
 pub mod notify;
 pub mod portal;
+pub mod portal_shortcuts;
 pub mod shortcuts;
 pub mod sound;
 pub mod tray;

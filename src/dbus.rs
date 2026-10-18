@@ -55,9 +55,19 @@ pub fn listen(
     service: &'static str,
     rule: zbus::MatchRule<'static>,
     thread: &str,
+    on_signal: impl FnMut(&zbus::Message) -> bool + Send + 'static,
+) -> Result<(), String> {
+    listen_on(session()?.inner().clone(), service, rule, thread, on_signal)
+}
+
+/// [`listen`] on a connection of the caller's (one a portal session lives on).
+pub fn listen_on(
+    conn: zbus::Connection,
+    service: &'static str,
+    rule: zbus::MatchRule<'static>,
+    thread: &str,
     mut on_signal: impl FnMut(&zbus::Message) -> bool + Send + 'static,
 ) -> Result<(), String> {
-    let conn = session()?.inner().clone();
     let owners = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .sender(BUS)

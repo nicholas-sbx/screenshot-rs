@@ -84,7 +84,7 @@ Or `packaging/arch/PKGBUILD` with `makepkg`, or `packaging/build-packages.sh` (w
 
 1. Start **Flatshot RS** from the app menu. This runs `flatshot-rs --tray`, and the icon appears in the system tray.
 2. On KDE the shortcuts are registered for you: <kbd>Ctrl</kbd>+<kbd>Print</kbd> (region), <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Print</kbd> (active window) and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Print</kbd> (all screens). Change them, or set keys for current monitor, last region, pin and record, on the Shortcuts page of its settings (or in **System Settings → Shortcuts → Flatshot RS**).
-3. On other desktops, bind the command `flatshot-rs` (or `flatshot-rs --full`, ...) in your desktop's keyboard settings: it hands the capture to the running tray app at once, or captures by itself when there is none. The same goes for X11 sessions; KDE's X11 session registers the shortcuts like its Wayland one.
+3. On other desktops, bind the command `flatshot-rs` (or `flatshot-rs --full`, ...) in your desktop's keyboard settings: it hands the capture to the running tray app at once, or captures by itself when there is none. The same goes for X11 sessions; KDE's X11 session registers the shortcuts like its Wayland one. Where the desktop's portal offers global shortcuts (GNOME 48 and later, Hyprland), the Shortcuts page of the settings can instead ask it for them (**Ask the desktop for these**): GNOME then asks you to confirm or change the keys, and on Hyprland you bind keys to them in its config with the `global` dispatcher (`hyprctl globalshortcuts` lists their names). It's off until you turn it on, and never used where KDE's shortcut service is.
 
 ### Alongside the Python Flatshot
 
@@ -196,7 +196,7 @@ Exit codes: 0 captured, 1 cancelled, 2 failed.
 | Taking the screen | KWin's ScreenShot2 API, raw pixels over a pipe | wlr-screencopy, into shared memory | the screenshot portal | MIT-SHM, straight into shared memory |
 | The overlay | a layer-shell surface (no window animations) | layer-shell | a full-screen window | a window per monitor the window manager never sees, holding the keyboard and pointer |
 | Window detection | a KWin script | sway IPC / Hyprland IPC (every window on the workspaces shown) | — | what the window manager publishes (EWMH) |
-| Shortcuts | KGlobalAccel | your compositor's key bindings | your desktop's key bindings | KGlobalAccel on KDE, else your desktop's key bindings |
+| Shortcuts | KGlobalAccel | your compositor's key bindings, or the portal's (Hyprland, if you turn it on) | your desktop's key bindings, or the portal's (GNOME 48 and later, if you turn it on) | KGlobalAccel on KDE, else your desktop's key bindings |
 | Clipboard | data-control (after the overlay is gone) | data-control | while the overlay has the keyboard | the CLIPBOARD selection (big pictures in pieces) |
 | Tray icon | StatusNotifierItem | StatusNotifierItem | StatusNotifierItem (with the AppIndicator extension) | StatusNotifierItem, else the panel's tray (XEmbed) |
 
@@ -211,7 +211,7 @@ On X11 any program can read the screen and the keyboard: that's X11's design, wh
 - **Untrusted input is parsed by memory-safe code**: the barcode decoders (rxing), image decoders, the compositor's, the X server's and D-Bus messages (no libwayland, no Xlib or libxcb: pure Rust on the wire). A decoder that panics on a strange picture is caught; the capture goes on without codes. The parsers, the decoders and the text handling are fuzzed (see [fuzz/](fuzz/README.md)), weekly in the CI too.
 - **Files**: captures are created with `O_EXCL | O_NOFOLLOW` under a unique name, so a capture never replaces a file or writes through a planted link; temporary files and the KWin script live in a private (0700) runtime folder and are created exclusively, mode 0600. The editor saves into the folder it opened the picture from (held open since), replacing the file by rename: a link put in its place meanwhile is replaced, not followed. File names made from window titles lose control characters and the invisible ones that turn text around ("photo‮gnp.exe").
 - **IPC**: the tray app's socket is in a folder only you can enter, and both ends check the other's user ID (`SO_PEERCRED`). Commands are a fixed, small grammar; lines are capped.
-- **D-Bus**: replies from KWin's window script are only accepted from KWin's own connection; shortcut presses only from the shortcut service's, notification clicks only from the notification server's (its current owner, followed through the bus's own announcements). Nothing waits on the bus while its messages come in, so a flood of forged ones can't stall it. Window lists and titles are capped in size.
+- **D-Bus**: replies from KWin's window script are only accepted from KWin's own connection; shortcut presses only from the shortcut service's (or the portal's, for the session it gave), notification clicks only from the notification server's (its current owner, followed through the bus's own announcements). Nothing waits on the bus while its messages come in, so a flood of forged ones can't stall it. Window lists and titles are capped in size.
 - **What the screen says stays text**: code contents and window titles shown in notifications are escaped, with invisible direction overrides replaced, so a QR code can't pose as something else; "Open" is only offered for http(s), mailto, tel, sms, geo and matrix links.
 - **Commands you configure** ("run after capture"): `{path}` becomes a reference to `$FLATSHOT_PATH`, quoted to fit where it stands, so the file's name (which may come from a window title) is never read by the shell.
 - **Programs Flatshot starts** are run by their full path from `$PATH` (never the current folder) and inherit nothing but stdin, stdout and stderr: not the screen-cast stream, nor any other descriptor. Text printed to a terminal (a code's text, file names) has its control characters replaced.
@@ -225,7 +225,7 @@ cargo build --examples && tests/e2e.sh     # end to end on a headless sway
 cargo build --examples && tests/e2e-x11.sh # ... and on a headless X server
 ```
 
-The examples include stand-ins for KWin's screenshot API, KDE's shortcut service and tray, and a notification server, so the KDE paths can be tested without Plasma.
+The examples include stand-ins for KWin's screenshot API, KDE's shortcut service and tray, the portal's global shortcuts, and a notification server, so the KDE paths (and the portal's) can be tested without Plasma.
 
 ## License
 

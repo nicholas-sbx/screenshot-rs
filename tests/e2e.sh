@@ -20,7 +20,7 @@ chmod 700 "$XDG_RUNTIME_DIR"
 shots=$work/shots
 cat > "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<JSON
 {"save_dir": "$shots", "notify": true, "clipboard": "image", "scan_codes": true,
- "record_dir": "$work/videos", "record_countdown": 0}
+ "record_dir": "$work/videos", "record_countdown": 0, "portal_shortcuts": true}
 JSON
 printf 'output HEADLESS-1 resolution 1600x1000 scale 1\nseat seat0 fallback true\n' > "$work/sway.conf"
 
@@ -418,6 +418,29 @@ grep -q "command: rect:100x50+0+0" "$work/tray.log" && pass "command forwarded" 
 grep -q 'actions=\["default", "Open"' "$work/notify.log" && pass "notification with buttons" || fail "no notification buttons"
 grep -q "restarted: 2" "$work/tray-test.log" && pass "tray restarts" || fail "tray didn't restart: $(grep restarted "$work/tray-test.log")"
 grep -q "quit 0" "$work/tray-test.log" && grep -q "gone" "$work/tray-test.log" && pass "tray quits" || fail "tray didn't quit"
+# (KDE's service was there: the portal, though turned on, wasn't asked)
+grep -q "from the desktop's portal" "$work/tray.log" && fail "the portal was asked beside KDE's service" || pass "KDE's shortcuts before the portal's"
+
+# 9. Global shortcuts from the desktop's portal, without KDE's service.
+cat > "$work/portal.sh" <<SH
+#!/usr/bin/env bash
+set -u
+FAKE_PORTAL_PRESS="screen@1000" $EX/fake_portal > "$work/portal.log" 2>&1 &
+sleep 0.4
+$BIN --tray -v > "$work/tray-portal.log" 2>&1 &
+sleep 4
+$BIN --quit
+sleep 1
+kill %1 2>/dev/null
+SH
+chmod +x "$work/portal.sh"
+before=$(ls "$shots" | wc -l)
+dbus-run-session -- "$work/portal.sh" 2>/dev/null
+after=$(ls "$shots" | wc -l)
+grep -q "portal: registered flatshot-rs" "$work/portal.log" && grep -q 'portal: bind screen "Capture all screens" CTRL+SHIFT+Print' "$work/portal.log" \
+    && pass "shortcuts asked of the portal" || fail "shortcuts not asked of the portal: $(cat "$work/portal.log")"
+grep -q "shortcut screen pressed" "$work/tray-portal.log" && [ $((after - before)) -ge 1 ] && pass "a portal shortcut heard ($((after - before)) saved)" \
+    || fail "portal shortcut not heard: $(grep -i -E "portal|shortcut" "$work/tray-portal.log")"
 
 kill $keeper 2>/dev/null || true
 if [ $failures -gt 0 ]; then

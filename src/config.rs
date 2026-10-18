@@ -98,6 +98,8 @@ pub struct Config {
     pub custom_color: String,
     /// keys in Flatshot's windows you changed: action -> key
     pub keys: BTreeMap<String, String>,
+    /// global shortcuts asked of the desktop's portal (without KDE's service)
+    pub portal_shortcuts: bool,
     pub default_size: i64,
     // Screen recording
     pub record_dir: String,
@@ -257,6 +259,7 @@ impl Config {
             default_color: i("default_color", 0),
             custom_color,
             keys,
+            portal_shortcuts: b("portal_shortcuts", false),
             default_size: i("default_size", 1),
             record_dir: if record_dir.is_empty() { default_record_dir() } else { expand_user(&record_dir) },
             record_filename: s("record_filename", "Recording_%Y-%m-%d_%H-%M-%S"),
@@ -317,6 +320,7 @@ impl Config {
         put("default_color", self.default_color.into());
         put("custom_color", self.custom_color.clone().into());
         put("keys", Value::Object(self.keys.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect()));
+        put("portal_shortcuts", self.portal_shortcuts.into());
         put("default_size", self.default_size.into());
         put("record_dir", self.record_dir.clone().into());
         put("record_filename", self.record_filename.clone().into());

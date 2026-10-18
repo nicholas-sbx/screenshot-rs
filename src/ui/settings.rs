@@ -7,7 +7,7 @@
 //! clipboard) is asked for with [`Request`]s.
 
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use crate::config::{self, Config};
@@ -54,6 +54,8 @@ pub enum Request {
     Close,
     /// find out (in the background) what recording in this format needs
     CheckRecorder(String),
+    /// global shortcuts from the desktop's portal: on, or off
+    PortalShortcuts(bool),
 }
 
 #[derive(Clone, Debug)]
@@ -310,6 +312,8 @@ pub struct Settings {
     requests: Vec<Request>,
     /// KDE's shortcut service is there (None: still finding out)
     global_shortcuts: Option<bool>,
+    /// the desktop's portal offers global shortcuts (for where KDE's aren't)
+    portal: bool,
     /// the picker open for a palette colour: which one, and whether a
     /// press on it is held (dragging)
     picker: Option<(usize, ColorPicker)>,
@@ -383,6 +387,7 @@ impl Settings {
             touched: Vec::new(),
             requests: Vec::new(),
             global_shortcuts: None,
+            portal: false,
             picker: None,
             picker_held: false,
             reorder: None,
@@ -659,12 +664,21 @@ impl Settings {
             Block::Note("These defaults can also be changed before each recording. The clipboard, notification, open and command settings under After capture also apply to recordings; the clipboard gets the video file.".into()),
         ];
         // Shortcuts (KDE's keys come later)
-        let global_rows = shortcuts::ACTIONS
+        let mut global_rows: Vec<Row> = shortcuts::ACTIONS
             .iter()
             .map(|(action, label, _)| Row::new(sc_id(action), label, "", Control::Shortcut { seq: String::new(), enabled: false }))
             .collect();
+        // (without KDE's service: the desktop's portal, if it has them; shown once that's known)
+        let mut portal = Row::new(
+            "portal_shortcuts",
+            "Ask the desktop for these",
+            "Through its portal. GNOME asks you to confirm the keys; on Hyprland, bind keys to them in its config (hyprctl globalshortcuts lists them).",
+            Control::Toggle(c.portal_shortcuts),
+        );
+        portal.visible = false;
+        global_rows.push(portal);
         let mut shortcuts_page =
-            vec![Block::Card { heading: String::new(), rows: global_rows }, Block::Note(global_note(None)), Block::Title("Keys in Flatshot RS".into())];
+            vec![Block::Card { heading: String::new(), rows: global_rows }, Block::Note(global_note(None, false)), Block::Title("Keys in Flatshot RS".into())];
         shortcuts_page.push(Block::Note(
             "Keys used in the capture screen and the annotation editor. Click a field and press a key; Backspace clears it. Esc, Enter, and Ctrl+S / Ctrl+C to capture, stay as they are.".into(),
         ));
@@ -809,10 +823,45 @@ impl Settings {
                 row.control = Control::Shortcut { seq: keys.get(*action).cloned().unwrap_or_default(), enabled };
             }
         }
-        if let Some(Block::Note(n)) = self.pages.iter_mut().find(|p| p.name == "Shortcuts").and_then(|p| p.blocks.get_mut(1)) {
-            *n = global_note(Some(enabled));
+        self.sync_global_note();
+        self.sync_visibility();
+        self.damaged = true;
+    }
+
+    /// Whether the desktop's portal offers global shortcuts (asked in the
+    /// background, for where KDE's service isn't).
+    pub fn set_portal(&mut self, offered: bool) {
+        self.portal = offered;
+        self.sync_global_note();
+        self.sync_visibility();
+        self.damaged = true;
+    }
+
+    /// The keys the desktop's portal gave the actions: shown, but changed
+    /// in the desktop's own settings, not here.
+    pub fn portal_keys(&mut self, keys: &HashMap<String, String>) {
+        for (action, _, _) in shortcuts::ACTIONS {
+            if let Some(row) = self.find_mut(sc_id(action)) {
+                row.control = Control::Shortcut { seq: keys.get(*action).cloned().unwrap_or_default(), enabled: false };
+            }
         }
         self.damaged = true;
+    }
+
+    /// How asking the desktop's portal for the shortcuts went: why not, if
+    /// it didn't.
+    pub fn portal_answer(&mut self, error: Option<String>) {
+        if let Some(row) = self.find_mut("portal_shortcuts") {
+            row.error = error.map(|e| format!("The desktop didn't give them: {e}."));
+            self.damaged = true;
+        }
+    }
+
+    fn sync_global_note(&mut self) {
+        let note = global_note(self.global_shortcuts, self.portal);
+        if let Some(Block::Note(n)) = self.pages.iter_mut().find(|p| p.name == "Shortcuts").and_then(|p| p.blocks.get_mut(1)) {
+            *n = note;
+        }
     }
 
     /// Show page `index` (0 General ... 4 Shortcuts).
@@ -881,7 +930,15 @@ impl Settings {
         let quality = lossy.contains(&self.cfg.format.as_str());
         let (loupe, sound, snap) = (self.cfg.show_loupe, self.cfg.sound, self.cfg.snap_edges);
         let previews = [("preview", self.preview(false)), ("record_preview", self.preview(true))];
-        for (id, shown) in [("quality", quality), ("loupe_size", loupe), ("sound_file", sound), ("snap_distance", snap), ("snap_sensitivity", snap)] {
+        let portal = self.global_shortcuts == Some(false) && self.portal;
+        for (id, shown) in [
+            ("quality", quality),
+            ("loupe_size", loupe),
+            ("sound_file", sound),
+            ("snap_distance", snap),
+            ("snap_sensitivity", snap),
+            ("portal_shortcuts", portal),
+        ] {
             if let Some(r) = self.find_mut(id) {
                 r.visible = shown;
             }
@@ -1412,6 +1469,9 @@ impl Settings {
                     }
                 } else {
                     self.set(id, Value::Bool(on));
+                    if id == "portal_shortcuts" {
+                        self.requests.push(Request::PortalShortcuts(on));
+                    }
                 }
             }
             (Part::Segment(i), Control::Segmented { options, value, .. }, _) | (Part::Segment(i), _, Control::Segmented { options, value, .. }) => {
@@ -2045,7 +2105,9 @@ impl Settings {
                 if recording {
                     p.draw_text(text_r, Align::Left, "Press a shortcut…", control_font(), c.soft);
                 } else if !seq.is_empty() {
-                    p.draw_text(text_r, Align::Left, &keyseq::label(seq), control_font(), if *enabled { c.text } else { c.muted });
+                    // (keys as the desktop describes them, if they're not in our form)
+                    let label = Some(keyseq::label(seq)).filter(|l| !l.is_empty()).unwrap_or_else(|| seq.clone());
+                    p.draw_text(text_r, Align::Left, &label, control_font(), if *enabled { c.text } else { c.muted });
                     if *enabled {
                         let cx = Point::new(rect.right() - 15.0, rect.center().y);
                         let pen = Pen::new(if hovered(Part::Clear) { c.text } else { c.muted }, 1.4);
@@ -2190,10 +2252,13 @@ fn line_parts(rect: Rect, buttons: &[&str]) -> (Rect, Vec<Rect>) {
     (Rect::new(rect.x, rect.y, (right - rect.x).max(40.0), 32.0), rects)
 }
 
-fn global_note(enabled: Option<bool>) -> String {
+fn global_note(enabled: Option<bool>, portal: bool) -> String {
     match enabled {
         None => "Looking for KDE's shortcut service…".into(),
         Some(true) => "Global shortcuts are managed by KDE and also appear in System Settings → Shortcuts → Flatshot RS.".into(),
+        Some(false) if portal => {
+            "KDE's shortcut service isn't here, but the desktop can give these keys through its portal (the switch above), or bind the command flatshot-rs in the desktop's keyboard settings.".into()
+        }
         Some(false) => "Global shortcuts require KDE Plasma. On other desktops, bind the command flatshot-rs in the desktop's keyboard settings.".into(),
     }
 }
@@ -2363,6 +2428,33 @@ mod tests {
         // No shortcut service: the rows can't be used.
         s.set_global(None);
         assert!(matches!(s.row(b, r).unwrap().control, Control::Shortcut { enabled: false, .. }));
+    }
+
+    #[test]
+    fn the_desktop_portal_where_kde_has_no_shortcuts() {
+        let mut s = settings();
+        s.show_page(4);
+        let shown = |s: &mut Settings| s.find_mut("portal_shortcuts").is_some_and(|r| r.visible);
+        // Offered only once KDE's service is known to be missing, and the portal has them.
+        s.set_portal(true);
+        assert!(!shown(&mut s));
+        s.set_global(None);
+        assert!(shown(&mut s));
+        // Turned on: saved, and asked of the tray app; why not, if the desktop says no.
+        let (b, r) = row_at(&s, "portal_shortcuts");
+        click(&mut s, Hit::Row(b, r, Part::Control));
+        assert!(s.cfg.portal_shortcuts && crate::config::load().portal_shortcuts);
+        assert_eq!(s.take_requests(), vec![Request::PortalShortcuts(true)]);
+        s.portal_answer(Some("you said no".into()));
+        assert!(s.find_mut("portal_shortcuts").unwrap().error.as_deref().is_some_and(|e| e.contains("you said no")));
+        s.portal_answer(None);
+        assert!(s.find_mut("portal_shortcuts").unwrap().error.is_none());
+        // Where KDE's service is, or the portal has none: not offered.
+        s.set_portal(false);
+        assert!(!shown(&mut s));
+        s.set_portal(true);
+        s.set_global(Some(BTreeMap::new()));
+        assert!(!shown(&mut s));
     }
 
     #[test]
