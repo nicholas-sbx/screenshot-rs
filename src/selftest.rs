@@ -718,6 +718,18 @@ fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     let mut s = session(cfg, Request { record: true, ..Default::default() }, vec![screen], FakeRecorder { problem: None, span: false });
     check!(s.st.tool == Tool::Record && s.st.can_record);
     s.pointer_enter(0, Point::new(300.0, 300.0));
+    // Drawings made first are out of sight while choosing what to record
+    // (a video has none), untouched by undo, and back with another tool.
+    tap(&mut s, 0, 0x46, "f", 0);
+    drag(&mut s, 0, Point::new(300.0, 300.0), Point::new(350.0, 350.0), 0);
+    let drawn = frame(&mut s, 0)?.pixel(325, 325);
+    check!(drawn != desktop.pixel(325, 325), "the box wasn't drawn");
+    tap(&mut s, 0, 0x56, "v", 0);
+    check!(s.st.tool == Tool::Record && frame(&mut s, 0)?.pixel(325, 325) == desktop.pixel(325, 325), "a drawing shows while choosing what to record");
+    tap(&mut s, 0, key::Z, "", CTRL);
+    tap(&mut s, 0, 0x50, "p", 0);
+    check!(frame(&mut s, 0)?.pixel(325, 325) == drawn, "the drawing didn't come back (or undo took it out of sight)");
+    tap(&mut s, 0, 0x56, "v", 0);
     drag(&mut s, 0, Point::new(200.0, 200.0), Point::new(700.0, 500.0), 0);
     check!(!s.done && s.overlays[0].area(&s.st) == Some(Rect::new(200.0, 200.0, 500.0, 300.0)), "{:?}", s.overlays[0].area(&s.st));
     check!(s.st.rec_area.is_some() && s.overlays[0].panel.is_some(), "no recording panel");
@@ -765,6 +777,8 @@ fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
         Some(Outcome::Record(job)) => {
             check!(job.area == IRect::new(200, 200, 500, 300) && job.fps == 60 && job.shot.mode == "region", "{job:?}");
             check!(job.thumbnail.size() == (500, 300));
+            // (and its picture has no drawings, as the video won't)
+            check!(job.thumbnail.pixel(125, 125) == desktop.pixel(325, 325), "the drawing is in the recording's picture");
         }
         other => return Err(format!("recording gave {other:?}")),
     }

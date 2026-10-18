@@ -182,6 +182,12 @@ impl State {
     pub fn color(&self) -> Color {
         self.palette.get(self.color_index).copied().unwrap_or(self.custom_color)
     }
+
+    /// Are the drawings out of sight? While choosing what to record: a
+    /// video has none. They're kept, and show again with any other tool.
+    pub fn drawings_hidden(&self) -> bool {
+        self.tool == Tool::Record
+    }
 }
 
 /// The toolbar's colour swatches (ids `swatch.N`, from 0) and your own

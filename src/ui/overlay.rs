@@ -309,6 +309,12 @@ impl Overlay {
         Ok(out)
     }
 
+    /// `rect` (logical; None: all of it) as the screen is: no drawings, no
+    /// pointer drawn in.
+    pub fn render_plain(&self, rect: Option<Rect>) -> Result<Image, String> {
+        self.plain.as_ref().unwrap_or(&self.base).crop(self.render_rect(rect))
+    }
+
     /// The picture's pixels for `rect` (logical; None: all of it).
     pub fn render_rect(&self, rect: Option<Rect>) -> IRect {
         let dpr = self.dpr;
@@ -478,19 +484,20 @@ impl Overlay {
         } else {
             None
         };
-        for (i, s) in self.annotations.iter().enumerate() {
+        let shown = !st.drawings_hidden();
+        for (i, s) in self.annotations.iter().enumerate().filter(|_| shown) {
             elements.push(Element { id: Id::Annotation(i), bounds: self.dev(s.bounds(), 2), key: shape_key(s, i) });
         }
-        if let Some(s) = &self.active {
+        if let Some(s) = self.active.as_ref().filter(|_| shown) {
             elements.push(Element { id: Id::Active, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX) });
         }
-        if let Some(s) = self.selection.moving() {
+        if let Some(s) = self.selection.moving().filter(|_| shown) {
             elements.push(Element { id: Id::Moving, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX - 2) });
         }
-        for (i, s) in self.foreign.iter().enumerate() {
+        for (i, s) in self.foreign.iter().enumerate().filter(|_| shown) {
             elements.push(Element { id: Id::Foreign(i), bounds: self.dev(s.bounds(), 2), key: shape_key(s, i) });
         }
-        for (i, s) in self.foreign_live.iter().enumerate() {
+        for (i, s) in self.foreign_live.iter().enumerate().filter(|_| shown) {
             elements.push(Element { id: Id::ForeignLive(i), bounds: self.dev(s.bounds(), 2), key: shape_key(s, i) });
         }
         if st.tool == Tool::Select
@@ -512,6 +519,7 @@ impl Overlay {
         }
         if let Some((o, s)) = &st.text_edit
             && *o == self.index
+            && shown
         {
             elements.push(Element { id: Id::TextEdit, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX - 1) });
         }
@@ -839,7 +847,7 @@ impl Overlay {
             .chain(self.selection.moving())
             .chain(self.foreign_live.iter())
             .chain(st.text_edit.iter().filter(|(o, _)| *o == self.index).map(|(_, s)| s))
-            .filter(|s| self.dev(s.bounds(), 2).intersects(&region))
+            .filter(|s| !st.drawings_hidden() && self.dev(s.bounds(), 2).intersects(&region))
             .collect();
         // 1. The picture, shaded outside the focus unless drawings come first.
         let shade_now = if drawn.is_empty() { dim } else { None };

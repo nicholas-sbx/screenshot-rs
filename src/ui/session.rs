@@ -1205,6 +1205,10 @@ impl Session {
         if tool != Tool::Select {
             self.select_on(None);
         }
+        if tool == Tool::Record {
+            // (the drawings go out of sight, and what's for them with them)
+            self.close_picker();
+        }
         // (the text tool chosen again: its next style)
         if tool == Tool::Text && self.st.tool == Tool::Text {
             self.st.text_style = self.st.text_style.next();
@@ -1539,7 +1543,8 @@ impl Session {
         shot.monitor = ov.output.name.clone();
         self.name_source(&mut shot, window);
         let spanning = !g.contains_rect(&area);
-        let thumbnail = if spanning && self.may_span { self.render_desktop(area, true) } else { ov.render(Some(rect)) };
+        // (as the video will be: no drawings)
+        let thumbnail = if spanning && self.may_span { self.render_desktop(area, false) } else { ov.render_plain(Some(rect)) };
         let thumbnail = match thumbnail {
             Ok(t) => t,
             Err(e) => return self.fail(&e),
@@ -1766,6 +1771,9 @@ impl Session {
     }
 
     pub fn undo(&mut self) {
+        if self.st.drawings_hidden() {
+            return; // (nothing is changed out of sight)
+        }
         self.commit_text();
         self.select_on(None);
         if let Some(o) = self.history.pop()
@@ -1777,6 +1785,9 @@ impl Session {
     }
 
     pub fn redo(&mut self) {
+        if self.st.drawings_hidden() {
+            return;
+        }
         self.commit_text();
         self.select_on(None);
         if let Some(o) = self.redo_stack.pop()
