@@ -299,7 +299,7 @@ jobs:
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    container: public.ecr.aws/docker/library/ubuntu:24.04
+    # (on the runner itself, an Ubuntu: no image to pull)
     permissions:
       contents: write
     steps:
@@ -313,8 +313,8 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
           REPO_GPG_KEY: ${{ secrets.REPO_GPG_KEY || secrets.PACMAN_GPG_KEY }}
         run: |
-          apt-get update -q
-          apt-get install -y -q --no-install-recommends dpkg-dev apt-utils gnupg
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends dpkg-dev apt-utils gnupg
           mkdir repo
           cp dist/*.deb repo/
           cd repo
@@ -344,17 +344,17 @@ jobs:
           FINGERPRINT: ${{ steps.repo.outputs.fingerprint }}
         run: |
           if [ -n "$FINGERPRINT" ]; then
-            install -Dm644 repo/flatshot-rs.gpg /usr/share/keyrings/flatshot-rs.gpg
+            sudo install -Dm644 repo/flatshot-rs.gpg /usr/share/keyrings/flatshot-rs.gpg
             opts="signed-by=/usr/share/keyrings/flatshot-rs.gpg"
           else
             opts="trusted=yes"
           fi
           # (somewhere apt's unprivileged downloader can read)
-          cp -r repo /srv/flatshot-rs
-          chmod -R a+rX /srv/flatshot-rs
-          echo "deb [$opts] file:///srv/flatshot-rs ./" > /etc/apt/sources.list.d/flatshot-rs.list
-          apt-get update -q
-          apt-get install -y -q flatshot-rs
+          sudo cp -r repo /srv/flatshot-rs
+          sudo chmod -R a+rX /srv/flatshot-rs
+          echo "deb [$opts] file:///srv/flatshot-rs ./" | sudo tee /etc/apt/sources.list.d/flatshot-rs.list
+          sudo apt-get update -q
+          sudo apt-get install -y -q flatshot-rs
           flatshot-rs --version
           flatshot-rs --self-test
       - uses: softprops/action-gh-release@v2
