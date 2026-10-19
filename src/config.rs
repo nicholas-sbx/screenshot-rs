@@ -369,9 +369,14 @@ pub fn load() -> Config {
     Config::from_map(&read_json(&config_path()))
 }
 
+/// One change to the files at a time: each reads what's there, changes it
+/// and writes it back, and two at once (from two threads) would lose one.
+static CHANGING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Change some settings on disk without disturbing the others: read what's
 /// there now, apply `change`, write it back.
 pub fn update(change: impl FnOnce(&mut Config)) {
+    let _alone = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
     let mut saved = load();
     change(&mut saved);
     if let Err(e) = saved.save() {
@@ -581,6 +586,7 @@ pub fn load_state() -> Map<String, Value> {
 }
 
 pub fn update_state(changes: Vec<(&str, Value)>) {
+    let _alone = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
     let mut state = load_state();
     for (k, v) in changes {
         state.insert(k.to_string(), v);
