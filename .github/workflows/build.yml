@@ -179,8 +179,8 @@ jobs:
           path: dist/*
 
   install:
-    # (images from the Docker library's mirror on ECR: Docker Hub limits
-    # pulls from shared runners)
+    # (images from Google's mirror of the Docker library: Docker Hub, and
+    # ECR's mirror of it, limit pulls from shared runners)
     name: install (${{ matrix.image }})
     needs: packages
     runs-on: ubuntu-24.04
@@ -190,17 +190,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: public.ecr.aws/docker/library/ubuntu:22.04
+          - image: mirror.gcr.io/library/ubuntu:22.04
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: public.ecr.aws/docker/library/ubuntu:24.04
+          - image: mirror.gcr.io/library/ubuntu:24.04
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: public.ecr.aws/docker/library/debian:bookworm
+          - image: mirror.gcr.io/library/debian:bookworm
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: public.ecr.aws/docker/library/debian:trixie
+          - image: mirror.gcr.io/library/debian:trixie
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: public.ecr.aws/docker/library/fedora:latest
+          - image: mirror.gcr.io/library/fedora:latest
             install: dnf install -y ./dist/*.rpm
-          - image: public.ecr.aws/docker/library/archlinux:latest
+          - image: mirror.gcr.io/library/archlinux:latest
             install: pacman -Syu --noconfirm && pacman -U --noconfirm ./dist/*.pkg.tar.zst
     steps:
       - uses: actions/download-artifact@v4
@@ -255,7 +255,7 @@ jobs:
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    container: public.ecr.aws/docker/library/archlinux:latest
+    container: mirror.gcr.io/library/archlinux:latest
     permissions:
       contents: write
     steps:
