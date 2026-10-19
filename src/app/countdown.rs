@@ -107,9 +107,11 @@ impl App {
         let mut cd = Countdown { job, started: now, at: now + delay, reload, dials: Vec::new() };
         if delay > GONE_BEFORE && self.dpy.can_place() {
             let size = DIAL.ceil() as u32;
+            // (the overlay's namespace: one KWin doesn't animate)
+            let namespace = super::layer_namespace();
             for (i, m) in self.dpy.monitors().iter().enumerate().take(u8::MAX as usize) {
                 let at = ((m.rect.w - size as i32) / 2, m.rect.h - size as i32 - ABOVE);
-                if self.dpy.add_control(Owner::Countdown(i as u8), m, at, (size, size), "flatshot-countdown", true) {
+                if self.dpy.add_control(Owner::Countdown(i as u8), m, at, (size, size), &namespace, true) {
                     cd.dials.push((i as u8, 0.0, None));
                 }
             }
