@@ -1067,11 +1067,32 @@ impl App {
         if !cfg.run_command.trim().is_empty() {
             deliver::run_command(&cfg.run_command, path);
         }
+        let length = length.unwrap_or(rec.recorded);
+        let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let thumbnail = rec.thumbnail.as_ref().and_then(|t| save_thumbnail(t, path));
+        // (the size it was recorded at: the area in the screen's pixels)
+        let r = rec.target.rect;
+        let (width, height) = ((r.w as f64 * rec.target.scale).round() as u32, (r.h as f64 * rec.target.scale).round() as u32);
+        crate::history::add(&crate::history::Entry {
+            path: std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+            time: util::now_ms(),
+            kind: "recording".into(),
+            width,
+            height,
+            bytes: size,
+            app: rec.shot.app.clone(),
+            title: rec.shot.title.clone(),
+            monitor: rec.shot.monitor.clone(),
+            area: Some(r),
+            copied: if copied { cfg.clipboard.clone() } else { String::new() },
+            seconds: Some(length.as_secs_f64()),
+            thumbnail: thumbnail.clone(),
+            ..Default::default()
+        });
+        self.recent_changed();
         if !cfg.notify {
             return;
         }
-        let length = length.unwrap_or(rec.recorded);
-        let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         let mut bits = vec![util::displayable(&notify::file_name(path)), record::clock(length), human_size(size)];
         if copied {
             bits.push(if cfg.clipboard == "path" { "path copied" } else { "copied to clipboard" }.to_string());
@@ -1079,7 +1100,7 @@ impl App {
         let mut note = notify::Note {
             summary: "Recording saved".into(),
             body: bits.join("  ·  "),
-            image: rec.thumbnail.as_ref().and_then(|t| save_thumbnail(t, path)),
+            image: thumbnail,
             file: Some(path.to_path_buf()),
             event: "recording",
             ..Default::default()

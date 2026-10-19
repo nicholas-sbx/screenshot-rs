@@ -62,15 +62,25 @@ struct Incr {
 }
 
 struct Paste {
-    tx: mpsc::Sender<Option<String>>,
+    sink: PasteSink,
     wake: Waker,
     /// the types still to try
     types: Vec<xproto::Atom>,
+    /// the type asked for now
+    asked: xproto::Atom,
     kind: xproto::Atom,
     got: Vec<u8>,
+    /// the most taken
+    max: usize,
     /// coming in pieces
     incr: bool,
     until: Instant,
+}
+
+/// Where a paste's data goes: as text, or as it is with its type.
+enum PasteSink {
+    Text(mpsc::Sender<Option<String>>),
+    Bytes(mpsc::Sender<Option<(String, Vec<u8>)>>),
 }
 
 enum Converted {
@@ -315,14 +325,15 @@ impl X11 {
     /// Read (and delete) the paste's property: all of it, or the next piece.
     fn read_paste(&mut self) {
         let property = self.atoms.FLATSHOT_PASTE;
-        let reply = self.conn.get_property(true, self.helper, property, AtomEnum::ANY, 0, (MAX_PASTE / 4 + 1) as u32).ok().and_then(|c| c.reply().ok());
+        let max = self.clip.paste.as_ref().map_or(0, |p| p.max);
+        let reply = self.conn.get_property(true, self.helper, property, AtomEnum::ANY, 0, (max / 4 + 1) as u32).ok().and_then(|c| c.reply().ok());
         let Some(r) = reply else { return self.end_paste(None) };
         let Some(p) = self.clip.paste.as_mut() else { return };
         if !p.incr && r.type_ == self.atoms.INCR {
             p.incr = true; // (the pieces follow, each announced by a new value)
             return;
         }
-        if r.bytes_after > 0 || p.got.len() + r.value.len() > MAX_PASTE as usize {
+        if r.bytes_after > 0 || p.got.len() + r.value.len() > p.max {
             return self.end_paste(None);
         }
         p.kind = r.type_;
@@ -331,35 +342,72 @@ impl X11 {
             p.until = Instant::now() + STALL;
             return;
         }
-        let latin = p.kind == u32::from(AtomEnum::STRING);
-        let text = if latin { p.got.iter().map(|&b| b as char).collect() } else { String::from_utf8_lossy(&p.got).into_owned() };
-        self.end_paste(Some(text));
+        let got = std::mem::take(&mut p.got);
+        self.end_paste(Some(got));
     }
 
     fn ask_paste(&mut self, kind: xproto::Atom) {
+        if let Some(p) = &mut self.clip.paste {
+            p.asked = kind;
+        }
         let _ = self.conn.convert_selection(self.helper, self.atoms.CLIPBOARD, kind, self.atoms.FLATSHOT_PASTE, self.time);
         let _ = self.conn.flush();
     }
 
-    fn end_paste(&mut self, text: Option<String>) {
-        if let Some(p) = self.clip.paste.take() {
-            let _ = p.tx.send(text);
-            (p.wake)();
+    /// The paste is over, with what came of it (None: nothing).
+    fn end_paste(&mut self, got: Option<Vec<u8>>) {
+        let Some(p) = self.clip.paste.take() else { return };
+        match p.sink {
+            PasteSink::Text(tx) => {
+                let latin = p.kind == u32::from(AtomEnum::STRING);
+                let text = got.map(|g| if latin { g.iter().map(|&b| b as char).collect() } else { String::from_utf8_lossy(&g).into_owned() });
+                let _ = tx.send(text);
+            }
+            PasteSink::Bytes(tx) => {
+                let name = self.atom_name(p.asked).unwrap_or_default();
+                let _ = tx.send(got.map(|g| (name, g)));
+            }
         }
+        (p.wake)();
     }
 
     pub fn paste_text(&mut self, wake: Waker) -> mpsc::Receiver<Option<String>> {
         let (tx, rx) = mpsc::channel();
+        self.start_paste(PasteSink::Text(tx), &PASTE_TYPES, MAX_PASTE as usize, wake);
+        rx
+    }
+
+    /// What's on the clipboard as the first of `mimes` it's offered as (at
+    /// most `max` bytes): the type and the data.
+    pub fn paste(&mut self, mimes: &[&str], max: u64, wake: Waker) -> crate::clipboard::Pasted {
+        let (tx, rx) = mpsc::channel();
+        self.start_paste(PasteSink::Bytes(tx), mimes, max as usize, wake);
+        rx
+    }
+
+    fn start_paste(&mut self, sink: PasteSink, names: &[&str], max: usize, wake: Waker) {
         self.end_paste(None);
-        let mut types: Vec<xproto::Atom> = PASTE_TYPES.iter().filter_map(|t| self.atom(t)).collect();
+        let mut types: Vec<xproto::Atom> = names.iter().filter_map(|t| self.atom(t)).collect();
+        let paste = Paste {
+            sink,
+            wake,
+            types: Vec::new(),
+            asked: x11rb::NONE,
+            kind: x11rb::NONE,
+            got: Vec::new(),
+            max,
+            incr: false,
+            until: Instant::now() + WAIT_FOR_DATA,
+        };
+        self.clip.paste = Some(paste);
         if types.is_empty() {
-            let _ = tx.send(None);
-            return rx;
+            return self.end_paste(None);
         }
         let first = types.remove(0);
-        self.clip.paste = Some(Paste { tx, wake, types, kind: x11rb::NONE, got: Vec::new(), incr: false, until: Instant::now() + WAIT_FOR_DATA });
+        if let Some(p) = &mut self.clip.paste {
+            p.types = types;
+        }
         self.ask_paste(first);
-        rx
     }
 
     fn refuse_waiting(&mut self) {

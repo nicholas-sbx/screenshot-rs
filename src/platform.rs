@@ -61,10 +61,14 @@ pub enum Owner {
     Editor(u32),
     /// the settings window
     Settings,
+    /// the Recent captures window
+    Recent,
     /// the bar with a recording's controls
     RecBar,
     /// a corner mark round the area being recorded (0-3)
     RecMark(u8),
+    /// a delayed capture's countdown, on each monitor (by number)
+    Countdown(u8),
     /// the tray icon, where the panel takes it in itself (X11's XEmbed)
     TrayIcon,
 }
@@ -342,6 +346,12 @@ impl Display {
     /// The clipboard's text, read in the background (None if there's none).
     pub fn paste_text(&mut self, wake: Waker) -> mpsc::Receiver<Option<String>> {
         each!(self, d => d.paste_text(wake))
+    }
+
+    /// What's on the clipboard as the first of `mimes` it's offered as (at
+    /// most `max` bytes), read in the background: its type and data.
+    pub fn paste(&mut self, mimes: &'static [&'static str], max: u64, wake: Waker) -> crate::clipboard::Pasted {
+        each!(self, d => d.paste(mimes, max, wake))
     }
 
     // -- taking the screen through the connection --------------------------------------

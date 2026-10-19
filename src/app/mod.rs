@@ -4,14 +4,18 @@
 
 mod capture;
 mod caret;
+mod countdown;
 mod editor;
 mod finish;
+mod ocr;
 mod pins;
+mod recent;
 mod recording;
 mod settings;
 mod tray;
 
 pub use capture::{Job, Mode, last_region};
+pub use recent::run_recent;
 pub use settings::run_settings;
 pub use tray::{replace_older_tray, run_tray};
 
@@ -96,6 +100,15 @@ pub struct App {
     restarting: bool,
     /// the text caret's blink
     blink: caret::Blink,
+    /// areas whose text is being read
+    reading: Vec<ocr::Reading>,
+    /// the Recent captures window
+    recent: Option<recent::RecentWin>,
+    /// a delayed capture counting down
+    countdown: Option<countdown::Countdown>,
+    /// "Annotate clipboard image": the clipboard's picture being read (and
+    /// whether by wl-paste, the second try)
+    clipboard_image: Option<(crate::clipboard::Pasted, bool)>,
 }
 
 impl Painted for Session {
@@ -128,8 +141,9 @@ impl App {
             Some(Owner::Menu(id)) => return self.menu_input(id, ev),
             Some(Owner::Editor(id)) => return self.editor_input(id, ev),
             Some(Owner::Settings) => return self.settings_input(ev),
+            Some(Owner::Recent) => return self.recent_input(ev),
             Some(Owner::RecBar) => return self.recbar_input(ev),
-            Some(Owner::RecMark(_)) => return,
+            Some(Owner::RecMark(_) | Owner::Countdown(_)) => return,
             _ => {}
         }
         let Some(s) = &mut self.session else { return };
@@ -204,9 +218,10 @@ impl App {
             Owner::TrayIcon => {}
             Owner::Editor(e) => self.editor_close_requested(e),
             Owner::Settings => self.close_settings(),
+            Owner::Recent => self.close_recent(),
             // (the bar's window closed by the desktop: done recording)
             Owner::RecBar => self.stop_recording(),
-            Owner::RecMark(_) => {}
+            Owner::RecMark(_) | Owner::Countdown(_) => {}
         }
     }
 
@@ -247,10 +262,22 @@ impl App {
     fn timeout(&self) -> Option<Duration> {
         let session = self.session.as_ref().and_then(|s| s.next_deadline());
         let taken = self.taken.as_ref().map(|t| t.wait_until);
-        let deadline = [session, self.hold_until, taken, self.editors_deadline(), self.recording_deadline(), self.dpy.next_deadline(), self.blink.deadline()]
-            .into_iter()
-            .flatten()
-            .min()?;
+        let settings = self.settings.as_ref().and_then(|w| w.s.next_deadline());
+        let deadline = [
+            session,
+            self.hold_until,
+            taken,
+            self.editors_deadline(),
+            settings,
+            self.recent_deadline(),
+            self.countdown_deadline(),
+            self.recording_deadline(),
+            self.dpy.next_deadline(),
+            self.blink.deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()?;
         Some(deadline.saturating_duration_since(Instant::now()))
     }
 
@@ -275,8 +302,12 @@ impl App {
         self.poll_notifications();
         self.poll_editors();
         self.poll_open_dialog();
+        self.poll_clipboard_image();
         self.poll_settings();
         self.poll_recording();
+        self.poll_reading();
+        self.poll_recent();
+        self.poll_countdown();
         if let Some(rx) = &self.paste_rx
             && let Ok(text) = rx.try_recv()
         {
@@ -306,7 +337,7 @@ impl App {
         self.update_text_input();
         self.dpy.flush();
         // (events read meanwhile, while waiting for a reply, are no longer
-        // on the socket for the loop to hear: another round for them)
+        // on the socket for the loop to hear: the wake handles them)
         if let Display::X11(x) = &mut self.dpy
             && x.has_events()
         {
@@ -324,6 +355,8 @@ impl App {
         self.redraw_pins();
         self.redraw_editors();
         self.redraw_settings();
+        self.redraw_recent();
+        self.redraw_countdown();
         self.redraw_recording();
         self.redraw_tray_icon();
         let Some(s) = &mut self.session else { return };
@@ -352,6 +385,10 @@ impl App {
             },
             (Owner::Settings, _) => match &self.settings {
                 Some(w) => w.s.cursor(),
+                None => return,
+            },
+            (Owner::Recent, _) => match &self.recent {
+                Some(w) => w.r.cursor(),
                 None => return,
             },
             (Owner::RecBar | Owner::TrayIcon, _) => CursorShape::Arrow,
@@ -441,7 +478,14 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         crate::warn!("event loop: {e}");
         2
     })?;
-    let _ = event_loop.handle().insert_source(ping_source, |_, _, _| {});
+    // (a wake from a thread, or from after_dispatch for X events read while
+    // waiting for a reply: those are no longer on the socket, so the X
+    // source won't fire for them, and they're handled here)
+    let _ = event_loop.handle().insert_source(ping_source, |_, _, app: &mut App| {
+        if matches!(app.dpy, Display::X11(_)) {
+            app.x11_dispatch();
+        }
+    });
     if let Some(fd) = crate::signals::fd() {
         let source = calloop::generic::Generic::new(fd, calloop::Interest::READ, calloop::Mode::Level);
         let _ = event_loop.handle().insert_source(source, |_, fd, app: &mut App| {
@@ -482,6 +526,10 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         quit_after_recording: false,
         restarting: false,
         blink: caret::Blink::default(),
+        reading: Vec::new(),
+        recent: None,
+        countdown: None,
+        clipboard_image: None,
     };
     match queue {
         Some(mut queue) => {
@@ -547,15 +595,13 @@ pub fn run_once(args: &Args) -> i32 {
         crate::warn!("unknown capture mode");
         return 2;
     };
-    let mut asked = started;
+    let job = Job { mode, pin: args.pin, record: args.record, ocr: args.ocr, scan: !args.no_scan, asked: started };
     if args.delay > 0.0 {
-        if let Some(s) = crate::signals::wait(Duration::from_secs_f64(args.delay.min(3600.0))) {
-            return crate::signals::exit_code(s);
-        }
-        asked = Instant::now();
+        // (counted down on screen; Ctrl+C still stops it)
+        app.count_down(job, Duration::from_secs_f64(args.delay.min(3600.0)), false);
+    } else {
+        app.start_capture(job);
     }
-    let job = Job { mode, pin: args.pin, record: args.record, scan: !args.no_scan, asked };
-    app.start_capture(job);
     app.after_dispatch(); // (it may have ended already)
     while app.exit.is_none() {
         let timeout = app.timeout();
@@ -578,11 +624,15 @@ pub fn run_editor(args: &Args) -> i32 {
         Ok(x) => x,
         Err(code) => return code,
     };
-    let Some(image) = &args.image else { return 2 };
-    let path = std::path::PathBuf::from(config::expand_user(image));
-    let save_to = args.output.as_ref().map(|o| std::path::PathBuf::from(config::expand_user(o)));
-    if !app.open_editor(&path, save_to) {
-        return 2;
+    if args.from_clipboard {
+        app.annotate_clipboard();
+    } else {
+        let Some(image) = &args.image else { return 2 };
+        let path = std::path::PathBuf::from(config::expand_user(image));
+        let save_to = args.output.as_ref().map(|o| std::path::PathBuf::from(config::expand_user(o)));
+        if !app.open_editor(&path, save_to) {
+            return 2;
+        }
     }
     app.finished = Some(0);
     while app.exit.is_none() {

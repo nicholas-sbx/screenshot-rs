@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use zbus::message::Header;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 
 const PATH: &str = "/org/freedesktop/portal/desktop";
 const NODE_NAME: &str = "flatshot-fake-cast";
@@ -25,12 +25,12 @@ fn sender_part(header: &Header<'_>) -> String {
     header.sender().map(|s| s.trim_start_matches(':').replace('.', "_")).unwrap_or_default()
 }
 
-fn token(options: &HashMap<String, OwnedValue>, key: &str) -> String {
+fn token(options: &HashMap<String, OwnedVariant>, key: &str) -> String {
     options.get(key).and_then(|v| String::try_from(v.try_clone().ok()?).ok()).unwrap_or_else(|| "t".into())
 }
 
 /// Answer a request: the Response signal on its object.
-async fn respond(conn: &zbus::Connection, path: &str, results: HashMap<&str, Value<'_>>) {
+async fn respond(conn: &zbus::Connection, path: &str, results: HashMap<&str, Variant<'_>>) {
     let r = conn.emit_signal(None::<()>, path, "org.freedesktop.portal.Request", "Response", &(0u32, results)).await;
     if let Err(e) = r {
         println!("screencast: can't answer: {e}");
@@ -62,7 +62,7 @@ impl Cast {
     #[zbus(name = "CreateSession")]
     async fn create_session(
         &self,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
     ) -> OwnedObjectPath {
@@ -70,7 +70,7 @@ impl Cast {
         let request = format!("{PATH}/request/{sender}/{}", token(&options, "handle_token"));
         let session = format!("{PATH}/session/{sender}/{}", token(&options, "session_handle_token"));
         println!("screencast: CreateSession -> {session}");
-        respond(conn, &request, HashMap::from([("session_handle", Value::from(session))])).await;
+        respond(conn, &request, HashMap::from([("session_handle", Variant::from(session))])).await;
         OwnedObjectPath::try_from(request).unwrap()
     }
 
@@ -78,7 +78,7 @@ impl Cast {
     async fn select_sources(
         &self,
         session: OwnedObjectPath,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
     ) -> OwnedObjectPath {
@@ -95,26 +95,26 @@ impl Cast {
         &self,
         session: OwnedObjectPath,
         _parent: String,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
     ) -> OwnedObjectPath {
         println!("screencast: Start {}", session.as_str());
         let request = format!("{PATH}/request/{}/{}", sender_part(&header), token(&options, "handle_token"));
         let node = *self.node.lock().unwrap();
-        let mut results: HashMap<&str, Value<'_>> = HashMap::new();
+        let mut results: HashMap<&str, Variant<'_>> = HashMap::new();
         if let Some(node) = node {
-            let props: HashMap<&str, Value<'_>> =
-                HashMap::from([("position", Value::from((0i32, 0i32))), ("size", Value::from(self.size)), ("source_type", Value::from(1u32))]);
-            results.insert("streams", Value::from(vec![(node, props)]));
-            results.insert("restore_token", Value::from("fake-restore-token"));
+            let props: HashMap<&str, Variant<'_>> =
+                HashMap::from([("position", Variant::from((0i32, 0i32))), ("size", Variant::from(self.size)), ("source_type", Variant::from(1u32))]);
+            results.insert("streams", Variant::from(vec![(node, props)]));
+            results.insert("restore_token", Variant::from("fake-restore-token"));
         }
         respond(conn, &request, results).await;
         OwnedObjectPath::try_from(request).unwrap()
     }
 
     #[zbus(name = "OpenPipeWireRemote")]
-    fn open_pipewire_remote(&self, session: OwnedObjectPath, _options: HashMap<String, OwnedValue>) -> zbus::fdo::Result<zbus::zvariant::OwnedFd> {
+    fn open_pipewire_remote(&self, session: OwnedObjectPath, _options: HashMap<String, OwnedVariant>) -> zbus::fdo::Result<zbus::OwnedFd> {
         println!("screencast: OpenPipeWireRemote {}", session.as_str());
         let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
         let stream = UnixStream::connect(format!("{dir}/pipewire-0")).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
@@ -142,14 +142,10 @@ fn main() {
         node = find_node();
     }
     println!("screencast: stream node {node:?}");
-    let _conn = zbus::blocking::connection::Builder::session()
-        .unwrap()
-        .name("org.freedesktop.portal.Desktop")
-        .unwrap()
-        .serve_at(PATH, Cast { size, node: Mutex::new(node) })
-        .unwrap()
-        .build()
-        .unwrap();
+    let _conn = zbus::block_on(
+        zbus::connection::Builder::session().name("org.freedesktop.portal.Desktop").serve_at(PATH, Cast { size, node: Mutex::new(node) }).build(),
+    )
+    .unwrap();
     println!("fake screen-cast portal ready");
     let _ = producer.wait();
 }

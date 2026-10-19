@@ -101,6 +101,15 @@ if cmp -s "$work/pasted.png" "$work/copied.png" && grep -q "in pieces" "$work/pa
 else
     fail "paste: $(cat "$work/paste.log")"
 fi
+# The big picture on the clipboard, taken in pieces and annotated: saved
+# as a capture of its own.
+$BIN --from-clipboard -v > "$work/clip-editor.log" 2>&1 &
+clip=$!
+up "$work/clip-editor.log" || true
+$EX/xinject move 400 300 sleep 300 key ctrl+s sleep 500 key ctrl+w sleep 300
+finish $clip 5
+[ $code = 0 ] && pass "the clipboard's picture opened and closed" || { fail "--from-clipboard exited $code"; tail -n 5 "$work/clip-editor.log"; }
+expect_size "the clipboard's picture saved" "$(newest)" "500 350"
 kill $pid $noise 2>/dev/null || true
 wait $pid $noise 2>/dev/null || true
 

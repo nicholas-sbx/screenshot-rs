@@ -12,8 +12,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use zbus::blocking::Connection;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Structure};
+use zbus::{OwnedObjectPath, OwnedVariant, Structure};
 
 struct Accel {
     keys: Mutex<HashMap<String, Vec<(Vec<i32>,)>>>,
@@ -75,10 +74,12 @@ impl Watcher {
 
 /// Look at the tray icon like a panel would, and click what we're told to.
 fn inspect(service: &str) {
-    let conn = Connection::session().unwrap();
-    let props =
-        zbus::blocking::fdo::PropertiesProxy::builder(&conn).destination(service.to_string()).unwrap().path("/StatusNotifierItem").unwrap().build().unwrap();
-    let all = props.get_all("org.kde.StatusNotifierItem".try_into().unwrap()).unwrap();
+    let conn = zbus::block_on(zbus::Connection::session()).unwrap();
+    let all = zbus::block_on(async {
+        let props = zbus::fdo::PropertiesProxy::builder(&conn).destination(service.to_string()).path("/StatusNotifierItem").build().await?;
+        props.get_all("org.kde.StatusNotifierItem".try_into()?).await
+    })
+    .unwrap();
     let pixmaps: Vec<(i32, i32, Vec<u8>)> = all.get("IconPixmap").cloned().map(|v| v.try_into().unwrap()).unwrap_or_default();
     let menu: OwnedObjectPath = all["Menu"].clone().try_into().unwrap();
     println!(
@@ -88,15 +89,17 @@ fn inspect(service: &str) {
         pixmaps.iter().map(|p| p.0).collect::<Vec<_>>(),
         menu.as_str()
     );
-    let reply = conn.call_method(Some(service), menu.as_str(), Some("com.canonical.dbusmenu"), "GetLayout", &(0i32, -1i32, Vec::<String>::new())).unwrap();
-    type Layout = (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>);
+    let reply =
+        zbus::block_on(conn.call_method(Some(service), menu.as_str(), Some("com.canonical.dbusmenu"), "GetLayout", &(0i32, -1i32, Vec::<String>::new())))
+            .unwrap();
+    type Layout = (i32, HashMap<String, OwnedVariant>, Vec<OwnedVariant>);
     let (revision, (_, _, children)): (u32, Layout) = reply.body().deserialize().unwrap();
     let mut labels = Vec::new();
     for child in children {
         let s: Structure = child.try_into().unwrap();
         let fields = s.into_fields();
         let id: i32 = fields[0].clone().try_into().unwrap();
-        let props: HashMap<String, OwnedValue> = fields[1].try_clone().unwrap().try_into().unwrap();
+        let props: HashMap<String, OwnedVariant> = fields[1].try_clone().unwrap().try_into().unwrap();
         let label = props.get("label").map(|l| String::try_from(l.clone()).unwrap()).unwrap_or_else(|| "----".into());
         let keys = props.get("shortcut").map(|k| format!("{:?}", Vec::<Vec<String>>::try_from(k.clone()).unwrap())).unwrap_or_default();
         println!("tray: menu {id} {label} {keys}");
@@ -111,50 +114,47 @@ fn inspect(service: &str) {
             let (conn, service, menu) = (conn.clone(), service.to_string(), menu.clone());
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(ms));
-                let r = conn.call_method(
+                let r = zbus::block_on(conn.call_method(
                     Some(service.as_str()),
                     menu.as_str(),
                     Some("com.canonical.dbusmenu"),
                     "Event",
-                    &(id, "clicked", zbus::zvariant::Value::from(0i32), 0u32),
-                );
+                    &(id, "clicked", zbus::Variant::from(0i32), 0u32),
+                ));
                 println!("tray: clicked {label}: {}", r.is_ok());
             });
         }
     }
     if let Some(ms) = std::env::var("FAKE_KDE_ACTIVATE").ok().and_then(|v| v.parse::<u64>().ok()) {
         std::thread::sleep(Duration::from_millis(ms));
-        let r = conn.call_method(Some(service), "/StatusNotifierItem", Some("org.kde.StatusNotifierItem"), "Activate", &(0i32, 0i32));
+        let r = zbus::block_on(conn.call_method(Some(service), "/StatusNotifierItem", Some("org.kde.StatusNotifierItem"), "Activate", &(0i32, 0i32)));
         println!("tray: activated: {}", r.is_ok());
     }
 }
 
 fn main() {
-    let conn = zbus::blocking::connection::Builder::session()
-        .unwrap()
-        .name("org.kde.kglobalaccel")
-        .unwrap()
-        .name("org.kde.StatusNotifierWatcher")
-        .unwrap()
-        .serve_at("/kglobalaccel", Accel { keys: Mutex::new(HashMap::new()) })
-        .unwrap()
-        .serve_at("/StatusNotifierWatcher", Watcher)
-        .unwrap()
-        .build()
-        .unwrap();
+    let conn = zbus::block_on(
+        zbus::connection::Builder::session()
+            .name("org.kde.kglobalaccel")
+            .name("org.kde.StatusNotifierWatcher")
+            .serve_at("/kglobalaccel", Accel { keys: Mutex::new(HashMap::new()) })
+            .serve_at("/StatusNotifierWatcher", Watcher)
+            .build(),
+    )
+    .unwrap();
     println!("fake KDE ready");
     if let Ok(spec) = std::env::var("FAKE_KDE_PRESS") {
         for (action, ms) in spec.split(',').filter_map(|s| s.split_once('@')) {
             let (conn, action, ms) = (conn.clone(), action.to_string(), ms.parse::<u64>().unwrap());
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(ms));
-                let r = conn.emit_signal(
+                let r = zbus::block_on(conn.emit_signal(
                     None::<()>,
                     "/component/flatshot_rs",
                     "org.kde.kglobalaccel.Component",
                     "globalShortcutPressed",
                     &("flatshot-rs", action.as_str(), 0i64),
-                );
+                ));
                 let t = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
                 println!("kglobalaccel: pressed {action}: {} at {:.3}", r.is_ok(), t.tv_sec as f64 * 1000.0 + t.tv_nsec as f64 / 1e6);
             });

@@ -309,8 +309,14 @@ impl Overlay {
         Ok(out)
     }
 
+    /// `rect` (logical; None: all of it) as the screen is: no drawings, no
+    /// pointer drawn in.
+    pub fn render_plain(&self, rect: Option<Rect>) -> Result<Image, String> {
+        self.plain.as_ref().unwrap_or(&self.base).crop(self.render_rect(rect))
+    }
+
     /// The picture's pixels for `rect` (logical; None: all of it).
-    fn render_rect(&self, rect: Option<Rect>) -> IRect {
+    pub fn render_rect(&self, rect: Option<Rect>) -> IRect {
         let dpr = self.dpr;
         match rect {
             None => self.base.rect(),
@@ -337,9 +343,7 @@ impl Overlay {
         }
         {
             let mut p = Painter::for_region(out.pixmap_mut(), self.dpr, (phys.x, phys.y));
-            for shape in self.stacked() {
-                shape.paint(&mut p, &self.base, self.dpr);
-            }
+            crate::ui::shapes::paint_all(&mut p, self.stacked(), &self.base, self.dpr);
         }
         out.force_opaque();
     }
@@ -470,7 +474,7 @@ impl Overlay {
 
     fn scene(&self, st: &State) -> Scene {
         let mut elements = Vec::new();
-        let region = matches!(st.tool, Tool::Region | Tool::Record);
+        let region = st.tool.picks_area();
         let selection = self.sel_rect.or(self.span_rect);
         let hover = self.hovered(st);
         let bg_dim = self.dim(st);
@@ -480,19 +484,20 @@ impl Overlay {
         } else {
             None
         };
-        for (i, s) in self.annotations.iter().enumerate() {
+        let shown = !st.drawings_hidden();
+        for (i, s) in self.annotations.iter().enumerate().filter(|_| shown) {
             elements.push(Element { id: Id::Annotation(i), bounds: self.dev(s.bounds(), 2), key: shape_key(s, i) });
         }
-        if let Some(s) = &self.active {
+        if let Some(s) = self.active.as_ref().filter(|_| shown) {
             elements.push(Element { id: Id::Active, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX) });
         }
-        if let Some(s) = self.selection.moving() {
+        if let Some(s) = self.selection.moving().filter(|_| shown) {
             elements.push(Element { id: Id::Moving, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX - 2) });
         }
-        for (i, s) in self.foreign.iter().enumerate() {
+        for (i, s) in self.foreign.iter().enumerate().filter(|_| shown) {
             elements.push(Element { id: Id::Foreign(i), bounds: self.dev(s.bounds(), 2), key: shape_key(s, i) });
         }
-        for (i, s) in self.foreign_live.iter().enumerate() {
+        for (i, s) in self.foreign_live.iter().enumerate().filter(|_| shown) {
             elements.push(Element { id: Id::ForeignLive(i), bounds: self.dev(s.bounds(), 2), key: shape_key(s, i) });
         }
         if st.tool == Tool::Select
@@ -514,6 +519,7 @@ impl Overlay {
         }
         if let Some((o, s)) = &st.text_edit
             && *o == self.index
+            && shown
         {
             elements.push(Element { id: Id::TextEdit, bounds: self.dev(s.bounds(), 2), key: shape_key(s, usize::MAX - 1) });
         }
@@ -551,7 +557,8 @@ impl Overlay {
             if let Some(n) = st.countdown {
                 let size = 56f32.max(140f32.min(r.w * 0.6).min(r.h * 0.6));
                 let bx = Rect::new(r.center().x - size / 2.0, r.center().y - size / 2.0, size, size);
-                elements.push(Element { id: Id::Countdown, bounds: self.dev(bx.adjusted(-9.0, -9.0, 9.0, 9.0), 2), key: hash(&n) });
+                let ring = (st.countdown_ring * RING_STEPS).round() as i32;
+                elements.push(Element { id: Id::Countdown, bounds: self.dev(bx.adjusted(-9.0, -9.0, 9.0, 9.0), 2), key: hash(&(n, ring)) });
             } else if !st.area_moving {
                 elements.push(Element {
                     id: Id::Handles,
@@ -647,10 +654,7 @@ impl Overlay {
     /// the window under the pointer show. Not while the area to record
     /// counts down or is moved, nor over it (its handles move and resize it).
     pub fn picking(&self, st: &State) -> bool {
-        matches!(st.tool, Tool::Region | Tool::Record)
-            && st.countdown.is_none()
-            && !st.area_moving
-            && !self.cursor_pos.is_some_and(|p| self.handle_at(st, p).is_some())
+        st.tool.picks_area() && st.countdown.is_none() && !st.area_moving && !self.cursor_pos.is_some_and(|p| self.handle_at(st, p).is_some())
     }
 
     /// The window under the pointer here, else (across monitors) the one
@@ -757,6 +761,8 @@ impl Overlay {
         let label = format!("{pw} × {ph}");
         if st.tool == Tool::Record {
             format!("Record  ·  {label}")
+        } else if st.tool == Tool::Ocr {
+            format!("Copy text  ·  {label}")
         } else if st.pin_mode {
             format!("Pin  ·  {label}")
         } else {
@@ -814,7 +820,7 @@ impl Overlay {
             snap,
             ((pos.x * 64.0) as i32, (pos.y * 64.0) as i32),
             self.mark_color(st),
-            st.tool == Tool::Region || st.tool == Tool::Record,
+            st.tool.picks_area(),
             st.theme_key,
             Arc::as_ptr(&self.base) as usize,
         ));
@@ -829,7 +835,7 @@ impl Overlay {
         let region_local = region.translated(-origin.0, -origin.1);
         let region_rect = region.to_f();
         let region_logical = Rect::new(region_rect.x / self.dpr, region_rect.y / self.dpr, region_rect.w / self.dpr, region_rect.h / self.dpr);
-        let rtool = matches!(st.tool, Tool::Region | Tool::Record);
+        let rtool = st.tool.picks_area();
         let selection = self.sel_rect.or(self.span_rect);
         let hover = self.hovered(st);
         let dim = self.dim(st);
@@ -841,16 +847,14 @@ impl Overlay {
             .chain(self.selection.moving())
             .chain(self.foreign_live.iter())
             .chain(st.text_edit.iter().filter(|(o, _)| *o == self.index).map(|(_, s)| s))
-            .filter(|s| self.dev(s.bounds(), 2).intersects(&region))
+            .filter(|s| !st.drawings_hidden() && self.dev(s.bounds(), 2).intersects(&region))
             .collect();
         // 1. The picture, shaded outside the focus unless drawings come first.
         let shade_now = if drawn.is_empty() { dim } else { None };
         copy_background_parallel(target, region_local, &self.base, region, shade_now, hole);
         if !drawn.is_empty() {
             let mut p = Painter::for_region(target.pixmap_mut(), self.dpr, origin);
-            for s in &drawn {
-                s.paint(&mut p, &self.base, self.dpr);
-            }
+            crate::ui::shapes::paint_all(&mut p, drawn.iter().copied(), &self.base, self.dpr);
             drop(p);
             if let Some(d) = dim {
                 shade(target, region_local, region, d, hole);
@@ -903,7 +907,7 @@ impl Overlay {
         } else if let Some(r) = self.area(st) {
             p.stroke_rect(r.adjusted(-1.0, -1.0, 1.0, 1.0), Pen::new(c.accent, 2.0));
             if let Some(n) = st.countdown {
-                paint_countdown(&mut p, r, n, st.cfg.record_countdown);
+                paint_countdown(&mut p, r, n, st.countdown_ring);
             } else if !st.area_moving {
                 for x in [r.left(), r.center().x, r.right()] {
                     for y in [r.top(), r.center().y, r.bottom()] {
@@ -1031,7 +1035,7 @@ impl Overlay {
         let around = (a - 2 * u, b - 2 * u, cell + 5 * u, cell + 5 * u);
         let mut marks = cut(ring, hole);
         let mut edges = cut(around, hole);
-        if matches!(st.tool, Tool::Region | Tool::Record) {
+        if st.tool.picks_area() {
             let cap = self.dpr;
             let mut lx = None;
             let mut ly = None;
@@ -1251,16 +1255,24 @@ fn cut(r: R4, hole: R4) -> Vec<R4> {
     out
 }
 
-fn paint_countdown(p: &mut Painter<'_>, r: Rect, n: i64, total: i64) {
+/// The steps the countdown's ring is drawn in, round the whole of it (a
+/// quarter of a degree: well under a pixel, so it runs down smoothly).
+const RING_STEPS: f32 = 1440.0;
+
+/// The countdown before recording, in the middle of the area: the seconds
+/// left, and a ring of how much of it is left (`ring`, 1 to 0).
+fn paint_countdown(p: &mut Painter<'_>, r: Rect, n: i64, ring: f32) {
     let c = theme::c();
     let size = 56f32.max(140f32.min(r.w * 0.6).min(r.h * 0.6));
     let bx = Rect::new(r.center().x - size / 2.0, r.center().y - size / 2.0, size, size);
     p.fill_ellipse(bx, c.base);
-    let total = total.max(1) as f32;
-    let mut pb = tiny_skia::PathBuilder::new();
-    crate::render::icons::arc_to(&mut pb, bx.adjusted(-6.0, -6.0, 6.0, 6.0), 90.0, -360.0 * n as f32 / total, true);
-    if let Some(path) = pb.finish() {
-        p.stroke_path(&path, Pen::new(c.accent, 4.0));
+    let sweep = 360.0 * (ring * RING_STEPS).round() / RING_STEPS;
+    if sweep > 0.0 {
+        let mut pb = tiny_skia::PathBuilder::new();
+        crate::render::icons::arc_to(&mut pb, bx.adjusted(-6.0, -6.0, 6.0, 6.0), 90.0, -sweep, true);
+        if let Some(path) = pb.finish() {
+            p.stroke_path(&path, Pen::new(c.accent, 4.0));
+        }
     }
     p.draw_text(bx, Align::Center, &n.to_string(), text::font((size / 2.0).round(), BOLD), c.text);
 }
@@ -1347,6 +1359,8 @@ pub const HINT_REGION: &str = "Drag to capture  ·  Click for whole screen  ·  
 pub const HINT_CODES: &str = "Drag to capture  ·  {codes} hides detected codes  ·  Esc to cancel";
 pub const HINT_WINDOWS: &str = "Drag to capture  ·  Click a window to capture it  ·  Esc to cancel";
 pub const HINT_TEXT: &str = "Click to place text, or on text to change it  ·  Enter for a new line  ·  Esc or Ctrl+Enter to finish";
+pub const HINT_CALLOUT: &str = "Drag from what the callout points at to where its text goes  ·  Esc or Ctrl+Enter to finish";
+pub const HINT_SPOTLIGHT: &str = "Drag over what to show: everything else is shaded  ·  Several light up together";
 pub const HINT_SHAPE: &str = "Shift: square  ·  Ctrl: from the middle  ·  Alt: move it";
 pub const HINT_SELECT: &str = "Click a drawing to select it  ·  Drag to move  ·  Handles resize  ·  Delete removes it";
 pub const HINT_SELECTED: &str = "Drag to move (Shift: straight)  ·  Handles: Shift keeps its shape, Ctrl from the middle  ·  Arrows nudge  ·  Delete";
@@ -1356,6 +1370,8 @@ pub const DRAW_HINT: &str = "Draw on the screen  ·  {tool.region} then drag to 
 pub const RECORD_PICK: &str = "Drag the area to record  ·  Click for whole screen  ·  Esc to cancel";
 pub const RECORD_WINDOWS: &str = "Drag the area to record  ·  Click a window  ·  Enter for whole screen  ·  Esc to cancel";
 pub const RECORD_ARMED: &str = "Drag the edges to adjust  ·  Drag or click elsewhere for another  ·  Enter to start  ·  Esc to go back";
+pub const OCR_PICK: &str = "Drag over text to copy it  ·  Click for whole screen  ·  Esc to cancel";
+pub const OCR_WINDOWS: &str = "Drag over text to copy it  ·  Click a window to copy its text  ·  Esc to cancel";
 
 /// A hint with its {action} keys filled in; a part whose key is unset goes.
 pub fn with_keys(text: &str, keymap: &crate::keys::Keymap) -> String {
@@ -1397,6 +1413,13 @@ fn hint_text(st: &State, o: &Overlay) -> String {
     if st.eyedropper {
         return st.hint.clone().unwrap_or_else(|| EYEDROPPER_HINT.into());
     }
+    if st.tool == Tool::Ocr {
+        return match (&st.hint, &st.ocr_problem) {
+            (Some(h), _) | (None, Some(h)) => h.clone(),
+            _ if !o.windows.is_empty() => OCR_WINDOWS.into(),
+            _ => OCR_PICK.into(),
+        };
+    }
     if let Some(h) = &st.hint {
         return h.clone();
     }
@@ -1410,7 +1433,9 @@ fn hint_text(st: &State, o: &Overlay) -> String {
             Tool::Region if !o.codes.is_empty() && st.codes_visible => HINT_CODES,
             Tool::Region if !o.windows.is_empty() => HINT_WINDOWS,
             Tool::Region => HINT_REGION,
+            Tool::Text if matches!(st.text_style, crate::ui::shapes::TextStyle::Callout(_)) => HINT_CALLOUT,
             Tool::Text => HINT_TEXT,
+            Tool::Spotlight => HINT_SPOTLIGHT,
             Tool::Select if o.selection.current(&o.annotations).is_some() => HINT_SELECTED,
             Tool::Select => HINT_SELECT,
             _ => DRAW_HINT,

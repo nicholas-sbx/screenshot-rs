@@ -1,0 +1,11 @@
+{"type": "root", "rect": {"x": 0, "y": 0, "width": 3840, "height": 1080}, "nodes": [
+                {"type": "output", "name": "DP-1", "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080}, "nodes": [
+                    {"type": "workspace", "name": "1", "visible": true, "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+                     "nodes": [{"type": "con", "pid": 10, "app_id": "foot", "name": "~", "visible": true, "focused": true, "rect": {"x": 0, "y": 0, "width": 960, "height": 1080}}],
+                     "floating_nodes": [{"type": "floating_con", "pid": 11, "app_id": null, "window_properties": {"class": "Gimp"}, "name": "GIMP", "visible": true, "rect": {"x": 400, "y": 300, "width": 600, "height": 400}}]},
+                    {"type": "workspace", "name": "2", "visible": false, "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+                     "nodes": [{"type": "con", "pid": 12, "app_id": "code", "name": "elsewhere", "visible": false, "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080}}]}]},
+                {"type": "output", "name": "DP-2", "rect": {"x": 1920, "y": 0, "width": 1920, "height": 1080}, "nodes": [
+                    {"type": "workspace", "name": "3", "visible": true, "rect": {"x": 1920, "y": 0, "width": 1920, "height": 1080},
+                     "nodes": [{"type": "con", "name": "no pid: a split", "rect": {"x": 1920, "y": 0, "width": 1920, "height": 1080},
+                                "nodes": [{"type": "con", "pid": 13, "app_id": "firefox", "name": "Web", "visible": true, "rect": {"x": 1920, "y": 0, "width": 1920, "height": 1080}}]}]}]}]}

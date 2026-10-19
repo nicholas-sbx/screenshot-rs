@@ -90,7 +90,7 @@ pub struct Config {
     /// The pointer when picking a region: hidden | shown | toggle
     pub region_pointer: String,
     pub default_tool: String,
-    /// the toolbar's colours (#RRGGBB, in order: keys 1-7 for the first seven)
+    /// the toolbar's colours (#RRGGBB, in order: keys 1-9, 0, Alt+1... then your own)
     pub palette: Vec<String>,
     /// an index into `palette`; at or past its end, your own (custom_color)
     pub default_color: i64,
@@ -98,6 +98,8 @@ pub struct Config {
     pub custom_color: String,
     /// keys in Flatshot's windows you changed: action -> key
     pub keys: BTreeMap<String, String>,
+    /// global shortcuts asked of the desktop's portal (without KDE's service)
+    pub portal_shortcuts: bool,
     pub default_size: i64,
     // Screen recording
     pub record_dir: String,
@@ -108,12 +110,25 @@ pub struct Config {
     pub record_system_audio: bool,
     pub record_cursor: bool,
     pub record_countdown: i64,
+    // Copying text (OCR)
+    /// Tesseract's languages, as "eng" or "eng+deu"
+    pub ocr_languages: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config::from_map(&Map::new())
     }
+}
+
+/// Tesseract's language codes in `text` ("eng+deu", "eng, deu" or "eng deu"),
+/// joined as it takes them; "eng" when there are none.
+pub fn ocr_languages(text: &str) -> String {
+    let codes: Vec<&str> = text
+        .split(|c: char| c == '+' || c == ',' || c.is_whitespace())
+        .filter(|c| !c.is_empty() && c.len() <= 32 && c.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .collect();
+    if codes.is_empty() { "eng".into() } else { codes.join("+") }
 }
 
 /// The value for `key` in `data` when it's usable as a bool.
@@ -244,6 +259,7 @@ impl Config {
             default_color: i("default_color", 0),
             custom_color,
             keys,
+            portal_shortcuts: b("portal_shortcuts", false),
             default_size: i("default_size", 1),
             record_dir: if record_dir.is_empty() { default_record_dir() } else { expand_user(&record_dir) },
             record_filename: s("record_filename", "Recording_%Y-%m-%d_%H-%M-%S"),
@@ -253,6 +269,7 @@ impl Config {
             record_system_audio: b("record_system_audio", false),
             record_cursor: b("record_cursor", true),
             record_countdown: i("record_countdown", 3).clamp(0, 10),
+            ocr_languages: ocr_languages(&s("ocr_languages", "eng")),
         }
     }
 
@@ -303,6 +320,7 @@ impl Config {
         put("default_color", self.default_color.into());
         put("custom_color", self.custom_color.clone().into());
         put("keys", Value::Object(self.keys.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect()));
+        put("portal_shortcuts", self.portal_shortcuts.into());
         put("default_size", self.default_size.into());
         put("record_dir", self.record_dir.clone().into());
         put("record_filename", self.record_filename.clone().into());
@@ -312,6 +330,7 @@ impl Config {
         put("record_system_audio", self.record_system_audio.into());
         put("record_cursor", self.record_cursor.into());
         put("record_countdown", self.record_countdown.into());
+        put("ocr_languages", self.ocr_languages.clone().into());
         m
     }
 
@@ -350,9 +369,14 @@ pub fn load() -> Config {
     Config::from_map(&read_json(&config_path()))
 }
 
+/// One change to the files at a time: each reads what's there, changes it
+/// and writes it back, and two at once (from two threads) would lose one.
+static CHANGING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Change some settings on disk without disturbing the others: read what's
 /// there now, apply `change`, write it back.
 pub fn update(change: impl FnOnce(&mut Config)) {
+    let _alone = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
     let mut saved = load();
     change(&mut saved);
     if let Err(e) = saved.save() {
@@ -562,6 +586,7 @@ pub fn load_state() -> Map<String, Value> {
 }
 
 pub fn update_state(changes: Vec<(&str, Value)>) {
+    let _alone = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
     let mut state = load_state();
     for (k, v) in changes {
         state.insert(k.to_string(), v);
@@ -616,6 +641,14 @@ mod tests {
         assert!(c.notify);
         assert_eq!(c.theme, "nord");
         assert_eq!(c.dim_opacity, 40);
+    }
+
+    #[test]
+    fn ocr_languages_are_cleaned_up() {
+        assert_eq!(Config::default().ocr_languages, "eng");
+        assert_eq!(cfg(json!({"ocr_languages": "eng, deu  chi_sim"})).ocr_languages, "eng+deu+chi_sim");
+        assert_eq!(cfg(json!({"ocr_languages": "eng+../../x; rm"})).ocr_languages, "eng+rm");
+        assert_eq!(cfg(json!({"ocr_languages": "  "})).ocr_languages, "eng");
     }
 
     #[test]

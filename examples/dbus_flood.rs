@@ -7,19 +7,24 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let dest = args.next().expect("usage: dbus_flood DESTINATION [COUNT]");
     let count: usize = args.next().and_then(|n| n.parse().ok()).unwrap_or(1000);
-    let conn = zbus::blocking::Connection::session().expect("session bus");
-    let mut sent = 0;
-    for _ in 0..count {
-        let r = conn.emit_signal(
-            Some(dest.as_str()),
-            "/component/flatshot_rs",
-            "org.kde.kglobalaccel.Component",
-            "globalShortcutPressed",
-            &("flatshot-rs", "region", 0i64),
-        );
-        if r.is_ok() {
-            sent += 1;
+    let sent = zbus::block_on(async {
+        let conn = zbus::Connection::session().await.expect("session bus");
+        let mut sent = 0;
+        for _ in 0..count {
+            let r = conn
+                .emit_signal(
+                    Some(dest.as_str()),
+                    "/component/flatshot_rs",
+                    "org.kde.kglobalaccel.Component",
+                    "globalShortcutPressed",
+                    &("flatshot-rs", "region", 0i64),
+                )
+                .await;
+            if r.is_ok() {
+                sent += 1;
+            }
         }
-    }
+        sent
+    });
     println!("sent {sent} forged presses to {dest}");
 }

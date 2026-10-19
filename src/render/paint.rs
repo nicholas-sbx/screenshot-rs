@@ -264,14 +264,20 @@ impl<'a> Painter<'a> {
     }
 
     /// Make sure a rectangle clip has a mask to draw through (tiny-skia
-    /// clips with masks only). The rounded clip already is one.
+    /// clips with masks only). The rounded clip already is one. A clip
+    /// around all of the pixmap needs none (and drawing without one is
+    /// much faster: opaque fills are plain stores).
     fn ensure_mask(&mut self) {
         if self.mask.is_none()
             && let Some(c) = self.clip
         {
             let (w, h) = (self.pm.width(), self.pm.height());
+            let all = IRect::new(0, 0, w as i32, h as i32);
+            if c.intersected(&all) == all {
+                return;
+            }
             let mut m = Mask::new(w, h).expect("mask of a valid pixmap");
-            let c = c.intersected(&IRect::new(0, 0, w as i32, h as i32));
+            let c = c.intersected(&all);
             for y in c.y..c.y2() {
                 let row = &mut m.data_mut()[(y as usize * w as usize)..((y + 1) as usize * w as usize)];
                 row[c.x as usize..c.x2() as usize].fill(255);

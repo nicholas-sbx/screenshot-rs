@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use zbus::object_server::SignalEmitter;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, StructureBuilder, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Structure, Variant};
 
 use crate::geom::Rect;
 use crate::image::Image;
@@ -52,7 +52,7 @@ impl MenuItem {
 
 type Pixmaps = Vec<(i32, i32, Vec<u8>)>;
 /// A dbusmenu entry and its children: (ia{sv}av).
-type Layout = (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>);
+type Layout = (i32, HashMap<String, OwnedVariant>, Vec<OwnedVariant>);
 
 struct State {
     items: Vec<MenuItem>,
@@ -176,22 +176,22 @@ struct Menu {
 }
 
 /// A menu entry's properties, as dbusmenu has them.
-fn properties(item: &MenuItem, recording: bool) -> HashMap<String, OwnedValue> {
-    let mut p: HashMap<String, OwnedValue> = HashMap::new();
-    let mut put = |k: &str, v: Value<'_>| {
-        if let Ok(v) = OwnedValue::try_from(v) {
+fn properties(item: &MenuItem, recording: bool) -> HashMap<String, OwnedVariant> {
+    let mut p: HashMap<String, OwnedVariant> = HashMap::new();
+    let mut put = |k: &str, v: Variant<'_>| {
+        if let Ok(v) = OwnedVariant::try_from(v) {
             p.insert(k.to_string(), v);
         }
     };
     if item.key.is_empty() {
-        put("type", Value::from("separator"));
+        put("type", Variant::from("separator"));
         return p;
     }
     let label = if item.key == "record" && recording { "Stop recording" } else { item.label.as_str() };
     // (an underscore marks a mnemonic: a real one is doubled)
-    put("label", Value::from(label.replace('_', "__")));
+    put("label", Variant::from(label.replace('_', "__")));
     if !item.keys.is_empty() {
-        put("shortcut", Value::from(vec![shortcut_names(&item.keys)]));
+        put("shortcut", Variant::from(vec![shortcut_names(&item.keys)]));
     }
     p
 }
@@ -210,21 +210,21 @@ fn shortcut_names(keys: &str) -> Vec<String> {
 }
 
 /// One entry and its children, as dbusmenu's (ia{sv}av).
-fn layout_value(id: i32, props: HashMap<String, OwnedValue>, children: Vec<OwnedValue>) -> OwnedValue {
-    let built = StructureBuilder::new().add_field(id).add_field(props).add_field(children).build();
-    built.ok().and_then(|s| OwnedValue::try_from(Value::Structure(s)).ok()).unwrap_or_else(|| OwnedValue::from(0i32))
+fn layout_value(id: i32, props: HashMap<String, OwnedVariant>, children: Vec<OwnedVariant>) -> OwnedVariant {
+    let built = Structure::builder().add_field(id).add_field(props).add_field(children).build();
+    built.ok().and_then(|s| OwnedVariant::try_from(Variant::Structure(s)).ok()).unwrap_or_else(|| OwnedVariant::from(0i32))
 }
 
-fn root_properties() -> HashMap<String, OwnedValue> {
+fn root_properties() -> HashMap<String, OwnedVariant> {
     let mut p = HashMap::new();
-    if let Ok(v) = OwnedValue::try_from(Value::from("submenu")) {
+    if let Ok(v) = OwnedVariant::try_from(Variant::from("submenu")) {
         p.insert("children-display".to_string(), v);
     }
     p
 }
 
 impl Menu {
-    fn item_props(&self, id: i32) -> Option<HashMap<String, OwnedValue>> {
+    fn item_props(&self, id: i32) -> Option<HashMap<String, OwnedVariant>> {
         let s = self.state.lock().ok()?;
         if id == 0 {
             return Some(root_properties());
@@ -255,7 +255,7 @@ impl Menu {
 
     fn get_layout(&self, parent_id: i32, recursion_depth: i32, _property_names: Vec<String>) -> zbus::fdo::Result<(u32, Layout)> {
         let Ok(s) = self.state.lock() else { return Err(zbus::fdo::Error::Failed("busy".into())) };
-        let children = |s: &State| -> Vec<OwnedValue> {
+        let children = |s: &State| -> Vec<OwnedVariant> {
             s.items.iter().enumerate().map(|(i, item)| layout_value(i as i32 + 1, properties(item, s.recording), Vec::new())).collect()
         };
         if parent_id == 0 {
@@ -270,15 +270,15 @@ impl Menu {
         Ok((s.revision, (parent_id, properties(item, s.recording), Vec::new())))
     }
 
-    fn get_group_properties(&self, ids: Vec<i32>, _property_names: Vec<String>) -> Vec<(i32, HashMap<String, OwnedValue>)> {
+    fn get_group_properties(&self, ids: Vec<i32>, _property_names: Vec<String>) -> Vec<(i32, HashMap<String, OwnedVariant>)> {
         ids.into_iter().take(256).filter_map(|id| self.item_props(id).map(|p| (id, p))).collect()
     }
 
-    fn get_property(&self, id: i32, name: String) -> zbus::fdo::Result<OwnedValue> {
+    fn get_property(&self, id: i32, name: String) -> zbus::fdo::Result<OwnedVariant> {
         self.item_props(id).and_then(|mut p| p.remove(&name)).ok_or_else(|| zbus::fdo::Error::InvalidArgs("no such property".into()))
     }
 
-    fn event(&self, id: i32, event_id: String, _data: OwnedValue, _timestamp: u32) {
+    fn event(&self, id: i32, event_id: String, _data: OwnedVariant, _timestamp: u32) {
         if event_id != "clicked" {
             return;
         }
@@ -292,7 +292,7 @@ impl Menu {
         }
     }
 
-    fn event_group(&self, events: Vec<(i32, String, OwnedValue, u32)>) -> Vec<i32> {
+    fn event_group(&self, events: Vec<(i32, String, OwnedVariant, u32)>) -> Vec<i32> {
         for (id, event_id, data, timestamp) in events.into_iter().take(64) {
             self.event(id, event_id, data, timestamp);
         }
@@ -334,17 +334,24 @@ impl Tray {
             activation_token: None,
         }));
         let events: Events = Arc::new(events);
-        let server = conn.object_server();
-        server.at(ITEM_PATH, Item { state: state.clone(), events: events.clone() }).map_err(|e| e.to_string())?;
-        server.at(MENU_PATH, Menu { state: state.clone(), events }).map_err(|e| e.to_string())?;
+        zbus::block_on(async {
+            let server = conn.inner().object_server();
+            server.at(ITEM_PATH, Item { state: state.clone(), events: events.clone() }).await?;
+            server.at(MENU_PATH, Menu { state: state.clone(), events }).await
+        })
+        .map_err(|e| e.to_string())?;
         let name = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
         conn.request_name(name.as_str()).map_err(|e| e.to_string())?;
         register(conn, &name)?;
         // Again whenever the panel restarts.
-        let proxy = zbus::blocking::fdo::DBusProxy::new(conn).map_err(|e| e.to_string())?;
-        if let Ok(changes) = proxy.receive_name_owner_changed_with_args(&[(0, WATCHER)]) {
+        let changes = zbus::block_on(async {
+            let proxy = zbus::fdo::DBusProxy::new(conn.inner()).await?;
+            proxy.receive_name_owner_changed_with_args(&[(0, WATCHER)]).await
+        });
+        if let Ok(mut changes) = changes {
+            // (not zbus::block_on: `register` blocks on a call of its own)
             let _ = std::thread::Builder::new().name("flatshot-tray".into()).spawn(move || {
-                for change in changes {
+                while let Some(change) = futures_lite::future::block_on(futures_lite::StreamExt::next(&mut changes)) {
                     if change.args().is_ok_and(|a| a.new_owner().is_some()) {
                         let _ = register(conn, &name);
                     }
@@ -419,13 +426,13 @@ impl Tray {
     }
 }
 
-fn register(conn: &zbus::blocking::Connection, name: &str) -> Result<(), String> {
+fn register(conn: &crate::dbus::Bus, name: &str) -> Result<(), String> {
     conn.call_method(Some(WATCHER), "/StatusNotifierWatcher", Some(WATCHER), "RegisterStatusNotifierItem", &(name,))
         .map(|_| ())
         .map_err(|e| format!("no system tray: {e}"))
 }
 
-fn emit<B: serde::Serialize + zbus::zvariant::DynamicType>(path: &str, iface: &str, member: &str, body: &B) {
+fn emit<B: serde::Serialize + zbus::DynamicType>(path: &str, iface: &str, member: &str, body: &B) {
     if let Ok(conn) = crate::dbus::session() {
         let _ = conn.emit_signal(None::<()>, path, iface, member, body);
     }
@@ -480,12 +487,12 @@ fn portal_color_scheme() -> Option<u32> {
     let args = ("org.freedesktop.appearance", "color-scheme");
     let call = |method: &str| conn.call_method(Some(PORTAL), "/org/freedesktop/portal/desktop", Some("org.freedesktop.portal.Settings"), method, &args).ok();
     let reply = call("ReadOne").or_else(|| call("Read"))?;
-    let mut value: OwnedValue = reply.body().deserialize().ok()?;
+    let mut value: OwnedVariant = reply.body().deserialize().ok()?;
     // (Read wraps it once more)
     loop {
         match &*value {
-            Value::U32(v) => return Some(*v),
-            Value::Value(inner) => value = OwnedValue::try_from(&**inner).ok()?,
+            Variant::U32(v) => return Some(*v),
+            Variant::Variant(inner) => value = OwnedVariant::try_from(&**inner).ok()?,
             _ => return None,
         }
     }
@@ -514,13 +521,13 @@ pub fn watch_color_scheme(mut changed: impl FnMut() + Send + 'static) -> Result<
     let rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .sender(PORTAL)
-        .and_then(|b| b.interface("org.freedesktop.portal.Settings"))
-        .and_then(|b| b.member("SettingChanged"))
-        .and_then(|b| b.add_arg("org.freedesktop.appearance"))
-        .map_err(|e| e.to_string())?
-        .build();
+        .interface("org.freedesktop.portal.Settings")
+        .member("SettingChanged")
+        .add_arg("org.freedesktop.appearance")
+        .build()
+        .map_err(|e| e.to_string())?;
     crate::dbus::listen(PORTAL, rule, "flatshot-scheme", move |msg| {
-        if msg.body().deserialize::<(String, String, OwnedValue)>().is_ok_and(|(_, key, _)| key == "color-scheme") {
+        if msg.body().deserialize::<(String, String, OwnedVariant)>().is_ok_and(|(_, key, _)| key == "color-scheme") {
             changed();
         }
         true

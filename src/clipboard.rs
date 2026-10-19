@@ -12,6 +12,14 @@ use std::time::Duration;
 pub const TEXT_MIMES: &[&str] = &["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT"];
 /// The most text taken from the clipboard.
 pub const MAX_PASTE: u64 = 1 << 20;
+/// The picture types asked for, best first (those codec::decode_bytes reads).
+pub const IMAGE_MIMES: &[&str] = &["image/png", "image/webp", "image/jpeg", "image/bmp", "image/x-bmp", "image/gif"];
+/// The biggest picture taken from the clipboard.
+pub const MAX_IMAGE_PASTE: u64 = 192 << 20;
+
+/// What's read from the clipboard, on its way: its type and data (None if
+/// it isn't offered as any of the types asked for).
+pub type Pasted = std::sync::mpsc::Receiver<Option<(String, Vec<u8>)>>;
 
 /// How long a paste waits for data still being made.
 pub const WAIT_FOR_DATA: Duration = Duration::from_secs(30);
@@ -129,9 +137,9 @@ pub fn write_for(fd: OwnedFd, data: &[u8], stall: Duration) -> std::io::Result<(
     Ok(())
 }
 
-/// Read `from` to its end (at most MAX_PASTE), giving up after `limit`:
+/// Read `from` to its end (at most `max` bytes), giving up after `limit`:
 /// whoever owns the clipboard may never write.
-pub fn read_for(from: std::fs::File, into: &mut Vec<u8>, limit: Duration) -> std::io::Result<()> {
+pub fn read_for(from: std::fs::File, into: &mut Vec<u8>, limit: Duration, max: u64) -> std::io::Result<()> {
     use rustix::event::{PollFd, PollFlags};
     let deadline = std::time::Instant::now() + limit;
     let mut buf = [0u8; 16384];
@@ -148,7 +156,7 @@ pub fn read_for(from: std::fs::File, into: &mut Vec<u8>, limit: Duration) -> std
         match (&from).read(&mut buf) {
             Ok(0) => return Ok(()),
             Ok(n) => {
-                if into.len() as u64 + n as u64 > MAX_PASTE {
+                if into.len() as u64 + n as u64 > max {
                     return Err(std::io::ErrorKind::FileTooLarge.into());
                 }
                 into.extend_from_slice(&buf[..n]);

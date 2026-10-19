@@ -7,7 +7,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use super::{App, Input};
-use crate::clipboard::{Slot, TEXT_MIMES};
+use crate::clipboard::{IMAGE_MIMES, MAX_IMAGE_PASTE, Slot, TEXT_MIMES};
 use crate::desktop::portal;
 use crate::geom::{Damage, IRect, Point};
 use crate::image::Canvas;
@@ -81,12 +81,18 @@ impl App {
                 return false;
             }
         };
+        self.open_editor_on(image, save_to.unwrap_or_else(|| path.to_path_buf()))
+    }
+
+    /// An editor window for `image`, saved to `target`.
+    fn open_editor_on(&mut self, image: crate::image::Image, target: PathBuf) -> bool {
         let monitors = self.dpy.monitors();
         let (mon, dpr) = monitors.first().map(|m| ((m.rect.w as f32, m.rect.h as f32), m.scale)).unwrap_or(((1920.0, 1080.0), 1.0));
-        let target = save_to.unwrap_or_else(|| path.to_path_buf());
         let ed = Editor::new(image, dpr, target, crate::config::load());
         let min = ed.min_size();
-        let size = initial_size((ed.image.width() as f32 / dpr, ed.image.height() as f32 / dpr), mon, min.0 as f32);
+        // (wide enough for the bar in one row, where the monitor is)
+        let bar = ed.bar_width().min(mon.0 * 0.85).max(min.0 as f32);
+        let size = initial_size((ed.image.width() as f32 / dpr, ed.image.height() as f32 / dpr), mon, bar);
         self.next_editor += 1;
         let id = self.next_editor;
         let title = ed.title();
@@ -191,6 +197,10 @@ impl App {
                         waker();
                     });
                     self.editors[i].image_dialog = Some(rx);
+                }
+                Request::Saved(path, size) => {
+                    crate::history::edited(&std::path::absolute(&path).unwrap_or(path), size);
+                    self.recent_changed();
                 }
                 Request::Close => {
                     self.dpy.remove(Owner::Editor(id));
@@ -302,6 +312,63 @@ impl App {
         self.open_dialog = Some(rx);
     }
 
+    /// "Annotate clipboard image": the picture on the clipboard, read in
+    /// the background, then opened in the editor (saved, when it is, as a
+    /// new capture in the screenshot folder).
+    pub(super) fn annotate_clipboard(&mut self) {
+        self.clipboard_image = Some((self.dpy.paste(IMAGE_MIMES, MAX_IMAGE_PASTE, self.waker.clone()), false));
+    }
+
+    pub(super) fn reading_clipboard(&self) -> bool {
+        self.clipboard_image.is_some()
+    }
+
+    pub(super) fn poll_clipboard_image(&mut self) {
+        let Some((rx, helped)) = &self.clipboard_image else { return };
+        let helped = *helped;
+        let Ok(answer) = rx.try_recv() else { return };
+        self.clipboard_image = None;
+        let code = match answer {
+            Some((_, bytes)) => match crate::codec::decode_bytes(&bytes) {
+                Ok(image) => {
+                    let cfg = crate::config::load();
+                    let format = crate::deliver::writable(&cfg.format);
+                    let path = crate::template::screenshot_path(&cfg, &crate::template::Shot::new("clipboard"), image.size(), format, false);
+                    if self.open_editor_on(image, unused_name(&path)) { 0 } else { 2 }
+                }
+                Err(e) => {
+                    self.report_failure("Can't annotate the clipboard", &format!("The picture on it can't be opened: {e}"));
+                    2
+                }
+            },
+            // Without data-control the clipboard is only had with a window
+            // focused: wl-paste can get it its own way.
+            None if !helped && !self.dpy.without_focus() && crate::util::have("wl-paste") => {
+                let (tx, rx) = mpsc::channel();
+                let waker = self.waker.clone();
+                let _ = std::thread::Builder::new().name("flatshot-paste".into()).spawn(move || {
+                    let _ = tx.send(wl_paste_image());
+                    waker();
+                });
+                self.clipboard_image = Some((rx, true));
+                return;
+            }
+            None => {
+                let body = "Copy a picture first (from a browser, an image viewer or a screenshot), then choose Annotate clipboard image again.";
+                self.notify(crate::desktop::notify::Note {
+                    summary: "No picture on the clipboard".into(),
+                    body: body.into(),
+                    event: "failed",
+                    ..Default::default()
+                });
+                1
+            }
+        };
+        if self.one_shot && code != 0 {
+            self.ended(code);
+        }
+    }
+
     /// The answer of "Annotate an image…".
     pub(super) fn poll_open_dialog(&mut self) {
         let Some(rx) = &self.open_dialog else { return };
@@ -315,4 +382,25 @@ impl App {
             Err(e) => self.report_failure("No file dialog", &format!("The desktop has no file dialog to offer ({e}). Use flatshot-rs -i FILE instead.")),
         }
     }
+}
+
+/// `path`, or `name_1.ext`, `name_2.ext`... if a file is there already.
+fn unused_name(path: &Path) -> PathBuf {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Screenshot".into());
+    let ext = path.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "png".into());
+    (0..10_000)
+        .map(|n| if n == 0 { path.to_path_buf() } else { path.with_file_name(format!("{stem}_{n}.{ext}")) })
+        .find(|p| p.symlink_metadata().is_err())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// The clipboard's picture through wl-paste: its type, and the data.
+fn wl_paste_image() -> Option<(String, Vec<u8>)> {
+    let wait = std::time::Duration::from_secs(10);
+    let types = crate::util::run_with_input(crate::util::command("wl-paste")?.arg("--list-types"), Vec::new(), wait, 64 << 10).ok()?;
+    let types = String::from_utf8_lossy(&types);
+    let mime = IMAGE_MIMES.iter().find(|m| types.lines().any(|l| l.trim() == **m))?;
+    let data =
+        crate::util::run_with_input(crate::util::command("wl-paste")?.args(["--no-newline", "--type", mime]), Vec::new(), wait * 3, MAX_IMAGE_PASTE).ok()?;
+    Some((mime.to_string(), data))
 }

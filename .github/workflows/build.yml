@@ -80,7 +80,7 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev sway grim wl-clipboard dbus fonts-dejavu-core python3 ffmpeg wf-recorder xvfb xkb-data stalonetray
+          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev sway grim wl-clipboard dbus fonts-dejavu-core python3 ffmpeg wf-recorder xvfb xkb-data stalonetray tesseract-ocr tesseract-ocr-eng
       - name: Rust
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
@@ -96,7 +96,7 @@ jobs:
         run: |
           cargo build --locked --bins --examples
           FLATSHOT_SELFTEST_OUT=shots ./target/debug/flatshot-rs --self-test
-      - name: End to end on a headless sway (overlay, pins, editor, settings, recording, instant captures, clipboard, tray app)
+      - name: End to end on a headless sway (overlay, pins, editor, settings, copying text, recording, instant captures, clipboard, tray app)
         run: timeout 300 ./tests/e2e.sh
       - name: End to end on a headless X server (the same, on X11)
         run: timeout 300 ./tests/e2e-x11.sh
@@ -105,6 +105,46 @@ jobs:
         with:
           name: self-test-frames
           path: shots/
+          if-no-files-found: ignore
+
+  fuzz:
+    # Weekly and on demand: each fuzz target for a minute (fuzz/README.md).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # (pinned as RUST_VERSION is: cargo-fuzz needs a nightly)
+      NIGHTLY: nightly-2026-10-17
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev
+      - name: Rust and cargo-fuzz
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal
+          cargo install cargo-fuzz --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Build the targets
+        run: cargo "+$NIGHTLY" fuzz build
+      - name: Each target for a minute
+        run: |
+          for t in $(cargo "+$NIGHTLY" fuzz list); do
+            echo "::group::$t"
+            mkdir -p "fuzz/corpus/$t"
+            seeds=()
+            [ -d "fuzz/seeds/$t" ] && seeds=("fuzz/seeds/$t")
+            cargo "+$NIGHTLY" fuzz run "$t" "fuzz/corpus/$t" "${seeds[@]}" -- -max_total_time=60 -rss_limit_mb=2560 -timeout=20
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
           if-no-files-found: ignore
 
   packages:
@@ -139,8 +179,8 @@ jobs:
           path: dist/*
 
   install:
-    # (images from the Docker library's mirror on ECR: Docker Hub limits
-    # pulls from shared runners)
+    # (images from Google's mirror of the Docker library: Docker Hub, and
+    # ECR's mirror of it, limit pulls from shared runners)
     name: install (${{ matrix.image }})
     needs: packages
     runs-on: ubuntu-24.04
@@ -150,17 +190,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: public.ecr.aws/docker/library/ubuntu:22.04
+          - image: mirror.gcr.io/library/ubuntu:22.04
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: public.ecr.aws/docker/library/ubuntu:24.04
+          - image: mirror.gcr.io/library/ubuntu:24.04
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: public.ecr.aws/docker/library/debian:bookworm
+          - image: mirror.gcr.io/library/debian:bookworm
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: public.ecr.aws/docker/library/debian:trixie
+          - image: mirror.gcr.io/library/debian:trixie
             install: apt-get update -q && apt-get install -y -q ./dist/*.deb
-          - image: public.ecr.aws/docker/library/fedora:latest
+          - image: mirror.gcr.io/library/fedora:latest
             install: dnf install -y ./dist/*.rpm
-          - image: public.ecr.aws/docker/library/archlinux:latest
+          - image: mirror.gcr.io/library/archlinux:latest
             install: pacman -Syu --noconfirm && pacman -U --noconfirm ./dist/*.pkg.tar.zst
     steps:
       - uses: actions/download-artifact@v4
@@ -215,7 +255,7 @@ jobs:
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    container: public.ecr.aws/docker/library/archlinux:latest
+    container: mirror.gcr.io/library/archlinux:latest
     permissions:
       contents: write
     steps:

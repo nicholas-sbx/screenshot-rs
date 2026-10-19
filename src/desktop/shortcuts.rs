@@ -26,6 +26,7 @@ pub const ACTIONS: &[(&str, &str, &str)] = &[
     ("last", "Capture last region", ""),
     ("pin", "Pin region to screen", ""),
     ("record", "Record screen", ""),
+    ("ocr", "Copy text from screen", ""),
 ];
 
 // KGlobalAccel::SetShortcutFlag
@@ -73,7 +74,7 @@ fn unwire(value: Vec<(Vec<i32>,)>) -> Vec<String> {
 
 fn call<B>(method: &str, body: &B) -> Result<zbus::message::Message, String>
 where
-    B: serde::Serialize + zbus::zvariant::DynamicType,
+    B: serde::Serialize + zbus::DynamicType,
 {
     let conn = crate::dbus::session()?;
     conn.call_method(Some(SERVICE), PATH, Some(IFACE), method, body).map_err(|e| e.to_string())
@@ -116,10 +117,11 @@ pub fn start(events: impl Fn(ShortcutEvent) + Send + 'static) -> Result<(), Stri
         }
         // Start it and wait: activating it cold (right at login) can take
         // far longer than an ordinary call.
-        let proxy = zbus::blocking::fdo::DBusProxy::new(conn).map_err(|e| e.to_string())?;
-        proxy
-            .start_service_by_name(SERVICE.try_into().map_err(|e: zbus::names::Error| e.to_string())?, 0)
-            .map_err(|e| format!("could not start KDE's global shortcut service: {e}"))?;
+        zbus::block_on(async {
+            let proxy = zbus::fdo::DBusProxy::new(conn.inner()).await?;
+            proxy.start_service_by_name(zbus::names::WellKnownName::try_from(SERVICE)?, 0).await
+        })
+        .map_err(|e| format!("could not start KDE's global shortcut service: {e}"))?;
     }
     for (action, _, default) in ACTIONS {
         call("doRegister", &(action_id(action),))?;
@@ -129,8 +131,8 @@ pub fn start(events: impl Fn(ShortcutEvent) + Send + 'static) -> Result<(), Stri
         set(action, &defaults, SET_PRESENT)?;
     }
     let reply = call("getComponent", &(COMPONENT,))?;
-    let component: zbus::zvariant::OwnedObjectPath = reply.body().deserialize().map_err(|e| e.to_string())?;
-    let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(SERVICE).map_err(|e| e.to_string())?.build();
+    let component: zbus::OwnedObjectPath = reply.body().deserialize().map_err(|e| e.to_string())?;
+    let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(SERVICE).build().map_err(|e| e.to_string())?;
     // (only the shortcut service's own signals come through)
     crate::dbus::listen(SERVICE, rule, "flatshot-shortcuts", move |msg| {
         let header = msg.header();

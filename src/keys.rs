@@ -19,6 +19,7 @@ pub enum Where {
 pub const BINDINGS: &[(&str, &str, &str, Where)] = &[
     ("tool.region", "Capture region", "R", Where::Capture),
     ("tool.record", "Record screen", "V", Where::Capture),
+    ("tool.ocr", "Copy text from the screen (OCR)", "O", Where::Capture),
     ("tool.select", "Select, move and resize drawings", "S", Where::Both),
     ("tool.pen", "Pen", "P", Where::Both),
     ("tool.line", "Line", "L", Where::Both),
@@ -30,8 +31,12 @@ pub const BINDINGS: &[(&str, &str, &str, Where)] = &[
     ("tool.text", "Text", "T", Where::Both),
     ("tool.pixelate", "Pixelate", "X", Where::Both),
     ("tool.blur", "Blur", "U", Where::Both),
+    ("tool.spotlight", "Spotlight: shade everything else", "D", Where::Both),
+    ("tool.magnify", "Magnifier", "Z", Where::Both),
     ("tool.counter", "Counter", "N", Where::Both),
     ("tool.crop", "Crop, cut out, rotate and resize", "C", Where::Editor),
+    // (the toolbar's swatches from the left: its colours, then your own,
+    // so with the 7 it starts with, 8 is your own; ui::state::color_for_key)
     ("color.1", "Toolbar colour 1", "1", Where::Both),
     ("color.2", "Toolbar colour 2", "2", Where::Both),
     ("color.3", "Toolbar colour 3", "3", Where::Both),
@@ -39,7 +44,12 @@ pub const BINDINGS: &[(&str, &str, &str, Where)] = &[
     ("color.5", "Toolbar colour 5", "5", Where::Both),
     ("color.6", "Toolbar colour 6", "6", Where::Both),
     ("color.7", "Toolbar colour 7", "7", Where::Both),
-    ("color.8", "Your own colour", "8", Where::Both),
+    ("color.8", "Toolbar colour 8", "8", Where::Both),
+    ("color.9", "Toolbar colour 9", "9", Where::Both),
+    ("color.10", "Toolbar colour 10", "0", Where::Both),
+    ("color.11", "Toolbar colour 11", "Alt+1", Where::Both),
+    ("color.12", "Toolbar colour 12", "Alt+2", Where::Both),
+    ("color.13", "Toolbar colour 13", "Alt+3", Where::Both),
     ("size.down", "Thinner", "[", Where::Both),
     ("size.up", "Thicker", "]", Where::Both),
     ("undo", "Undo", "Ctrl+Z", Where::Both),
@@ -129,6 +139,15 @@ impl Keymap {
             parsed.push((*action, parse_key(&value)));
             keys.insert(action.to_string(), value);
         }
+        // A key you chose wins over a default it clashes with (one a newer
+        // version gave a new action): that action is left without a key.
+        let chosen: Vec<(&str, (i32, i32))> = parsed.iter().filter(|(a, _)| overrides.contains_key(*a)).filter_map(|(a, k)| Some((*a, (*k)?))).collect();
+        for (action, k) in &mut parsed {
+            if !overrides.contains_key(*action) && k.is_some_and(|k| chosen.iter().any(|(a, c)| *c == k && overlaps(a, action))) {
+                *k = None;
+                keys.insert(action.to_string(), String::new());
+            }
+        }
         Keymap { keys, parsed }
     }
 
@@ -194,6 +213,13 @@ mod tests {
         assert_eq!(km.action(&press(key::S, CTRL), Where::Editor), Some("save"));
         assert_eq!(km.label("redo"), "Ctrl+Shift+Z");
         assert_eq!(km.hint("Undo", "undo"), "Undo  ·  Ctrl+Z");
+        // Every toolbar swatch: 1-9, 0, then Alt+1... (Shift too, as on AZERTY).
+        assert_eq!(km.action(&press(0x39, 0), Where::Editor), Some("color.9"));
+        assert_eq!(km.action(&press(0x30, 0), Where::Capture), Some("color.10"));
+        assert_eq!(km.action(&press(0x31, keyseq::ALT), Where::Capture), Some("color.11"));
+        assert_eq!(km.action(&press(0x33, keyseq::ALT | SHIFT), Where::Editor), Some("color.13"));
+        assert_eq!(km.action(&press(0x31, SHIFT), Where::Editor), Some("color.1"));
+        assert_eq!(km.action(&press(0x30, CTRL), Where::Editor), Some("fit"));
     }
 
     #[test]
@@ -206,6 +232,19 @@ mod tests {
         assert_eq!(km.action(&press(0x50, 0), Where::Capture), None);
         assert_eq!(km.action(&press(0x51, 0), Where::Capture), None);
         assert_eq!(km.hint("Codes", "codes"), "Codes");
+        // A key you gave something wins over a default one: here, the magnifier's.
+        let mut o = BTreeMap::new();
+        o.insert("codes".to_string(), "Z".to_string());
+        let km = Keymap::new(&o);
+        assert_eq!(km.action(&press(key::Z, 0), Where::Capture), Some("codes"));
+        assert_eq!(km.label("tool.magnify"), "");
+        // (only where both work: in the editor, codes don't)
+        let mut o = BTreeMap::new();
+        o.insert("save".to_string(), "D".to_string());
+        assert_eq!(Keymap::new(&o).action(&press(0x44, 0), Where::Editor), Some("save"));
+        o.insert("save".to_string(), "Ctrl+S".to_string());
+        o.insert("codes".to_string(), "C".to_string());
+        assert_eq!(Keymap::new(&o).action(&press(0x43, 0), Where::Editor), Some("tool.crop"));
     }
 
     #[test]

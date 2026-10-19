@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 
-use zbus::zvariant::{OwnedFd, OwnedValue, Value};
+use zbus::{OwnedFd, OwnedVariant, Variant};
 
 struct FakeKWin {
     screens: Vec<(String, u32, u32)>,
@@ -43,33 +43,33 @@ fn send(pipe: OwnedFd, data: Vec<u8>) {
     });
 }
 
-fn results(w: u32, h: u32, format: u32) -> HashMap<String, OwnedValue> {
+fn results(w: u32, h: u32, format: u32) -> HashMap<String, OwnedVariant> {
     let mut m = HashMap::new();
-    m.insert("type".into(), Value::from("raw").try_into().unwrap());
-    m.insert("width".into(), Value::U32(w).try_into().unwrap());
-    m.insert("height".into(), Value::U32(h).try_into().unwrap());
-    m.insert("stride".into(), Value::U32(w * 4).try_into().unwrap());
-    m.insert("format".into(), Value::U32(format).try_into().unwrap());
-    m.insert("scale".into(), Value::F64(1.0).try_into().unwrap());
+    m.insert("type".into(), Variant::from("raw").try_into().unwrap());
+    m.insert("width".into(), Variant::U32(w).try_into().unwrap());
+    m.insert("height".into(), Variant::U32(h).try_into().unwrap());
+    m.insert("stride".into(), Variant::U32(w * 4).try_into().unwrap());
+    m.insert("format".into(), Variant::U32(format).try_into().unwrap());
+    m.insert("scale".into(), Variant::F64(1.0).try_into().unwrap());
     m
 }
 
 /// As KWin does: without hide-caller-windows false, the caller's own
 /// windows would be left out of the picture (refused here, to be noticed).
-fn shows_caller(options: &HashMap<String, OwnedValue>) -> zbus::fdo::Result<()> {
+fn shows_caller(options: &HashMap<String, OwnedVariant>) -> zbus::fdo::Result<()> {
     match options.get("hide-caller-windows").and_then(|v| bool::try_from(&**v).ok()) {
         Some(false) => Ok(()),
         _ => Err(zbus::fdo::Error::InvalidArgs("the caller's own windows would be hidden".into())),
     }
 }
 
-fn cursor(options: &HashMap<String, OwnedValue>) -> bool {
+fn cursor(options: &HashMap<String, OwnedVariant>) -> bool {
     options.get("include-cursor").and_then(|v| bool::try_from(&**v).ok()).unwrap_or(false)
 }
 
 #[zbus::interface(name = "org.kde.KWin.ScreenShot2")]
 impl FakeKWin {
-    fn capture_screen(&self, name: &str, options: HashMap<String, OwnedValue>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedValue>> {
+    fn capture_screen(&self, name: &str, options: HashMap<String, OwnedVariant>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedVariant>> {
         shows_caller(&options)?;
         let Some(i) = self.screens.iter().position(|s| s.0 == name) else {
             return Err(zbus::fdo::Error::InvalidArgs(format!("no screen {name}")));
@@ -80,7 +80,7 @@ impl FakeKWin {
         Ok(results(w, h, 5))
     }
 
-    fn capture_active_window(&self, options: HashMap<String, OwnedValue>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedValue>> {
+    fn capture_active_window(&self, options: HashMap<String, OwnedVariant>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedVariant>> {
         shows_caller(&options)?;
         let flag = |k: &str| options.get(k).and_then(|v| bool::try_from(&**v).ok()).unwrap_or(false);
         println!("window: cursor {} decoration {} shadow {}", flag("include-cursor"), flag("include-decoration"), flag("include-shadow"));
@@ -96,7 +96,7 @@ impl FakeKWin {
         Ok(results(w, h, 6))
     }
 
-    fn capture_workspace(&self, options: HashMap<String, OwnedValue>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedValue>> {
+    fn capture_workspace(&self, options: HashMap<String, OwnedVariant>, pipe: OwnedFd) -> zbus::fdo::Result<HashMap<String, OwnedVariant>> {
         shows_caller(&options)?;
         send(pipe, pixels(1500, 900, 0x5A));
         Ok(results(1500, 900, 4))
@@ -135,9 +135,9 @@ impl FakeScripting {
             let Some((service, path)) = target(&script) else { continue };
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(delay));
-                let conn = zbus::blocking::Connection::session().unwrap();
+                let conn = zbus::block_on(zbus::Connection::session()).unwrap();
                 let report = r#"{"windows": [[200, 150, 400, 300, "Fake window", "fake"]], "active": 0, "cursor": [400, 300]}"#;
-                let r = conn.call_method(Some(service.as_str()), path.as_str(), Some("org.flatshot.Windows"), "report", &(report,));
+                let r = zbus::block_on(conn.call_method(Some(service.as_str()), path.as_str(), Some("org.flatshot.Windows"), "report", &(report,)));
                 println!("script reported: {}", r.map(|_| "ok".to_string()).unwrap_or_else(|e| e.to_string()));
             });
         }
@@ -155,16 +155,14 @@ fn main() {
             (name.to_string(), w.parse().unwrap(), h.parse().unwrap())
         })
         .collect();
-    let _conn = zbus::blocking::connection::Builder::session()
-        .unwrap()
-        .name("org.kde.KWin")
-        .unwrap()
-        .serve_at("/org/kde/KWin/ScreenShot2", FakeKWin { screens })
-        .unwrap()
-        .serve_at("/Scripting", FakeScripting { scripts: Default::default() })
-        .unwrap()
-        .build()
-        .unwrap();
+    let _conn = zbus::block_on(
+        zbus::connection::Builder::session()
+            .name("org.kde.KWin")
+            .serve_at("/org/kde/KWin/ScreenShot2", FakeKWin { screens })
+            .serve_at("/Scripting", FakeScripting { scripts: Default::default() })
+            .build(),
+    )
+    .unwrap();
     println!("fake KWin ScreenShot2 ready");
     loop {
         std::thread::park();

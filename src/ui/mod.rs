@@ -10,6 +10,7 @@ pub mod overlay;
 pub mod panels;
 pub mod picture;
 pub mod recbar;
+pub mod recent;
 pub mod selection;
 pub mod session;
 pub mod settings;

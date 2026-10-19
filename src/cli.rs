@@ -14,6 +14,7 @@ pub struct Args {
     pub region: Option<String>,
     pub pin: bool,
     pub record: bool,
+    pub ocr: bool,
     pub output: Option<String>,
     pub image: Option<String>,
     pub backend: Option<String>,
@@ -22,6 +23,8 @@ pub struct Args {
     pub no_scan: bool,
     pub tray: bool,
     pub settings: bool,
+    pub recent: bool,
+    pub from_clipboard: bool,
     pub quit: bool,
     pub print_config: bool,
     pub diagnose: bool,
@@ -40,9 +43,9 @@ pub enum Parsed {
 
 fn usage() -> String {
     format!(
-        "usage: flatshot-rs [-h] [-d SEC] [-f | -m | -w | -l | -r WxH+X+Y] [--pin] [--record] [-o FILE]\n\
-         \x20               [-i FILE] [--backend {{{}}}]\n\
-         \x20               [--no-copy] [--no-save] [--no-scan] [--tray] [--settings] [--quit]\n\
+        "usage: flatshot-rs [-h] [-d SEC] [-f | -m | -w | -l | -r WxH+X+Y] [--pin] [--record] [--ocr] [-o FILE]\n\
+         \x20               [-i FILE | --from-clipboard] [--backend {{{}}}]\n\
+         \x20               [--no-copy] [--no-save] [--no-scan] [--tray] [--settings] [--recent] [--quit]\n\
          \x20               [--print-config] [--diagnose] [-v] [--version]",
         crate::config::BACKENDS.join(",")
     )
@@ -59,10 +62,12 @@ options:
   -d SEC, --delay SEC   wait before capturing
   --pin                 pin the result to the screen instead of saving it
   --record              choose an area and record it to a video (stops the recording in progress)
+  --ocr                 choose an area and copy the text in it (needs tesseract)
   -o FILE, --output FILE
                         save to this file instead of the screenshot folder ('-' writes PNG to stdout)
   -i FILE, --image FILE
                         open an image in the annotation editor (Save writes back to it, or to --output)
+  --from-clipboard      open the picture on the clipboard in the annotation editor
   --backend {{{backends}}}
                         screen capture helper (default: from settings, else auto)
   --no-copy             don't copy the result to the clipboard
@@ -70,6 +75,7 @@ options:
   --no-scan             don't look for QR codes / barcodes
   --tray                run in the system tray with global shortcuts
   --settings            open the settings window
+  --recent              open the recent captures window
   --quit                stop the running tray app
   --print-config        print the effective config and exit
   --diagnose            show what this Flatshot and the running tray app use (layer-shell, capture, recorder)
@@ -133,11 +139,14 @@ const FLAGS: &[(&str, &str)] = &[
     ("-l", "--last-region"),
     ("", "--pin"),
     ("", "--record"),
+    ("", "--ocr"),
     ("", "--no-copy"),
     ("", "--no-save"),
     ("", "--no-scan"),
     ("", "--tray"),
     ("", "--settings"),
+    ("", "--recent"),
+    ("", "--from-clipboard"),
     ("", "--quit"),
     ("", "--print-config"),
     ("", "--diagnose"),
@@ -245,11 +254,14 @@ pub fn parse(argv: &[String]) -> Parsed {
                 "--last-region" => a.last_region = true,
                 "--pin" => a.pin = true,
                 "--record" => a.record = true,
+                "--ocr" => a.ocr = true,
                 "--no-copy" => a.no_copy = true,
                 "--no-save" => a.no_save = true,
                 "--no-scan" => a.no_scan = true,
                 "--tray" => a.tray = true,
                 "--settings" => a.settings = true,
+                "--recent" => a.recent = true,
+                "--from-clipboard" => a.from_clipboard = true,
                 "--quit" => a.quit = true,
                 "--print-config" => a.print_config = true,
                 "--diagnose" => a.diagnose = true,
@@ -266,6 +278,12 @@ pub fn parse(argv: &[String]) -> Parsed {
     }
     if a.record && (a.mode() != "region" || a.pin || a.image.is_some() || a.output.is_some()) {
         return error("--record picks its area on screen; it doesn't combine with instant captures, --pin, -i or -o");
+    }
+    if a.from_clipboard && a.image.is_some() {
+        return error("--from-clipboard and -i each open a picture: one or the other");
+    }
+    if a.ocr && (a.mode() != "region" || a.pin || a.record || a.image.is_some() || a.output.is_some()) {
+        return error("--ocr picks its area on screen; it doesn't combine with instant captures, --pin, --record, -i or -o");
     }
     Parsed::Run(a)
 }
@@ -308,18 +326,27 @@ impl Args {
             || self.no_copy
             || self.no_save
             || self.no_scan
-            || (self.verbose && !(self.tray || self.settings || self.quit))
+            || (self.verbose && !(self.tray || self.settings || self.recent || self.quit))
         {
             return None; // one-off options: handled in this process
         }
         if self.quit {
             return Some("quit".into());
         }
+        if self.recent {
+            return Some("recent".into());
+        }
+        if self.from_clipboard {
+            return Some("annotate-clipboard".into());
+        }
         if self.settings || self.tray {
             return Some("settings".into()); // already running: show something useful
         }
         if self.record {
             return Some(format!("record {}", fmt_delay(self.delay)));
+        }
+        if self.ocr {
+            return Some(format!("ocr {}", fmt_delay(self.delay)));
         }
         let mut mode = self.mode().to_string();
         if mode == "rect" {
@@ -372,6 +399,8 @@ mod tests {
         assert_eq!((a.delay, a.mode()), (2.0, "rect"));
         assert!(err(&["-f", "-m"]).contains("not allowed with argument -f/--full"));
         assert!(err(&["--record", "-f"]).contains("--record picks its area"));
+        assert!(err(&["--ocr", "--pin"]).contains("--ocr picks its area"));
+        assert!(run(&["--ocr", "-d", "1"]).ocr);
         assert!(err(&["--region", "nope"]).contains("expected WxH+X+Y"));
         assert!(err(&["--bogus"]).contains("unrecognized arguments"));
         assert!(err(&["--backend", "x"]).contains("invalid choice"));
@@ -383,7 +412,10 @@ mod tests {
         assert_eq!(run(&["--full", "--pin", "-d", "2"]).forwardable().as_deref(), Some("screens 2 pin"));
         assert_eq!(run(&["-r", "5x5+1+2"]).forwardable().as_deref(), Some("rect:5x5+1+2 0"));
         assert_eq!(run(&["--record"]).forwardable().as_deref(), Some("record 0"));
+        assert_eq!(run(&["--ocr", "-d", "2"]).forwardable().as_deref(), Some("ocr 2"));
         assert_eq!(run(&["--tray"]).forwardable().as_deref(), Some("settings"));
+        assert_eq!(run(&["--recent"]).forwardable().as_deref(), Some("recent"));
+        assert_eq!(run(&["--from-clipboard"]).forwardable().as_deref(), Some("annotate-clipboard"));
         assert_eq!(run(&["--no-save"]).forwardable(), None);
         assert_eq!(run(&["-v"]).forwardable(), None);
         assert_eq!(run(&["-d", "0.5"]).forwardable().as_deref(), Some("region 0.5"));

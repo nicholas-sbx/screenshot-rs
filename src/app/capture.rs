@@ -77,6 +77,8 @@ pub struct Job {
     pub pin: bool,
     /// open with the record tool
     pub record: bool,
+    /// open with the tool that copies text
+    pub ocr: bool,
     /// look for codes
     pub scan: bool,
     /// when it was asked for (the clock starts there)
@@ -85,7 +87,7 @@ pub struct Job {
 
 impl Job {
     pub fn new(mode: Mode) -> Job {
-        Job { mode, pin: false, record: false, scan: true, asked: Instant::now() }
+        Job { mode, pin: false, record: false, ocr: false, scan: true, asked: Instant::now() }
     }
 }
 
@@ -349,7 +351,7 @@ impl App {
                 pointer,
             })
             .collect();
-        let request = Request { pin: p.job.pin, scan: p.job.scan, record: p.job.record, image: false };
+        let request = Request { pin: p.job.pin, scan: p.job.scan, record: p.job.record, ocr: p.job.ocr, image: false };
         let can_record = !self.is_recording();
         let setup = Setup { cfg: self.cfg.clone(), request, screens, pointer_taken: both, cursor: None, primary: 0, can_record };
         let mut session = Session::new(setup, Box::new(Recorder { how: crate::record::method() }), self.waker.clone());

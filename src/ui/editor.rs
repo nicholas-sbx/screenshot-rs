@@ -29,13 +29,16 @@ use crate::ui::panels::{ColorPicker, LineEdit, PICKER_SIZE, PickerEvent};
 use crate::ui::picture::{self, Moved};
 use crate::ui::selection::{Drawings, DrawingsMut, Selection};
 use crate::ui::session::{Button, CursorShape};
-use crate::ui::shapes::{self, Mods, Shape, TOOLS, Tool, copy_for_editing};
+use crate::ui::shapes::{self, Mods, Shape, TOOLS, TextStyle, Tool, callout_text_at, copy_for_editing};
 use crate::ui::snapping::EdgeMaps;
-use crate::ui::state::{CUSTOM, color_for_key, default_color_index, swatch_index, swatch_items};
+use crate::ui::state::{CUSTOM, OWN_SWATCH, color_for_key, default_color_index, swatch_index, swatch_items};
 use crate::ui::textedit::KeyResult;
 use crate::ui::widgets::{Item, Look, Pointer, layout_row, paint_item};
 
 pub const BAR_H: f32 = 48.0;
+/// The bar's second row, where the window's too narrow for one: its
+/// colours and the rest, under the tools.
+const BAR_ROW: f32 = 40.0;
 /// The bar under it while cropping: the picture's own changes.
 pub const PICTURE_BAR_H: f32 = 44.0;
 pub const STATUS_H: f32 = 34.0;
@@ -77,6 +80,9 @@ pub enum Request {
     ChooseImage(PathBuf),
     /// the window can close now
     Close,
+    /// the picture was saved to this file, at this size (for the Recent
+    /// captures list)
+    Saved(PathBuf, (u32, u32)),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -247,9 +253,16 @@ pub struct Editor {
     space: bool,
     /// a text being moved: where it was grabbed and where it was then
     text_drag: Option<(Point, Point)>,
+    /// how the text tool's new texts look
+    text_style: TextStyle,
+    /// a callout being dragged out: what it points at (its text, being
+    /// typed, follows the pointer until it's let go)
+    callout: Option<Point>,
     pointer: Option<Point>,
     mods: i32,
     bar: Vec<Item>,
+    /// the bar in two rows (see BAR_ROW)
+    two_rows: bool,
     actions: Vec<ActionButton>,
     hovered: Option<&'static str>,
     pressed: Option<&'static str>,
@@ -365,9 +378,12 @@ impl Editor {
             pan: None,
             space: false,
             text_drag: None,
+            text_style: TextStyle::Plain,
+            callout: None,
             pointer: None,
             mods: 0,
             bar: Vec::new(),
+            two_rows: false,
             actions: vec![
                 ActionButton::new("copy", &["Copy", "Copied"], "copy"),
                 ActionButton::new("save_as", &["Save as"], "save-as"),
@@ -478,18 +494,24 @@ impl Editor {
 
     /// The bars above the canvas: the toolbar, and the picture bar while cropping.
     fn top_h(&self) -> f32 {
-        BAR_H + if self.tool == Tool::Crop { PICTURE_BAR_H } else { 0.0 }
+        self.bar_h() + if self.tool == Tool::Crop { PICTURE_BAR_H } else { 0.0 }
+    }
+
+    /// The toolbar's height: one row, or two.
+    fn bar_h(&self) -> f32 {
+        if self.two_rows { BAR_H + BAR_ROW } else { BAR_H }
     }
 
     /// The smallest the window can be with nothing overlapping: the bars'
     /// widths (the picture bar's too while cropping) and the canvas's least.
     pub fn min_size(&self) -> (u32, u32) {
         let panel = if self.beauty_on { beautypanel::WIDTH } else { 0.0 };
-        let mut w = self.bar_width().max(self.zoom_bar_width() + 160.0).max(MIN_CANVAS.0 + panel);
+        let mut w = self.narrow_bar_width().max(self.zoom_bar_width() + 160.0).max(MIN_CANVAS.0 + panel);
         if self.tool == Tool::Crop {
             w = w.max(self.picture_bar_width());
         }
-        let h = self.top_h() + MIN_CANVAS.1 + STATUS_H;
+        // (the bar in two rows, as it is that narrow)
+        let h = BAR_H + BAR_ROW + if self.tool == Tool::Crop { PICTURE_BAR_H } else { 0.0 } + MIN_CANVAS.1 + STATUS_H;
         (w.ceil() as u32, h.ceil() as u32)
     }
 
@@ -498,8 +520,14 @@ impl Editor {
     fn refresh_bar(&mut self) {
         let km = &self.keymap;
         let mut items = Vec::new();
-        for (tool, id, label) in TOOLS.iter().filter(|t| !matches!(t.0, Tool::Region | Tool::Record)) {
-            let mut b = Item::new(id, Look::Icon { icon: id, size: 36.0 }, km.hint(label, &format!("tool.{id}")));
+        for (tool, id, label) in TOOLS.iter().filter(|t| !t.0.picks_area()) {
+            // (the text tool in its style: chosen again, its next)
+            let (icon, label) = if *tool == Tool::Text { (self.text_style.icon(), self.text_style.hint()) } else { (*id, *label) };
+            let mut hint = km.hint(label, &format!("tool.{id}"));
+            if *tool == Tool::Text {
+                hint.push_str("  ·  again for another style");
+            }
+            let mut b = Item::new(id, Look::Icon { icon, size: 36.0 }, hint);
             b.active = *tool == self.tool;
             items.push(b);
         }
@@ -540,15 +568,41 @@ impl Editor {
         self.damaged = true;
     }
 
-    /// The narrowest the window can be with all of the bar showing.
+    /// The narrowest the window can be with the bar in one row.
     pub fn bar_width(&self) -> f32 {
         let tools: f32 = self.bar.iter().map(|it| it.size().0 + 2.0).sum();
         let actions: f32 = self.actions.iter().map(|b| b.width + 4.0).sum();
         8.0 + tools + 16.0 + actions + 8.0
     }
 
+    /// The narrowest it can be with the bar in two rows: the tools and the
+    /// buttons, over the colours and the rest.
+    fn narrow_bar_width(&self) -> f32 {
+        let (tools, rest) = self.bar.split_at(self.bar_split());
+        let row = |items: &[Item]| items.iter().map(|it| it.size().0 + 2.0).sum::<f32>();
+        let actions: f32 = self.actions.iter().map(|b| b.width + 4.0).sum();
+        (8.0 + row(tools) + 16.0 + actions + 8.0).max(8.0 + row(rest.get(1..).unwrap_or_default()) + 8.0)
+    }
+
+    /// Where the bar's second row starts (at the divider after the tools,
+    /// left out of both).
+    fn bar_split(&self) -> usize {
+        self.bar.iter().position(|it| it.id == "divider.tools").unwrap_or(self.bar.len())
+    }
+
     fn layout_bar(&mut self) {
-        layout_row(&mut self.bar, 8.0, 6.0, 36.0, 2.0);
+        self.two_rows = self.view.0 < self.bar_width();
+        if self.two_rows {
+            let split = self.bar_split();
+            let (tools, rest) = self.bar.split_at_mut(split);
+            layout_row(tools, 8.0, 6.0, 36.0, 2.0);
+            if let Some((divider, rest)) = rest.split_first_mut() {
+                divider.rect = Rect::default();
+                layout_row(rest, 8.0, 6.0 + BAR_ROW, 36.0, 2.0);
+            }
+        } else {
+            layout_row(&mut self.bar, 8.0, 6.0, 36.0, 2.0);
+        }
         let mut x = self.view.0 - 8.0;
         for b in self.actions.iter_mut().rev() {
             x -= b.width;
@@ -624,7 +678,8 @@ impl Editor {
 
     /// Where the picture bar's things go (one row under the toolbar).
     fn layout_picture_bar(&mut self) {
-        let (top, h) = (BAR_H + 5.0, 34.0);
+        let bar = self.bar_h();
+        let (top, h) = (bar + 5.0, 34.0);
         let mut x = 8.0;
         let place = |b: &mut ActionButton, x: &mut f32| {
             b.rect = Rect::new(*x, top, b.width, h);
@@ -636,12 +691,12 @@ impl Editor {
         // (dividers, cut, turn and flip; the link sits between the fields and Resize)
         let n = self.picture_bar.len().saturating_sub(1);
         let (items, link) = self.picture_bar.split_at_mut(n);
-        x = layout_row(items, x, BAR_H + 4.0, 36.0, 4.0) + 4.0;
+        x = layout_row(items, x, bar + 4.0, 36.0, 4.0) + 4.0;
         self.width_field.rect = Rect::new(x, top, 64.0, h);
         x += 64.0 + 4.0 + 14.0 + 4.0;
         self.height_field.rect = Rect::new(x, top, 64.0, h);
         x += 64.0 + 4.0;
-        x = layout_row(link, x, BAR_H + 5.0, 34.0, 4.0) + 4.0;
+        x = layout_row(link, x, bar + 5.0, 34.0, 4.0) + 4.0;
         place(resize, &mut x);
         apply.rect = Rect::new((self.view.0 - 8.0 - apply.width).max(x), top, apply.width, h);
     }
@@ -712,7 +767,8 @@ impl Editor {
             }
             return self.zoom_bar.iter().find(|it| it.rect.contains(at)).map(|it| it.id);
         }
-        if self.tool == Tool::Crop && (BAR_H..BAR_H + PICTURE_BAR_H).contains(&at.y) {
+        let bar = self.bar_h();
+        if self.tool == Tool::Crop && (bar..bar + PICTURE_BAR_H).contains(&at.y) {
             if let Some(b) = self.picture_actions.iter().find(|b| b.rect.contains(at) && b.enabled) {
                 return Some(b.id);
             }
@@ -724,7 +780,7 @@ impl Editor {
             }
             return self.picture_bar.iter().find(|it| it.rect.contains(at) && it.clickable() && it.enabled).map(|it| it.id);
         }
-        if at.y >= BAR_H {
+        if at.y >= bar {
             return None;
         }
         if let Some(b) = self.actions.iter().find(|b| b.rect.contains(at) && b.enabled) {
@@ -785,7 +841,7 @@ impl Editor {
                 self.save();
             }
             "size" => self.set_size((self.size + 1) % SIZES.len()),
-            "color.8" => self.toggle_picker(),
+            OWN_SWATCH => self.toggle_picker(),
             _ => {
                 if let Some(t) = Tool::from_id(id) {
                     self.set_tool(t);
@@ -803,7 +859,7 @@ impl Editor {
     }
 
     pub fn set_tool(&mut self, tool: Tool) {
-        if matches!(tool, Tool::Region | Tool::Record) {
+        if tool.picks_area() {
             return;
         }
         self.commit_text();
@@ -811,6 +867,9 @@ impl Editor {
             self.with_selection(|sel, d| sel.clear(d));
         }
         let was = self.tool;
+        if tool == Tool::Text && was == Tool::Text {
+            self.text_style = self.text_style.next();
+        }
         if tool == Tool::Crop && was != Tool::Crop {
             self.cropper.start(picture_size(&self.image, self.dpr));
         } else if tool != Tool::Crop {
@@ -1012,9 +1071,9 @@ impl Editor {
         }
         self.set_color(CUSTOM);
         let mut picker = ColorPicker::new(self.custom_color);
-        let swatch = self.bar.iter().find(|it| it.id == "color.8").map(|it| it.rect).unwrap_or_default();
+        let swatch = self.bar.iter().find(|it| it.id == OWN_SWATCH).map(|it| it.rect).unwrap_or_default();
         let x = (swatch.center().x - PICKER_SIZE.0 / 2.0).clamp(8.0, (self.view.0 - PICKER_SIZE.0 - 8.0).max(8.0));
-        picker.pos = Point::new(x.round(), BAR_H + 6.0);
+        picker.pos = Point::new(x.round(), self.bar_h() + 6.0);
         self.picker = Some(picker);
         self.damaged = true;
     }
@@ -1318,6 +1377,13 @@ impl Editor {
             return;
         }
         let pic = self.to_picture(at);
+        if let Some(tip) = self.callout {
+            if let Some(t) = self.text_edit.as_mut().and_then(|s| s.as_text_mut()) {
+                t.pos = callout_text_at(tip, pic);
+                self.damaged = true;
+            }
+            return;
+        }
         if self.text_drag.is_some()
             && let Some(s) = self.text_edit.as_mut()
         {
@@ -1412,7 +1478,7 @@ impl Editor {
                 self.picker_event(ev);
                 return;
             }
-            if self.bar_item_at(at) != Some("color.8") {
+            if self.bar_item_at(at) != Some(OWN_SWATCH) {
                 self.close_picker();
             }
         }
@@ -1475,7 +1541,17 @@ impl Editor {
                         }
                         s
                     }
-                    None => Shape::text(pic, self.color(), self.size),
+                    None => {
+                        // (a callout: pressed on what it points at, its text dragged to its place)
+                        let (at, style) = match self.text_style {
+                            TextStyle::Callout(_) => {
+                                self.callout = Some(pic);
+                                (callout_text_at(pic, pic), TextStyle::Callout(pic))
+                            }
+                            style => (pic, style),
+                        };
+                        Shape::text(at, self.color(), self.size, style)
+                    }
                 };
                 self.begin_text(shape);
             }
@@ -1530,7 +1606,7 @@ impl Editor {
         if button != Button::Left {
             return;
         }
-        if self.text_drag.take().is_some() {
+        if self.text_drag.take().is_some() || self.callout.take().is_some() {
             return;
         }
         if self.selection.dragging() {
@@ -1863,9 +1939,7 @@ impl Editor {
         let mut out = (*self.image).clone();
         if self.shapes.iter().any(|(_, s)| !s.hidden) {
             let mut p = Painter::new(out.pixmap_mut(), self.dpr);
-            for (_, s) in self.shapes.iter().filter(|(_, s)| !s.hidden) {
-                s.paint(&mut p, &self.image, self.dpr);
-            }
+            crate::ui::shapes::paint_all(&mut p, self.shapes.iter().filter(|(_, s)| !s.hidden).map(|(_, s)| s), &self.image, self.dpr);
         }
         if !self.has_alpha() {
             out.force_opaque();
@@ -1923,9 +1997,11 @@ impl Editor {
 
     fn save_in(&mut self, target: Result<SaveTarget, String>) -> bool {
         let mut clock = crate::timing::Clock::new("editor save");
+        let mut size = (0, 0);
         let written = target.and_then(|target| {
             let img = self.render()?;
             clock.step("drawn", format!("{} × {}, {} drawings", img.width(), img.height(), self.shapes.len()));
+            size = img.size();
             let result = write_picture(&img, &target, &self.cfg, img.has_alpha());
             self.target = Some(target);
             result
@@ -1933,6 +2009,7 @@ impl Editor {
         match written {
             Ok(()) => {
                 let path = self.target.as_ref().map(|t| t.path.clone()).unwrap_or_default();
+                self.requests.push(Request::Saved(path.clone(), size));
                 clock.step("saved", path.display().to_string());
                 self.say(format!("Saved to {}", path.display()));
                 self.path = path;
@@ -1993,10 +2070,12 @@ impl Editor {
         self.paint_canvas(target, origin, region);
         let mut p = Painter::for_region(target.pixmap_mut(), self.scale, origin);
         // The bar.
-        p.fill_rect(Rect::new(0.0, 0.0, self.view.0, BAR_H), c.base);
-        p.fill_rect(Rect::new(0.0, BAR_H - 1.0, self.view.0, 1.0), c.line);
+        let bar = self.bar_h();
+        p.fill_rect(Rect::new(0.0, 0.0, self.view.0, bar), c.base);
+        p.fill_rect(Rect::new(0.0, bar - 1.0, self.view.0, 1.0), c.line);
         let ptr = Pointer { hovered: self.hovered, pressed: self.pressed };
-        for it in &self.bar {
+        // (not the divider left out of two rows)
+        for it in self.bar.iter().filter(|it| !it.rect.is_empty()) {
             paint_item(&mut p, it, Point::ZERO, &ptr);
         }
         for b in &self.actions {
@@ -2168,9 +2247,7 @@ impl Editor {
             p.scale_by(self.zoom, self.zoom);
             // Only what's on the picture shows: nothing past its edges is saved.
             p.clip_rect(Rect::new(0.0, 0.0, pw, ph));
-            for (_, s) in self.shapes.iter().filter(|(_, s)| !s.hidden) {
-                s.paint(&mut p, &self.image, self.dpr);
-            }
+            crate::ui::shapes::paint_all(&mut p, self.shapes.iter().filter(|(_, s)| !s.hidden).map(|(_, s)| s), &self.image, self.dpr);
         }
     }
 
@@ -2318,8 +2395,9 @@ impl Editor {
 
     fn paint_picture_bar(&self, p: &mut Painter<'_>, ptr: &Pointer) {
         let c = theme::c();
-        p.fill_rect(Rect::new(0.0, BAR_H, self.view.0, PICTURE_BAR_H), c.base);
-        p.fill_rect(Rect::new(0.0, BAR_H + PICTURE_BAR_H - 1.0, self.view.0, 1.0), c.line);
+        let bar = self.bar_h();
+        p.fill_rect(Rect::new(0.0, bar, self.view.0, PICTURE_BAR_H), c.base);
+        p.fill_rect(Rect::new(0.0, bar + PICTURE_BAR_H - 1.0, self.view.0, 1.0), c.line);
         for b in &self.picture_actions {
             b.paint(p, self.hovered == Some(b.id));
         }
@@ -2684,7 +2762,36 @@ mod tests {
         let (w, h) = ed.min_size();
         ed.set_view(w as f32, h as f32);
         assert!(ed.zoom_bar[0].rect.x >= 160.0, "room for the size and some hint");
-        assert!(ed.actions[0].rect.x >= ed.bar.last().unwrap().rect.right(), "the toolbar's buttons apart");
+        assert!(ed.bar.iter().all(|it| ed.actions.iter().all(|b| !b.rect.intersects(&it.rect))), "the toolbar's buttons apart");
+    }
+
+    #[test]
+    fn the_bar_in_two_rows_where_one_does_not_fit() {
+        let mut ed = editor();
+        ed.set_view(ed.bar_width() + 10.0, 600.0);
+        assert!(!ed.two_rows && ed.canvas_rect().y == BAR_H);
+        // At the least width: the colours and the rest under the tools.
+        let (w, h) = ed.min_size();
+        assert!((w as f32) < ed.bar_width() && w < 1000, "{w}");
+        ed.set_view(w as f32, h as f32);
+        assert!(ed.two_rows && ed.canvas_rect().y == BAR_H + BAR_ROW);
+        let rect = |ed: &Editor, id: &str| ed.bar.iter().find(|it| it.id == id).unwrap().rect;
+        assert!(rect(&ed, "swatch.2").y > rect(&ed, "pen").bottom() && rect(&ed, "beautify").bottom() < BAR_H + BAR_ROW);
+        let window = Rect::new(0.0, 0.0, w as f32, BAR_H + BAR_ROW);
+        let shown: Vec<Rect> = ed.bar.iter().map(|it| it.rect).filter(|r| !r.is_empty()).chain(ed.actions.iter().map(|b| b.rect)).collect();
+        for (i, r) in shown.iter().enumerate() {
+            assert!(window.contains_rect(r), "{r:?} in the window");
+            assert!(shown[i + 1..].iter().all(|o| !o.intersects(r)), "{r:?} on another");
+        }
+        // A colour on the second row pressed as any is.
+        let c = rect(&ed, "swatch.2").center();
+        ed.button(Button::Left, true, c, 0);
+        ed.button(Button::Left, false, c, 0);
+        assert_eq!(ed.color_index, 2);
+        // Cropping: the picture bar under both rows.
+        ed.set_tool(Tool::Crop);
+        assert_eq!(ed.canvas_rect().y, BAR_H + BAR_ROW + PICTURE_BAR_H);
+        assert!(ed.picture_actions.iter().all(|b| b.rect.y > BAR_H + BAR_ROW));
     }
 
     #[test]

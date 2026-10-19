@@ -93,7 +93,7 @@ pub fn deliver(image: &Image, cfg: &Config, explicit: Option<&str>, shot: &Shot,
 }
 
 /// The format to write: `wanted` if it can be written here, else PNG.
-fn writable(wanted: &str) -> &'static str {
+pub fn writable(wanted: &str) -> &'static str {
     let wanted = if wanted == "jpeg" { "jpg" } else { wanted };
     match codec::writable_formats().iter().find(|f| f.0 == wanted) {
         Some(f) => f.0,

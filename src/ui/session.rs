@@ -22,9 +22,9 @@ use crate::timing::{self, Clock};
 use crate::ui::overlay::{Code, Grab, Handle, LOUPE_ZOOM, Output, Overlay, Window};
 use crate::ui::panels::{CodeChip, ColorPicker, PickerEvent, RecordPanel, RecordView, place_chips};
 use crate::ui::selection::Selection;
-use crate::ui::shapes::{self, Mods, Shape, Tool, copy_for_editing};
+use crate::ui::shapes::{self, Mods, Shape, TextStyle, Tool, copy_for_editing};
 use crate::ui::snapping::{self, EdgeMaps, py_round};
-use crate::ui::state::{CUSTOM, Desktop, State, color_for_key, swatch_index};
+use crate::ui::state::{CUSTOM, Desktop, OWN_SWATCH, State, color_for_key, swatch_index};
 use crate::ui::textedit::KeyResult;
 use crate::ui::toolbar::{CodeScan, Toolbar, View};
 use crate::ui::widgets::Look;
@@ -33,6 +33,9 @@ use crate::ui::widgets::Look;
 pub const RECORD_FORMATS: &[(&str, &str)] = &[("mp4", "MP4"), ("webm", "WebM"), ("gif", "GIF")];
 const SCAN_AFTER: Duration = Duration::from_millis(60);
 const RAINBOW_EVERY: Duration = Duration::from_millis(50);
+/// How often the countdown's ring moves on where the display doesn't pace
+/// it (X11; on Wayland each frame shown asks for the next).
+const COUNTDOWN_FRAME: Duration = Duration::from_millis(16);
 /// How long the toolbar waits to learn which monitor the pointer is on
 /// before it shows on the primary one.
 const TOOLBAR_WAIT: Duration = Duration::from_millis(300);
@@ -46,6 +49,8 @@ pub struct Request {
     pub scan: bool,
     /// open with the record tool
     pub record: bool,
+    /// open with the tool that copies text (OCR)
+    pub ocr: bool,
     /// a picture shown for annotating, not the screen
     pub image: bool,
 }
@@ -118,6 +123,12 @@ pub enum Outcome {
     },
     /// A code's text, to copy.
     CodeText(String),
+    /// An area's picture (`dpr` pixels per logical pixel), its text to be
+    /// read and copied.
+    ReadText {
+        image: Image,
+        dpr: f32,
+    },
     /// A code's link, to open.
     OpenLink(String),
     Record(Box<RecordJob>),
@@ -167,7 +178,10 @@ enum Background {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Timer {
+    /// the countdown's end: recording starts
     Countdown,
+    /// the countdown's ring moved on (where frames don't come by themselves)
+    CountdownFrame,
     Rainbow,
     Scan,
     Toolbar,
@@ -218,6 +232,11 @@ pub struct Session {
     codes: Vec<Code>,
     /// codes are to be looked for, once shown (hidden at the start: not yet)
     scan_pending: bool,
+    /// whether text can be copied here has been found out (st.ocr_problem)
+    ocr_checked: bool,
+    /// a callout being dragged out: the overlay, and what it points at (its
+    /// text, being typed, follows the pointer until it's let go)
+    callout: Option<(usize, Point)>,
     /// pictures still being looked through for codes
     scans_left: usize,
     /// the overlay whose select tool holds a drawing being dragged (which
@@ -244,6 +263,8 @@ pub struct Session {
     primary: usize,
     timers: Vec<(Instant, Timer)>,
     started: Instant,
+    /// when the countdown before recording began
+    countdown_began: Option<Instant>,
     pub clock: Clock,
     tx: mpsc::Sender<Background>,
     rx: mpsc::Receiver<Background>,
@@ -267,6 +288,8 @@ impl Session {
         }
         if request.record && st.can_record {
             st.tool = Tool::Record;
+        } else if request.ocr {
+            st.tool = Tool::Ocr;
         }
         st.colour_tool = if st.tool.uses_color() { st.tool } else { Tool::Pen };
         st.pin_mode = request.pin;
@@ -275,6 +298,8 @@ impl Session {
             "image"
         } else if st.tool == Tool::Record {
             "recording"
+        } else if st.tool == Tool::Ocr {
+            "text copy"
         } else {
             "region capture"
         };
@@ -317,12 +342,15 @@ impl Session {
             primary: primary.min(n.saturating_sub(1)),
             timers: Vec::new(),
             started: Instant::now(),
+            countdown_began: None,
             clock: Clock::new(what),
             tx,
             rx,
             waker,
             cancelled: Arc::new(AtomicBool::new(false)),
             scan_pending: false,
+            ocr_checked: false,
+            callout: None,
             scans_left: 0,
             drag_owner: None,
             pointer: vec![None; n],
@@ -335,7 +363,7 @@ impl Session {
         }
         s.update_spans();
         for o in 0..n {
-            let tb = Toolbar::new(&toolbar_view(&s.st, CodeScan::Found(0), false, false));
+            let tb = Toolbar::fitted(&toolbar_view(&s.st, CodeScan::Found(0), false, false), s.overlays[o].width());
             s.overlays[o].toolbar = Some(tb);
             s.place_floating(o);
         }
@@ -484,6 +512,8 @@ impl Session {
 
     /// Work done in the background (codes found, edge maps) is ready.
     pub fn poll(&mut self) {
+        // (each frame: the countdown's ring where it is now)
+        self.count_down(Instant::now());
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Background::Codes(o, codes) => self.codes_found(o, codes),
@@ -508,6 +538,12 @@ impl Session {
             }
             match t {
                 Timer::Countdown => self.tick(),
+                Timer::CountdownFrame => {
+                    self.count_down(now);
+                    if self.st.countdown.is_some() {
+                        self.schedule(Timer::CountdownFrame, COUNTDOWN_FRAME);
+                    }
+                }
                 Timer::Rainbow => {
                     self.st.rainbow_t = now.duration_since(self.started).as_secs_f32();
                     self.schedule(Timer::Rainbow, RAINBOW_EVERY);
@@ -694,7 +730,7 @@ impl Session {
         if self.done || o >= self.overlays.len() || steps == 0.0 {
             return;
         }
-        if !(matches!(self.st.tool, Tool::Region | Tool::Record) && self.st.cfg.show_loupe) {
+        if !(self.st.tool.picks_area() && self.st.cfg.show_loupe) {
             return;
         }
         self.st.loupe_zoom = (self.st.loupe_zoom * 1.25f32.powf(steps)).clamp(LOUPE_ZOOM.0, LOUPE_ZOOM.1);
@@ -822,7 +858,7 @@ impl Session {
         } else if ctrl && press.key == key::Y {
             self.redo(); // (besides the Redo key)
         } else if enter || save_keys {
-            self.capture(target, None, None);
+            self.whole_screen(target);
         }
     }
 
@@ -1006,21 +1042,62 @@ impl Session {
         self.commit_text();
         self.clock.step("chosen", "");
         let area = area.intersected(&self.virtual_rect);
-        let image = match self.render_desktop(area) {
+        let image = match self.render_desktop(area, true) {
             Ok(img) => img,
             Err(e) => return self.fail(&e),
         };
         self.clock.step("drawn", format!("{} × {} across monitors", image.width(), image.height()));
         let mut shot = Shot::new(if window.is_some() { "window" } else { "region" });
         self.name_source(&mut shot, window);
+        for ov in &self.overlays {
+            let g = ov.output.rect.top_left().to_f();
+            shot.drawings += ov.annotations.iter().filter(|s| !s.hidden).count();
+            shot.codes += ov.codes.iter().filter(|(_, poly)| area.to_f().contains(poly_bounds(poly).center() + g)).count();
+        }
         let pin = self.st.pin_mode;
         self.close_overlays();
         self.finish(Outcome::Image { image, shot, at: Some(area), pin });
     }
 
-    /// `area` (global logical) of the whole desktop with the drawings, at
-    /// the highest of the scales of the monitors it's on.
-    fn render_desktop(&self, area: IRect) -> Result<Image, String> {
+    /// Copy the text in `rect` (overlay `o`'s logical pixels; None: all of
+    /// it): it's read from the screen as it is, without the drawings or the
+    /// pointer.
+    fn read_text(&mut self, o: usize, rect: Option<Rect>) {
+        if self.done || self.st.ocr_problem.is_some() {
+            return;
+        }
+        self.commit_text();
+        self.clock.step("chosen", "");
+        let ov = &self.overlays[o];
+        let picture = ov.plain.as_ref().unwrap_or(&ov.base);
+        let (image, dpr) = (picture.crop(ov.render_rect(rect)), ov.dpr);
+        self.close_overlays();
+        match image {
+            Ok(image) => self.finish(Outcome::ReadText { image, dpr }),
+            Err(e) => self.fail(&e),
+        }
+    }
+
+    /// As `read_text`, of `area` (global logical) across monitors.
+    fn read_text_span(&mut self, area: IRect) {
+        if self.done || self.st.ocr_problem.is_some() {
+            return;
+        }
+        self.commit_text();
+        self.clock.step("chosen", "");
+        let area = area.intersected(&self.virtual_rect);
+        let (image, dpr) = (self.render_desktop(area, false), self.st.scale_for(area.to_f()));
+        self.close_overlays();
+        match image {
+            Ok(image) => self.finish(Outcome::ReadText { image, dpr }),
+            Err(e) => self.fail(&e),
+        }
+    }
+
+    /// `area` (global logical) of the whole desktop with the drawings (or
+    /// as the screens are, without them or the pointer), at the highest of
+    /// the scales of the monitors it's on.
+    fn render_desktop(&self, area: IRect, drawings: bool) -> Result<Image, String> {
         let scale = self.st.scale_for(area.to_f());
         let (w, h) = ((area.w as f32 * scale).round().max(1.0) as u32, (area.h as f32 * scale).round().max(1.0) as u32);
         let mut out = Image::filled(w, h, 0xFF00_0000)?;
@@ -1031,9 +1108,10 @@ impl Session {
                 continue;
             }
             let d = ov.dpr;
+            let picture = if drawings { &ov.base } else { ov.plain.as_ref().unwrap_or(&ov.base) };
             let src =
                 IRect::new(py_round((part.x - g.x) as f32 * d), py_round((part.y - g.y) as f32 * d), py_round(part.w as f32 * d), py_round(part.h as f32 * d))
-                    .intersected(&ov.base.rect());
+                    .intersected(&picture.rect());
             let dst = IRect::new(
                 ((part.x - area.x) as f32 * scale).round() as i32,
                 ((part.y - area.y) as f32 * scale).round() as i32,
@@ -1043,7 +1121,7 @@ impl Session {
             if src.is_empty() || dst.is_empty() {
                 continue;
             }
-            let piece = ov.base.crop(src)?;
+            let piece = picture.crop(src)?;
             if (piece.width() as i32, piece.height() as i32) == (dst.w, dst.h) {
                 out.blit(&piece, dst.x, dst.y);
             } else {
@@ -1053,7 +1131,7 @@ impl Session {
         // The drawings, wherever they reach: pixelate and blur take what's
         // under them from this picture of the whole area, so one reaching
         // across monitors covers both parts.
-        if self.overlays.iter().any(|o| o.annotations.iter().any(|s| !s.hidden)) {
+        if drawings && self.overlays.iter().any(|o| o.annotations.iter().any(|s| !s.hidden)) {
             let under = out.clone();
             let mut p = Painter::new(out.pixmap_mut(), scale);
             let mut drawn: Vec<Shape> = Vec::new();
@@ -1064,9 +1142,7 @@ impl Session {
             }
             // (in the one stack all the monitors share)
             drawn.sort_by_key(|s| s.order);
-            for shape in &drawn {
-                shape.paint(&mut p, &under, scale);
-            }
+            shapes::paint_all(&mut p, &drawn, &under, scale);
         }
         out.force_opaque();
         Ok(out)
@@ -1093,6 +1169,10 @@ impl Session {
             self.disarm();
         }
         self.st.record_problem = if self.st.tool == Tool::Record { self.record_problem() } else { None };
+        if self.st.tool == Tool::Ocr && !self.ocr_checked {
+            self.ocr_checked = true;
+            self.st.ocr_problem = crate::ocr::problem();
+        }
         self.sync_toolbars();
         self.refresh_toolbars();
         for o in 0..self.overlays.len() {
@@ -1124,6 +1204,14 @@ impl Session {
         }
         if tool != Tool::Select {
             self.select_on(None);
+        }
+        if tool.hides_drawings() {
+            // (the drawings go out of sight, and what's for them with them)
+            self.close_picker();
+        }
+        // (the text tool chosen again: its next style)
+        if tool == Tool::Text && self.st.tool == Tool::Text {
+            self.st.text_style = self.st.text_style.next();
         }
         self.st.tool = tool;
         if tool.uses_color() {
@@ -1368,6 +1456,8 @@ impl Session {
             self.disarm();
             let r = self.overlays[o].rect();
             self.arm(o, r, None);
+        } else if self.st.tool == Tool::Ocr {
+            self.read_text(o, None);
         } else {
             self.capture(o, None, None);
         }
@@ -1385,12 +1475,14 @@ impl Session {
             self.start_recording();
             return;
         }
-        self.st.countdown = Some(self.st.cfg.record_countdown);
+        let total = self.st.cfg.record_countdown;
+        (self.st.countdown, self.st.countdown_ring, self.countdown_began) = (Some(total), 1.0, Some(Instant::now()));
         // (nothing is chosen any more: the window that was under the pointer goes)
         for o in 0..self.overlays.len() {
             self.update_hover(o);
         }
-        self.schedule(Timer::Countdown, Duration::from_secs(1));
+        self.schedule(Timer::Countdown, Duration::from_secs(total as u64));
+        self.schedule(Timer::CountdownFrame, COUNTDOWN_FRAME);
         self.refresh();
     }
 
@@ -1398,21 +1490,33 @@ impl Session {
         if self.st.countdown.is_none() {
             return false;
         }
-        self.timers.retain(|t| t.1 != Timer::Countdown);
-        self.st.countdown = None;
+        self.timers.retain(|t| !matches!(t.1, Timer::Countdown | Timer::CountdownFrame));
+        (self.st.countdown, self.countdown_began) = (None, None);
         self.refresh();
         true
     }
 
-    fn tick(&mut self) {
-        let Some(n) = self.st.countdown else { return };
-        if n > 1 {
-            self.st.countdown = Some(n - 1);
-            self.schedule(Timer::Countdown, Duration::from_secs(1));
+    /// The countdown as of `now`: its ring running down smoothly, its
+    /// number a whole second at a time.
+    fn count_down(&mut self, now: Instant) {
+        let (Some(n), Some(began)) = (self.st.countdown, self.countdown_began) else { return };
+        let total = self.st.cfg.record_countdown.max(1) as f32;
+        let left = (total - now.saturating_duration_since(began).as_secs_f32()).max(0.0);
+        self.st.countdown_ring = left / total;
+        let shown = (left.ceil() as i64).max(1);
+        if shown != n {
+            self.st.countdown = Some(shown);
             self.refresh();
+        }
+    }
+
+    /// The countdown's end: recording starts.
+    fn tick(&mut self) {
+        if self.st.countdown.take().is_none() {
             return;
         }
-        self.st.countdown = None;
+        self.countdown_began = None;
+        self.timers.retain(|t| t.1 != Timer::CountdownFrame);
         self.start_recording();
     }
 
@@ -1439,7 +1543,8 @@ impl Session {
         shot.monitor = ov.output.name.clone();
         self.name_source(&mut shot, window);
         let spanning = !g.contains_rect(&area);
-        let thumbnail = if spanning && self.may_span { self.render_desktop(area) } else { ov.render(Some(rect)) };
+        // (as the video will be: no drawings)
+        let thumbnail = if spanning && self.may_span { self.render_desktop(area, false) } else { ov.render_plain(Some(rect)) };
         let thumbnail = match thumbnail {
             Ok(t) => t,
             Err(e) => return self.fail(&e),
@@ -1657,15 +1762,19 @@ impl Session {
         self.selection_changed(o, len);
     }
 
+    /// (nothing's undone out of sight)
     pub fn can_undo(&self) -> bool {
-        !self.history.is_empty() || self.st.text_edit.is_some()
+        !self.st.drawings_hidden() && (!self.history.is_empty() || self.st.text_edit.is_some())
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
+        !self.st.drawings_hidden() && !self.redo_stack.is_empty()
     }
 
     pub fn undo(&mut self) {
+        if self.st.drawings_hidden() {
+            return; // (nothing is changed out of sight)
+        }
         self.commit_text();
         self.select_on(None);
         if let Some(o) = self.history.pop()
@@ -1677,6 +1786,9 @@ impl Session {
     }
 
     pub fn redo(&mut self) {
+        if self.st.drawings_hidden() {
+            return;
+        }
         self.commit_text();
         self.select_on(None);
         if let Some(o) = self.redo_stack.pop()
@@ -1796,6 +1908,8 @@ impl Session {
             "monitor"
         });
         shot.monitor = ov.output.name.clone();
+        shot.drawings = ov.annotations.iter().filter(|s| !s.hidden).count();
+        shot.codes = ov.codes.iter().filter(|(_, poly)| rect.is_none_or(|r| r.contains(poly_bounds(poly).center()))).count();
         let g = ov.output.rect;
         let at = if self.request.image { None } else { Some(rect.map(|r| r.aligned()).unwrap_or(IRect::new(0, 0, g.w, g.h)).translated(g.x, g.y)) };
         self.name_source(&mut shot, window);
@@ -2006,7 +2120,7 @@ impl Session {
         let (mut x, mut y) = (8.0, 8.0);
         if let Some(tb) = &ov.toolbar {
             let bar = tb.rect();
-            if let Some(sw) = tb.items.iter().find(|it| it.id == "color.8") {
+            if let Some(sw) = tb.items.iter().find(|it| it.id == OWN_SWATCH) {
                 x = (tb.pos.x + sw.rect.x + (sw.rect.w / 2.0).floor()).floor() - (pw / 2.0).floor();
             }
             y = if bar.bottom() + 8.0 + ph <= h - 8.0 { bar.bottom() + 8.0 } else { bar.top() - 8.0 - ph };
@@ -2342,7 +2456,7 @@ impl Session {
     fn on_custom_swatch(&self, o: usize, pos: Point) -> bool {
         let ov = &self.overlays[o];
         ov.toolbar_visible
-            && ov.toolbar.as_ref().and_then(|t| t.item_at(pos)).is_some_and(|it| it.id == "color.8")
+            && ov.toolbar.as_ref().and_then(|t| t.item_at(pos)).is_some_and(|it| it.id == OWN_SWATCH)
             && self.float_at(o, pos) == Some(Float::Toolbar)
     }
 
@@ -2494,7 +2608,7 @@ impl Session {
 
     fn toolbar_click(&mut self, o: usize, id: &str) {
         match id {
-            "color.8" => self.toggle_picker(o),
+            OWN_SWATCH => self.toggle_picker(o),
             "size" => self.cycle_size(),
             "codes" => self.toggle_codes(),
             "snap" => self.toggle_snap(),
@@ -2582,7 +2696,10 @@ impl Session {
             self.rec_drag = Some((o, h, pos, r));
             self.st.area_moving = true;
             self.refresh();
-        } else if matches!(tool, Tool::Region | Tool::Record) {
+        } else if tool.picks_area() {
+            if tool == Tool::Ocr && self.st.ocr_problem.is_some() {
+                return; // (its hint says why)
+            }
             self.disarm();
             let pos = self.snapped(o, pos, mods);
             self.overlays[o].sel_origin = Some(crate::ui::shapes::Drag::new(pos, false));
@@ -2602,7 +2719,17 @@ impl Session {
                     }
                     (k, s)
                 }
-                None => (o, Shape::text(pos, self.st.color(), self.st.size)),
+                None => {
+                    // (a callout: pressed on what it points at, its text dragged to its place)
+                    let (at, style) = match self.st.text_style {
+                        TextStyle::Callout(_) => {
+                            self.callout = Some((o, pos));
+                            (shapes::callout_text_at(pos, pos), TextStyle::Callout(pos))
+                        }
+                        style => (pos, style),
+                    };
+                    (o, Shape::text(at, self.st.color(), self.st.size, style))
+                }
             };
             self.begin_text(k, shape);
         } else if tool == Tool::Counter {
@@ -2632,6 +2759,14 @@ impl Session {
 
     fn canvas_motion(&mut self, o: usize, pos: Point, mods: i32) {
         self.overlays[o].cursor_pos = Some(pos);
+        if let Some((_, tip)) = self.callout.filter(|c| c.0 == o) {
+            if let Some((_, shape)) = &mut self.st.text_edit
+                && let Some(t) = shape.as_text_mut()
+            {
+                t.pos = shapes::callout_text_at(tip, pos);
+            }
+            return;
+        }
         // (a drag keeps the pointer on the overlay it started on, wherever
         // it goes: the toolbar follows it onto the monitor it's over)
         let under = self.overlay_under(o, pos).unwrap_or(o);
@@ -2642,7 +2777,7 @@ impl Session {
             ov.selection.motion(&mut ov.annotations, local, mods);
             return;
         }
-        let selecting = matches!(self.st.tool, Tool::Region | Tool::Record) && self.overlays[o].active.is_none();
+        let selecting = self.st.tool.picks_area() && self.overlays[o].active.is_none();
         // Where the selection would start or end (the crosshair shows it).
         let snap = if selecting && self.st.snap_edges { Some(self.snapped(o, pos, mods)) } else { None };
         self.overlays[o].snap_point = snap;
@@ -2681,7 +2816,7 @@ impl Session {
         if button != Button::Left {
             return;
         }
-        if self.overlays[o].text_drag.take().is_some() {
+        if self.overlays[o].text_drag.take().is_some() || self.callout.take().is_some() {
             return;
         }
         if let Some(k) = self.drag_owner.take().filter(|&k| k < self.overlays.len() && self.overlays[k].selection.dragging()) {
@@ -2717,6 +2852,13 @@ impl Session {
                 }
                 let r = rect.unwrap_or(self.overlays[o].rect());
                 self.arm(o, r, window);
+            } else if self.st.tool == Tool::Ocr {
+                match (window.and_then(|w| self.st.windows.get(w)), rect) {
+                    // (all of a window, or an area, that crosses monitors)
+                    (Some(win), _) if spans && !g.contains_rect(&win.rect) => self.read_text_span(win.rect),
+                    (_, Some(r)) if spans && !self.overlays[o].rect().contains_rect(&r) => self.read_text_span(r.translated(g.top_left().to_f()).aligned()),
+                    _ => self.read_text(o, rect),
+                }
             } else if let Some(w) = window
                 && spans
                 && let Some(win) = self.st.windows.get(w)
@@ -2758,6 +2900,7 @@ impl Drop for Session {
 fn toolbar_view(st: &State, codes: CodeScan, can_undo: bool, can_redo: bool) -> View<'_> {
     View {
         tool: st.tool,
+        text_style: st.text_style,
         can_record: st.can_record,
         palette: &st.palette,
         color_index: st.color_index,

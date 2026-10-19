@@ -48,6 +48,10 @@ impl App {
                 }
                 0
             }
+            Outcome::ReadText { image, dpr } => {
+                // (it ends once the text is read)
+                return self.read_text(image, dpr, slot);
+            }
             Outcome::CodeText(text) => {
                 let copied = self.copy_text(&text, slot);
                 util::print_line(&text);
@@ -97,7 +101,14 @@ impl App {
     /// long enough, no pins left)?
     pub(super) fn may_exit(&self) -> bool {
         let holding = self.dpy.holds() && self.hold_until.is_some_and(|t| Instant::now() < t);
-        !holding && !self.has_pins() && !self.has_editors() && !self.has_settings() && !self.is_recording()
+        !holding
+            && !self.has_pins()
+            && !self.has_editors()
+            && !self.has_settings()
+            && !self.has_recent()
+            && !self.is_recording()
+            && !self.is_reading()
+            && !self.reading_clipboard()
     }
 
     /// Will a one-off capture hand what it copies to wl-copy (so it can
@@ -115,6 +126,8 @@ impl App {
                 _ => return None,
             },
             Outcome::Color { .. } | Outcome::CodeText(_) => text_mimes(),
+            // (claimed now only where it can't be later: the text may be a while)
+            Outcome::ReadText { .. } if !self.dpy.without_focus() => text_mimes(),
             _ => return None,
         };
         if self.hand_off() {
@@ -139,7 +152,7 @@ impl App {
         self.dpy.offer(mimes, Slot::ready(data))
     }
 
-    fn copy_text(&mut self, text: &str, slot: Option<Arc<Slot>>) -> bool {
+    pub(super) fn copy_text(&mut self, text: &str, slot: Option<Arc<Slot>>) -> bool {
         self.fill_clipboard(text_mimes(), Arc::new(text.as_bytes().to_vec()), slot)
     }
 
@@ -214,6 +227,29 @@ impl App {
             }
         };
         self.dpy.flush();
+        if result.saved
+            && let Some(p) = &result.path
+        {
+            let (width, height) = result.size;
+            crate::history::add(&crate::history::Entry {
+                path: std::path::absolute(p).unwrap_or_else(|_| p.clone()),
+                time: util::now_ms(),
+                kind: shot.mode.clone(),
+                width,
+                height,
+                bytes: std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+                app: shot.app.clone(),
+                title: shot.title.clone(),
+                monitor: shot.monitor.clone(),
+                area: at,
+                copied: if copied { self.cfg.clipboard.clone() } else { String::new() },
+                codes: shot.codes,
+                drawings: shot.drawings,
+                beautified: self.cfg.beautify,
+                ..Default::default()
+            });
+            self.recent_changed();
+        }
         if self.cfg.sound {
             sound::play(&self.cfg.sound_file);
         }

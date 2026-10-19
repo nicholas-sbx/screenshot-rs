@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::{OwnedVariant, Variant};
 
 use crate::util;
 
@@ -17,7 +17,7 @@ pub const PATH: &str = "/org/freedesktop/portal/desktop";
 /// How a request ended.
 #[derive(Debug)]
 pub enum Answer {
-    Done(HashMap<String, OwnedValue>),
+    Done(HashMap<String, OwnedVariant>),
     /// the user said no (closed the dialog)
     Cancelled,
 }
@@ -28,12 +28,12 @@ pub enum Answer {
 pub fn request<B>(
     iface: &str,
     method: &str,
-    options: HashMap<&'static str, Value<'static>>,
-    body: impl FnOnce(HashMap<&'static str, Value<'static>>) -> B,
+    options: HashMap<&'static str, Variant<'static>>,
+    body: impl FnOnce(HashMap<&'static str, Variant<'static>>) -> B,
     wait: Duration,
 ) -> Result<Answer, String>
 where
-    B: serde::Serialize + zbus::zvariant::DynamicType,
+    B: serde::Serialize + zbus::DynamicType,
 {
     request_on(crate::dbus::session()?, iface, method, options, body, wait)
 }
@@ -41,32 +41,35 @@ where
 /// [`request`] on a connection of the caller's (a screen cast lives as
 /// long as the connection that asked for it).
 pub fn request_on<B>(
-    conn: &zbus::blocking::Connection,
+    conn: &crate::dbus::Bus,
     iface: &str,
     method: &str,
-    mut options: HashMap<&'static str, Value<'static>>,
-    body: impl FnOnce(HashMap<&'static str, Value<'static>>) -> B,
+    mut options: HashMap<&'static str, Variant<'static>>,
+    body: impl FnOnce(HashMap<&'static str, Variant<'static>>) -> B,
     wait: Duration,
 ) -> Result<Answer, String>
 where
-    B: serde::Serialize + zbus::zvariant::DynamicType,
+    B: serde::Serialize + zbus::DynamicType,
 {
     let token = format!("flatshot{}", util::random_hex(6));
     // The request object is named after us and the token: listen on it
     // before asking, so the answer can't come first.
     let sender = conn.unique_name().ok_or("no name on the session bus")?.trim_start_matches(':').replace('.', "_");
     let path = format!("{PATH}/request/{sender}/{token}");
-    let proxy = zbus::blocking::Proxy::new(conn, DESKTOP, path.as_str(), "org.freedesktop.portal.Request").map_err(|e| e.to_string())?;
-    let mut signals = proxy.receive_signal("Response").map_err(|e| format!("portal: {e}"))?;
-    options.insert("handle_token", Value::from(token));
+    let mut signals = zbus::block_on(async {
+        let proxy = zbus::Proxy::new(conn.inner(), DESKTOP, path.as_str(), "org.freedesktop.portal.Request").await?;
+        proxy.receive_signal("Response").await
+    })
+    .map_err(|e| format!("portal: {e}"))?;
+    options.insert("handle_token", Variant::from(token));
     conn.call_method(Some(DESKTOP), PATH, Some(iface), method, &body(options)).map_err(|e| format!("{iface}: {e}"))?;
     // Wait for the answer, but not for ever.
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(signals.next());
+        let _ = tx.send(futures_lite::future::block_on(futures_lite::StreamExt::next(&mut signals)));
     });
     let msg = rx.recv_timeout(wait).map_err(|_| "the desktop didn't answer".to_string())?.ok_or("the portal went away")?;
-    let (response, results): (u32, HashMap<String, OwnedValue>) = msg.body().deserialize().map_err(|e| format!("portal reply: {e}"))?;
+    let (response, results): (u32, HashMap<String, OwnedVariant>) = msg.body().deserialize().map_err(|e| format!("portal reply: {e}"))?;
     match response {
         0 => Ok(Answer::Done(results)),
         1 => Ok(Answer::Cancelled),
@@ -96,7 +99,7 @@ fn folder_bytes(dir: &Path) -> Vec<u8> {
     b
 }
 
-fn first_path(results: &HashMap<String, OwnedValue>) -> Option<PathBuf> {
+fn first_path(results: &HashMap<String, OwnedVariant>) -> Option<PathBuf> {
     let uris = results.get("uris")?;
     let uris: Vec<String> = uris.try_clone().ok()?.try_into().ok()?;
     uris.first().and_then(|u| util::uri_to_path(u))
@@ -105,21 +108,21 @@ fn first_path(results: &HashMap<String, OwnedValue>) -> Option<PathBuf> {
 /// The desktop's "Save as" dialog, starting at `current` (its folder and
 /// name), filter `current_filter` chosen. None if it was cancelled.
 pub fn save_file(title: &str, current: &Path, list: &[(String, Vec<String>)], current_filter: usize) -> Result<Option<PathBuf>, String> {
-    let mut options: HashMap<&'static str, Value<'static>> = HashMap::new();
-    options.insert("modal", Value::Bool(true));
-    options.insert("accept_label", Value::from("Save"));
+    let mut options: HashMap<&'static str, Variant<'static>> = HashMap::new();
+    options.insert("modal", Variant::Bool(true));
+    options.insert("accept_label", Variant::from("Save"));
     if let Some(name) = current.file_name() {
-        options.insert("current_name", Value::from(name.to_string_lossy().into_owned()));
+        options.insert("current_name", Variant::from(name.to_string_lossy().into_owned()));
     }
     if let Some(dir) = current.parent().filter(|d| d.is_dir()) {
-        options.insert("current_folder", Value::from(folder_bytes(dir)));
+        options.insert("current_folder", Variant::from(folder_bytes(dir)));
     }
     let f = filters(list);
     if let Some(cur) = f.get(current_filter).cloned() {
-        options.insert("current_filter", Value::from(cur));
+        options.insert("current_filter", Variant::from(cur));
     }
     if !f.is_empty() {
-        options.insert("filters", Value::from(f));
+        options.insert("filters", Variant::from(f));
     }
     let title = title.to_string();
     match request("org.freedesktop.portal.FileChooser", "SaveFile", options, |o| ("", title, o), Duration::from_secs(3600))? {
@@ -139,18 +142,18 @@ pub fn choose_folder(title: &str, folder: &Path) -> Result<Option<PathBuf>, Stri
 }
 
 fn open(title: &str, folder: &Path, list: &[(String, Vec<String>)], directory: bool) -> Result<Option<PathBuf>, String> {
-    let mut options: HashMap<&'static str, Value<'static>> = HashMap::new();
-    options.insert("modal", Value::Bool(true));
-    options.insert("multiple", Value::Bool(false));
+    let mut options: HashMap<&'static str, Variant<'static>> = HashMap::new();
+    options.insert("modal", Variant::Bool(true));
+    options.insert("multiple", Variant::Bool(false));
     if directory {
-        options.insert("directory", Value::Bool(true));
+        options.insert("directory", Variant::Bool(true));
     }
     if folder.is_dir() {
-        options.insert("current_folder", Value::from(folder_bytes(folder)));
+        options.insert("current_folder", Variant::from(folder_bytes(folder)));
     }
     let f = filters(list);
     if !f.is_empty() {
-        options.insert("filters", Value::from(f));
+        options.insert("filters", Variant::from(f));
     }
     let title = title.to_string();
     match request("org.freedesktop.portal.FileChooser", "OpenFile", options, |o| ("", title, o), Duration::from_secs(3600))? {
@@ -168,7 +171,7 @@ mod tests {
         assert_eq!(folder_bytes(Path::new("/tmp/a")), b"/tmp/a\0");
         let f = filters(&[("PNG".into(), vec!["*.png".into()])]);
         assert_eq!(f, vec![("PNG".to_string(), vec![(0, "*.png".to_string())])]);
-        let v = Value::from(f);
+        let v = Variant::from(f);
         assert_eq!(v.value_signature().to_string(), "a(sa(us))");
     }
 }

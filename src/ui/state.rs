@@ -7,7 +7,7 @@ use crate::geom::{IRect, Point, Rect};
 use crate::keys::Keymap;
 use crate::render::theme::{self, Color};
 use crate::ui::overlay::Window;
-use crate::ui::shapes::{Shape, Tool};
+use crate::ui::shapes::{Shape, TextStyle, Tool};
 
 /// The colour index of your own colour (the toolbar's others are 0..).
 pub const CUSTOM: usize = usize::MAX;
@@ -18,15 +18,26 @@ pub fn palette(hex: &[String]) -> Vec<Color> {
     if colors.is_empty() { theme::SWATCHES.to_vec() } else { colors }
 }
 
-/// The colour index key `color.N` picks with `n` colours on the toolbar:
-/// 1-7 the toolbar's first seven, 8 your own; None if there's no such one.
+/// The colour index key `color.N` picks with `colors` colours on the
+/// toolbar: the Nth swatch from the left, so the toolbar's colours, then
+/// your own; None if there's no such one.
 pub fn color_for_key(n: usize, colors: usize) -> Option<usize> {
-    match n {
-        8 => Some(CUSTOM),
-        1..=7 if n <= colors => Some(n - 1),
-        _ => None,
+    if (1..=colors).contains(&n) {
+        Some(n - 1)
+    } else if n == colors + 1 {
+        Some(CUSTOM)
+    } else {
+        None
     }
 }
+
+/// The key action of the swatch for colour index `i` (as color_for_key).
+pub fn key_for_color(i: usize, colors: usize) -> String {
+    format!("color.{}", if i == CUSTOM { colors + 1 } else { i + 1 })
+}
+
+/// The item id of your own colour's swatch (clicking it opens the picker).
+pub const OWN_SWATCH: &str = "swatch.own";
 
 /// The colour index `default_color` (from the settings) gives with `n`
 /// colours on the toolbar: past them, your own.
@@ -48,6 +59,8 @@ pub struct State {
     pub cfg: Config,
     pub keymap: Keymap,
     pub tool: Tool,
+    /// how the text tool's new texts look
+    pub text_style: TextStyle,
     /// the last tool used that draws in a colour
     pub colour_tool: Tool,
     /// the toolbar's colours (the settings')
@@ -71,12 +84,16 @@ pub struct State {
     pub eyedropper: bool,
     /// magnifier screen pixels per captured pixel (the wheel changes it)
     pub loupe_zoom: f32,
-    /// seconds left before recording starts
+    /// seconds left before recording starts (whole ones, as shown)
     pub countdown: Option<i64>,
+    /// how much of the countdown is left, 1 to 0, as it runs down (its ring)
+    pub countdown_ring: f32,
     /// what the control under the pointer does, or a problem to show
     pub hint: Option<String>,
     /// why recording in the chosen format can't work here
     pub record_problem: Option<String>,
+    /// why text can't be copied from the screen here (no Tesseract)
+    pub ocr_problem: Option<String>,
     /// The area chosen to record (global logical pixels): every monitor
     /// it reaches shows its part, handles and all, so it's moved and
     /// resized from any of them.
@@ -114,6 +131,7 @@ impl State {
         State {
             keymap,
             tool,
+            text_style: TextStyle::Plain,
             colour_tool: if tool.uses_color() { tool } else { Tool::Pen },
             color_index: default_color_index(cfg.default_color, palette.len()),
             palette,
@@ -129,8 +147,10 @@ impl State {
             eyedropper: false,
             loupe_zoom: 8.0,
             countdown: None,
+            countdown_ring: 0.0,
             hint: None,
             record_problem: None,
+            ocr_problem: None,
             rec_area: None,
             rec_home: 0,
             area_moving: false,
@@ -162,24 +182,31 @@ impl State {
     pub fn color(&self) -> Color {
         self.palette.get(self.color_index).copied().unwrap_or(self.custom_color)
     }
+
+    /// Are the drawings out of sight? While choosing what to record or
+    /// read the text of: neither has any. They're kept, and show again
+    /// with any other tool.
+    pub fn drawings_hidden(&self) -> bool {
+        self.tool.hides_drawings()
+    }
 }
 
 /// The toolbar's colour swatches (ids `swatch.N`, from 0) and your own
-/// colour's (`color.8`), as the capture toolbar and the editor show them.
+/// colour's (OWN_SWATCH), as the capture toolbar and the editor show them.
 pub fn swatch_items(km: &Keymap, palette: &[Color], color_index: usize, custom_color: Color, enabled: bool) -> Vec<crate::ui::widgets::Item> {
     use crate::ui::widgets::{Item, Look};
     let mut items: Vec<Item> = palette
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let hint = if i < 7 { km.hint("Colour", &format!("color.{}", i + 1)) } else { "Colour".to_string() };
-            let mut s = Item::new(SWATCH_IDS.get(i).copied().unwrap_or("swatch.x"), Look::Swatch(*c), hint);
+            let mut s = Item::new(SWATCH_IDS.get(i).copied().unwrap_or("swatch.x"), Look::Swatch(*c), km.hint("Colour", &key_for_color(i, palette.len())));
             s.selected = color_index == i;
             s.enabled = enabled;
             s
         })
         .collect();
-    let mut custom = Item::new("color.8", Look::CustomSwatch(custom_color), km.hint("Your own colour", "color.8") + "  ·  click to choose it");
+    let own = km.hint("Your own colour", &key_for_color(CUSTOM, palette.len()));
+    let mut custom = Item::new(OWN_SWATCH, Look::CustomSwatch(custom_color), own + "  ·  click to choose it");
     custom.selected = color_index == CUSTOM;
     custom.enabled = enabled;
     items.push(custom);
@@ -200,4 +227,46 @@ fn theme_key(name: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     name.hash(&mut h);
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_swatch_has_a_key() {
+        // The 7 colours it starts with: 1-7, then 8 your own.
+        assert_eq!(color_for_key(1, 7), Some(0));
+        assert_eq!(color_for_key(7, 7), Some(6));
+        assert_eq!(color_for_key(8, 7), Some(CUSTOM));
+        assert_eq!(color_for_key(9, 7), None);
+        // Twelve: all of them, your own on the 13th.
+        assert_eq!(color_for_key(12, 12), Some(11));
+        assert_eq!(color_for_key(13, 12), Some(CUSTOM));
+        assert_eq!(color_for_key(0, 12), None);
+        for colors in 1..=crate::config::MAX_PALETTE {
+            for i in (0..colors).chain([CUSTOM]) {
+                let key = key_for_color(i, colors);
+                assert!(crate::keys::binding(&key).is_some(), "{key} with {colors} colours");
+                let n = key.strip_prefix("color.").and_then(|n| n.parse().ok()).unwrap();
+                assert_eq!(color_for_key(n, colors), Some(i));
+            }
+        }
+    }
+
+    #[test]
+    fn swatch_hints_follow_the_keys() {
+        let km = Keymap::new(&Default::default());
+        let nine = [Color::rgb(0x123456); 9];
+        let items = swatch_items(&km, &nine, 0, Color::rgb(0xffffff), true);
+        let hints: Vec<&str> = items.iter().map(|it| it.hint.as_str()).collect();
+        assert_eq!(hints[7], "Colour  ·  8");
+        assert_eq!(hints[8], "Colour  ·  9");
+        assert_eq!(hints[9], "Your own colour  ·  0  ·  click to choose it");
+        assert_eq!(items[9].id, OWN_SWATCH);
+        let twelve = [Color::rgb(0x123456); 12];
+        let items = swatch_items(&km, &twelve, 0, Color::rgb(0xffffff), true);
+        assert_eq!(items[10].hint, "Colour  ·  Alt+1");
+        assert_eq!(items[12].hint, "Your own colour  ·  Alt+3  ·  click to choose it");
+    }
 }

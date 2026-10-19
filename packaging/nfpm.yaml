@@ -66,6 +66,7 @@ overrides:
       - ffmpeg  # pausing a recording, GIFs, recording on X11
       - wf-recorder  # screen recording on wlroots compositors
       - xclip  # X11: keep the clipboard after a one-off capture exits
+      - tesseract-ocr  # copying text from the screen (OCR)
   rpm:
     depends:
       - glibc >= 2.35
@@ -83,6 +84,7 @@ overrides:
       - ffmpeg-free
     suggests:
       - xclip  # X11: keep the clipboard after a one-off capture exits
+      - tesseract-langpack-eng  # copying text from the screen (OCR)
   archlinux:
     depends:
       - glibc
@@ -101,3 +103,4 @@ overrides:
       - wf-recorder
       - grim
       - xclip
+      - tesseract-data-eng

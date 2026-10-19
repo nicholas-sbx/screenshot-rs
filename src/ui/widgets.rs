@@ -311,9 +311,11 @@ pub fn paint_item(p: &mut Painter<'_>, it: &Item, origin: Point, ptr: &Pointer) 
         }
         Look::Divider => p.fill_rect(Rect::new(r.x + 6.0, r.y + 9.0, 1.0, 18.0), c.line),
         Look::Grip => {
+            // (in the middle of its height: a toolbar in rows has it down all of them)
+            let top = r.y + (r.h / 2.0 - 7.0).round();
             for col in 0..2 {
                 for row in 0..3 {
-                    p.fill_ellipse(Rect::new(r.x + 5.0 + col as f32 * 6.0, r.y + 11.0 + row as f32 * 6.0, 2.6, 2.6), c.muted);
+                    p.fill_ellipse(Rect::new(r.x + 5.0 + col as f32 * 6.0, top + row as f32 * 6.0, 2.6, 2.6), c.muted);
                 }
             }
         }

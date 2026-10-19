@@ -20,7 +20,7 @@ chmod 700 "$XDG_RUNTIME_DIR"
 shots=$work/shots
 cat > "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<JSON
 {"save_dir": "$shots", "notify": true, "clipboard": "image", "scan_codes": true,
- "record_dir": "$work/videos", "record_countdown": 0}
+ "record_dir": "$work/videos", "record_countdown": 0, "portal_shortcuts": true}
 JSON
 printf 'output HEADLESS-1 resolution 1600x1000 scale 1\nseat seat0 fallback true\n' > "$work/sway.conf"
 
@@ -154,6 +154,21 @@ finish $pid 3
 [ "$(md5sum < "$work/edit.png")" != "$before" ] && pass "editor saved the drawing" || fail "editor didn't save"
 expect_size "edited picture" "$work/edit.png" "256 256"
 
+# 4b. The picture on the clipboard, annotated: saved as a new capture.
+wl-copy --type image/png < assets/flatshot-rs.png
+before=$(ls "$shots" | wc -l)
+$BIN --from-clipboard -v > "$work/clip-editor.log" 2>&1 &
+pid=$!
+up "$work/clip-editor.log" || true
+$EX/inject move 700 500 key b drag 700 450 850 580 sleep 200 key ctrl+s sleep 400 key ctrl+w sleep 300
+finish $pid 3
+[ $code = 0 ] && pass "clipboard picture's editor closed" || { fail "the clipboard picture's editor didn't close (exit $code)"; tail -n 5 "$work/clip-editor.log"; }
+[ $(( $(ls "$shots" | wc -l) - before )) = 1 ] && expect_size "clipboard picture saved as a capture" "$(newest)" "256 256" || fail "the clipboard picture wasn't saved in $shots"
+# Text on the clipboard: no picture to annotate (exit 1).
+printf 'just text' | wl-copy
+$BIN --from-clipboard > /dev/null 2>&1 && code=0 || code=$?
+[ $code = 1 ] && pass "no picture on the clipboard: exit 1" || fail "no picture on the clipboard: exit $code"
+
 # 5. The settings window: a change is saved at once; Esc closes it.
 $BIN --settings -v > "$work/settings.log" 2>&1 &
 pid=$!
@@ -163,6 +178,37 @@ $EX/inject click 57 93 sleep 300 click 1360 105 sleep 300 key Escape sleep 300
 finish $pid 3
 [ $code = 0 ] && pass "settings closed with Esc" || fail "the settings window didn't close (exit $code)"
 grep -q '"dim_opacity": 15,' "$XDG_CONFIG_HOME/flatshot-rs/config.json" && pass "setting saved" || fail "setting not saved"
+
+# 5b. Copying text (with Tesseract): an area of the settings window's
+# sidebar dragged over with --ocr, its text read and copied.
+if command -v tesseract > /dev/null; then
+    $BIN --settings -v > "$work/settings2.log" 2>&1 &
+    settings=$!
+    up "$work/settings2.log" || true
+    $BIN --ocr -v > "$work/ocr.log" 2>&1 &
+    pid=$!
+    up "$work/ocr.log" || true
+    $EX/inject move 300 300 sleep 200 drag 0 30 240 220
+    finish $pid 30
+    kill $settings 2>/dev/null || true
+    [ $code = 0 ] && pass "--ocr exited 0" || { fail "--ocr exited $code"; cat "$work/ocr.log"; }
+    text=$(wl-paste --no-newline 2>/dev/null || true)
+    case "$text" in *Capture*Recording*) pass "text copied from the screen" ;; *) fail "the text copied: '$text'"; tail -n 5 "$work/ocr.log" ;; esac
+else
+    echo "skip: copying text (no tesseract)"
+fi
+
+# 5c. Recent captures: what was saved (the region, the picture saved from
+# the editor) is listed; the window shows the list, and Esc closes it.
+recent=$XDG_STATE_HOME/flatshot-rs/recent.jsonl
+grep -q "$(basename "$(newest)")" "$recent" 2>/dev/null && pass "the capture is listed as recent" || fail "the capture isn't listed as recent"
+grep -q '"path":"'"$work"'/edit.png".*"edited":true' "$recent" 2>/dev/null && pass "the editor's save is listed as edited" || fail "the editor's save isn't listed: $(cat "$recent" 2>/dev/null)"
+$BIN --recent -v > "$work/recent.log" 2>&1 &
+pid=$!
+up "$work/recent.log" || true
+$EX/inject move 300 300 sleep 300 key Escape sleep 300
+finish $pid 3
+[ $code = 0 ] && pass "recent captures window closed with Esc" || fail "the recent captures window didn't close (exit $code)"
 
 # 6. Screen recording: an area chosen on the overlay, recorded by
 # wf-recorder, stopped from the bar under it (or by Ctrl+C), saved.
@@ -216,6 +262,48 @@ $BIN -l > /dev/null && expect_size "last region" "$(newest)" "320 240" || fail "
 $BIN -m > /dev/null && expect_size "current monitor" "$(newest)" "1600 1000" || fail "--monitor failed"
 $BIN -r 64x48+0+0 -o "$work/out.png" > /dev/null && expect_size "--output" "$work/out.png" "64 48" || fail "--output failed"
 $BIN -r 64x48+0+0 -o - --no-copy > "$work/stdout.png" && expect_size "PNG to stdout" "$work/stdout.png" "64 48" || fail "-o - failed"
+
+# A delayed capture counts down on screen (the dial at the bottom middle),
+# and the dial is gone before the picture: none of its ring is in it.
+$BIN -d 2 -r 300x200+650+780 -o "$work/delayed.png" --no-copy > /dev/null 2>&1 &
+pid=$!
+sleep 1
+grim -g "650,780 300x200" "$work/dial.png" 2>/dev/null || true
+finish $pid 6
+[ $code = 0 ] && pass "delayed capture exited 0" || fail "delayed capture exited $code"
+ring() { # how many pixels of the dial's ring (the accent colour) in a PNG
+    python3 - "$1" <<'PY'
+import struct, sys, zlib
+d = open(sys.argv[1], "rb").read()
+w, h = struct.unpack(">II", d[16:24])
+bpp = 4 if d[25] == 6 else 3
+i, idat = 8, b""
+while i < len(d):
+    n = struct.unpack(">I", d[i:i + 4])[0]
+    if d[i + 4:i + 8] == b"IDAT":
+        idat += d[i + 8:i + 8 + n]
+    i += 12 + n
+raw, stride, prev, count = zlib.decompress(idat), w * bpp + 1, bytearray(w * bpp), 0
+for y in range(h):
+    f, line = raw[y * stride], bytearray(raw[y * stride + 1:(y + 1) * stride])
+    for x in range(len(line)):
+        a = line[x - bpp] if x >= bpp else 0
+        b = prev[x]
+        c = prev[x - bpp] if x >= bpp else 0
+        if f == 1: line[x] = (line[x] + a) & 255
+        elif f == 2: line[x] = (line[x] + b) & 255
+        elif f == 3: line[x] = (line[x] + (a + b) // 2) & 255
+        elif f == 4:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+    count += sum(1 for x in range(w) if line[x * bpp] > 200 and 60 < line[x * bpp + 1] < 140 and line[x * bpp + 2] < 110)
+    prev = line
+print(count)
+PY
+}
+[ "$(ring "$work/dial.png" 2>/dev/null || echo 0)" -gt 50 ] && pass "the countdown shows on screen" || fail "no countdown on screen ($(ring "$work/dial.png" 2>/dev/null || echo none) ring pixels)"
+[ "$(ring "$work/delayed.png" 2>/dev/null || echo 1)" = 0 ] && pass "the countdown isn't in the capture" || fail "the countdown is in the capture"
 
 # Beautify after capture: on the last style's background (64 px padding).
 python3 - "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<'PY'
@@ -330,6 +418,29 @@ grep -q "command: rect:100x50+0+0" "$work/tray.log" && pass "command forwarded" 
 grep -q 'actions=\["default", "Open"' "$work/notify.log" && pass "notification with buttons" || fail "no notification buttons"
 grep -q "restarted: 2" "$work/tray-test.log" && pass "tray restarts" || fail "tray didn't restart: $(grep restarted "$work/tray-test.log")"
 grep -q "quit 0" "$work/tray-test.log" && grep -q "gone" "$work/tray-test.log" && pass "tray quits" || fail "tray didn't quit"
+# (KDE's service was there: the portal, though turned on, wasn't asked)
+grep -q "from the desktop's portal" "$work/tray.log" && fail "the portal was asked beside KDE's service" || pass "KDE's shortcuts before the portal's"
+
+# 9. Global shortcuts from the desktop's portal, without KDE's service.
+cat > "$work/portal.sh" <<SH
+#!/usr/bin/env bash
+set -u
+FAKE_PORTAL_PRESS="screen@1000" $EX/fake_portal > "$work/portal.log" 2>&1 &
+sleep 0.4
+$BIN --tray -v > "$work/tray-portal.log" 2>&1 &
+sleep 4
+$BIN --quit
+sleep 1
+kill %1 2>/dev/null
+SH
+chmod +x "$work/portal.sh"
+before=$(ls "$shots" | wc -l)
+dbus-run-session -- "$work/portal.sh" 2>/dev/null
+after=$(ls "$shots" | wc -l)
+grep -q "portal: registered flatshot-rs" "$work/portal.log" && grep -q 'portal: bind screen "Capture all screens" CTRL+SHIFT+Print' "$work/portal.log" \
+    && pass "shortcuts asked of the portal" || fail "shortcuts not asked of the portal: $(cat "$work/portal.log")"
+grep -q "shortcut screen pressed" "$work/tray-portal.log" && [ $((after - before)) -ge 1 ] && pass "a portal shortcut heard ($((after - before)) saved)" \
+    || fail "portal shortcut not heard: $(grep -i -E "portal|shortcut" "$work/tray-portal.log")"
 
 kill $keeper 2>/dev/null || true
 if [ $failures -gt 0 ]; then

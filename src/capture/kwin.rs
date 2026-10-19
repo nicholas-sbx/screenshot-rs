@@ -13,7 +13,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags};
-use zbus::zvariant::{Fd, OwnedValue, Value};
+use zbus::{Fd, OwnedVariant, Variant};
 
 use crate::image::{Image, MAX_SIDE};
 
@@ -98,26 +98,26 @@ enum Ask<'a> {
     Window(WindowWant),
 }
 
-fn capture_one(conn: &zbus::blocking::Connection, ask: &Ask<'_>, started: Instant) -> Result<(Image, Duration), String> {
+fn capture_one(conn: &crate::dbus::Bus, ask: &Ask<'_>, started: Instant) -> Result<(Image, Duration), String> {
     let (read_end, write_end) = big_pipe().map_err(|e| format!("pipe: {e}"))?;
-    let mut options: HashMap<&str, Value<'_>> = HashMap::new();
-    options.insert("native-resolution", Value::Bool(true));
+    let mut options: HashMap<&str, Variant<'_>> = HashMap::new();
+    options.insert("native-resolution", Variant::Bool(true));
     // KWin leaves the caller's windows out unless told not to: Flatshot's
     // own (an editor, the settings, a pin) are on the screen as any other.
-    options.insert("hide-caller-windows", Value::Bool(false));
+    options.insert("hide-caller-windows", Variant::Bool(false));
     let fd = Fd::from(write_end.as_fd());
     let reply = match ask {
         Ask::Screen(want) => {
-            options.insert("include-cursor", Value::Bool(want.cursor));
+            options.insert("include-cursor", Variant::Bool(want.cursor));
             match &want.screen {
                 Some(name) => conn.call_method(Some(SERVICE), PATH, Some(IFACE), "CaptureScreen", &(name.as_str(), options, fd)),
                 None => conn.call_method(Some(SERVICE), PATH, Some(IFACE), "CaptureWorkspace", &(options, fd)),
             }
         }
         Ask::Window(w) => {
-            options.insert("include-cursor", Value::Bool(w.cursor));
-            options.insert("include-decoration", Value::Bool(w.decoration));
-            options.insert("include-shadow", Value::Bool(w.shadow));
+            options.insert("include-cursor", Variant::Bool(w.cursor));
+            options.insert("include-decoration", Variant::Bool(w.decoration));
+            options.insert("include-shadow", Variant::Bool(w.shadow));
             conn.call_method(Some(SERVICE), PATH, Some(IFACE), "CaptureActiveWindow", &(options, fd))
         }
     };
@@ -126,7 +126,7 @@ fn capture_one(conn: &zbus::blocking::Connection, ask: &Ask<'_>, started: Instan
     drop(write_end);
     let reply = reply.map_err(|e| describe(&e))?;
     let replied = started.elapsed();
-    let results: HashMap<String, OwnedValue> = reply.body().deserialize().map_err(|e| format!("KWin's reply: {e}"))?;
+    let results: HashMap<String, OwnedVariant> = reply.body().deserialize().map_err(|e| format!("KWin's reply: {e}"))?;
     let get = |k: &str| results.get(k).and_then(number);
     let (Some(w), Some(h), Some(stride), Some(format)) = (get("width"), get("height"), get("stride"), get("format")) else {
         return Err("KWin's reply lacks the picture's size".into());
@@ -186,15 +186,15 @@ fn describe(e: &zbus::Error) -> String {
 }
 
 /// An unsigned number from a variant, whatever integer type KWin used.
-fn number(v: &OwnedValue) -> Option<u64> {
+fn number(v: &OwnedVariant) -> Option<u64> {
     match &**v {
-        Value::U32(n) => Some(*n as u64),
-        Value::I32(n) => u64::try_from(*n).ok(),
-        Value::U64(n) => Some(*n),
-        Value::I64(n) => u64::try_from(*n).ok(),
-        Value::U16(n) => Some(*n as u64),
-        Value::I16(n) => u64::try_from(*n).ok(),
-        Value::U8(n) => Some(*n as u64),
+        Variant::U32(n) => Some(*n as u64),
+        Variant::I32(n) => u64::try_from(*n).ok(),
+        Variant::U64(n) => Some(*n),
+        Variant::I64(n) => u64::try_from(*n).ok(),
+        Variant::U16(n) => Some(*n as u64),
+        Variant::I16(n) => u64::try_from(*n).ok(),
+        Variant::U8(n) => Some(*n as u64),
         _ => None,
     }
 }
