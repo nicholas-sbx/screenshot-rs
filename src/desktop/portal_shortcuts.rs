@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 
 use super::portal::{self, Answer, DESKTOP, PATH};
 use super::shortcuts::{ACTIONS, ShortcutEvent};
@@ -50,7 +50,7 @@ pub fn trigger(keys: &str) -> String {
 
 /// Shortcuts the portal gave us, heard while this is kept.
 pub struct Session {
-    conn: Option<zbus::blocking::Connection>,
+    conn: Option<crate::dbus::Bus>,
 }
 
 impl Drop for Session {
@@ -70,19 +70,15 @@ impl Drop for Session {
 /// to keep for as long as they're wanted, and the keys each action got,
 /// as the desktop describes them.
 pub fn start(events: impl Fn(ShortcutEvent) + Send + 'static) -> Result<(Session, HashMap<String, String>), String> {
-    let conn = zbus::blocking::connection::Builder::session()
-        .map_err(|e| e.to_string())?
-        .method_timeout(crate::dbus::TIMEOUT)
-        .build()
-        .map_err(|e| format!("no session bus: {e}"))?;
+    let conn = crate::dbus::Bus::connect(crate::dbus::TIMEOUT)?;
     // Who we are, for its dialog and settings (xdg-desktop-portal 1.19 and
     // later; an older one works it out itself, or does without).
-    let none: HashMap<&str, Value> = HashMap::new();
+    let none: HashMap<&str, Variant> = HashMap::new();
     if let Err(e) = conn.call_method(Some(DESKTOP), PATH, Some(REGISTRY), "Register", &(crate::APP_ID, none)) {
         crate::timing::log(format!("portal: not registered as {} ({e})", crate::APP_ID));
     }
-    let mut options: HashMap<&'static str, Value<'static>> = HashMap::new();
-    options.insert("session_handle_token", Value::from(format!("flatshot{}", crate::util::random_hex(6))));
+    let mut options: HashMap<&'static str, Variant<'static>> = HashMap::new();
+    options.insert("session_handle_token", Variant::from(format!("flatshot{}", crate::util::random_hex(6))));
     let session = match portal::request_on(&conn, IFACE, "CreateSession", options, |o| (o,), WAIT)? {
         Answer::Done(r) => r.get("session_handle").and_then(handle).ok_or("the desktop gave no session")?,
         Answer::Cancelled => return Err("the desktop said no".into()),
@@ -92,14 +88,14 @@ pub fn start(events: impl Fn(ShortcutEvent) + Send + 'static) -> Result<(Session
     let rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .sender(DESKTOP)
-        .and_then(|b| b.interface(IFACE))
-        .and_then(|b| b.member("Activated"))
-        .and_then(|b| b.path(PATH))
-        .map_err(|e| e.to_string())?
-        .build();
+        .interface(IFACE)
+        .member("Activated")
+        .path(PATH)
+        .build()
+        .map_err(|e| e.to_string())?;
     let ours = session.clone();
     crate::dbus::listen_on(conn.inner().clone(), DESKTOP, rule, "flatshot-portal-keys", move |msg| {
-        if let Ok((s, id, _, _)) = msg.body().deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedValue>)>()
+        if let Ok((s, id, _, _)) = msg.body().deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedVariant>)>()
             && s == ours
             && let Some((action, ..)) = ACTIONS.iter().find(|a| a.0 == id)
         {
@@ -107,13 +103,13 @@ pub fn start(events: impl Fn(ShortcutEvent) + Send + 'static) -> Result<(Session
         }
         true
     })?;
-    let wanted: Vec<(String, HashMap<&str, Value>)> = ACTIONS
+    let wanted: Vec<(String, HashMap<&str, Variant>)> = ACTIONS
         .iter()
         .map(|(action, label, keys)| {
-            let mut p: HashMap<&str, Value> = HashMap::new();
-            p.insert("description", Value::from(label.to_string()));
+            let mut p: HashMap<&str, Variant> = HashMap::new();
+            p.insert("description", Variant::from(label.to_string()));
             if !keys.is_empty() {
-                p.insert("preferred_trigger", Value::from(trigger(keys)));
+                p.insert("preferred_trigger", Variant::from(trigger(keys)));
             }
             (action.to_string(), p)
         })
@@ -126,19 +122,19 @@ pub fn start(events: impl Fn(ShortcutEvent) + Send + 'static) -> Result<(Session
 }
 
 /// A session's handle: an object path (some portals give it as a string).
-fn handle(v: &OwnedValue) -> Option<OwnedObjectPath> {
+fn handle(v: &OwnedVariant) -> Option<OwnedObjectPath> {
     match &**v {
-        Value::ObjectPath(p) => Some(p.clone().into()),
-        Value::Str(s) => OwnedObjectPath::try_from(s.as_str()).ok(),
+        Variant::ObjectPath(p) => Some(p.clone().into()),
+        Variant::Str(s) => OwnedObjectPath::try_from(s.as_str()).ok(),
         _ => None,
     }
 }
 
 /// The keys each action got ("shortcuts": a(sa{sv}), each with its
 /// "trigger_description"), by action.
-fn described(results: &HashMap<String, OwnedValue>) -> HashMap<String, String> {
+fn described(results: &HashMap<String, OwnedVariant>) -> HashMap<String, String> {
     let Some(list) = results.get("shortcuts").and_then(|v| v.try_clone().ok()) else { return HashMap::new() };
-    let Ok(list) = Vec::<(String, HashMap<String, OwnedValue>)>::try_from(list) else { return HashMap::new() };
+    let Ok(list) = Vec::<(String, HashMap<String, OwnedVariant>)>::try_from(list) else { return HashMap::new() };
     list.into_iter()
         .filter(|(id, _)| ACTIONS.iter().any(|a| a.0 == id))
         .filter_map(|(id, props)| {
@@ -163,14 +159,13 @@ mod tests {
 
     #[test]
     fn what_the_portal_answers() {
-        let path =
-            OwnedValue::try_from(Value::from(zbus::zvariant::ObjectPath::try_from("/org/freedesktop/portal/desktop/session/1_2/flatshot").unwrap())).unwrap();
+        let path = OwnedVariant::try_from(Variant::from(zbus::ObjectPath::try_from("/org/freedesktop/portal/desktop/session/1_2/flatshot").unwrap())).unwrap();
         assert_eq!(handle(&path).unwrap().as_str(), "/org/freedesktop/portal/desktop/session/1_2/flatshot");
-        assert!(handle(&OwnedValue::from(zbus::zvariant::Str::from("/a/b"))).is_some());
-        assert!(handle(&OwnedValue::from(7u32)).is_none());
-        let props = |keys: &str| HashMap::from([("trigger_description".to_string(), OwnedValue::from(zbus::zvariant::Str::from(keys.to_string())))]);
+        assert!(handle(&OwnedVariant::from(zbus::Str::from("/a/b"))).is_some());
+        assert!(handle(&OwnedVariant::from(7u32)).is_none());
+        let props = |keys: &str| HashMap::from([("trigger_description".to_string(), OwnedVariant::from(zbus::Str::from(keys.to_string())))]);
         let list = vec![("region".to_string(), props("Ctrl+Print")), ("nonsense".to_string(), props("X")), ("last".to_string(), props(""))];
-        let results = HashMap::from([("shortcuts".to_string(), OwnedValue::try_from(Value::from(list)).unwrap())]);
+        let results = HashMap::from([("shortcuts".to_string(), OwnedVariant::try_from(Variant::from(list)).unwrap())]);
         assert_eq!(described(&results), HashMap::from([("region".to_string(), "Ctrl+Print".to_string())]));
         assert!(described(&HashMap::new()).is_empty());
     }

@@ -102,7 +102,7 @@ struct Report {
 }
 
 /// The process on the other end of D-Bus connection `name`, as the bus says.
-fn pid_of(conn: &zbus::blocking::Connection, name: &str) -> Option<u32> {
+fn pid_of(conn: &crate::dbus::Bus, name: &str) -> Option<u32> {
     conn.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "GetConnectionUnixProcessID", &(name,))
         .ok()?
         .body()
@@ -136,7 +136,8 @@ fn kwin(timeout: Duration, all: bool) -> Option<Desktop> {
     let (tx, rx) = mpsc::sync_channel(8);
     let kwin_pid = pid_of(conn, &owner);
     let report = Report { tx: std::sync::Mutex::new(tx) };
-    conn.object_server().at(path.as_str(), report).ok()?;
+    // (a fresh path: nothing's served there yet)
+    zbus::block_on(conn.inner().object_server().at(path.as_str(), report)).ok()?;
     // The script lives in our private folder: nobody else can change it
     // before KWin reads it.
     let dir = crate::ipc::runtime_dir().ok()?;
@@ -168,7 +169,7 @@ fn kwin(timeout: Duration, all: bool) -> Option<Desktop> {
     })();
     let _ = conn.call_method(Some(KWIN), "/Scripting", Some("org.kde.kwin.Scripting"), "unloadScript", &(name.as_str(),));
     let _ = std::fs::remove_file(&file);
-    let _ = conn.object_server().remove::<Report, _>(path.as_str());
+    let _ = zbus::block_on(conn.inner().object_server().remove::<Report, _>(path.as_str()));
     result.map(|json| parse_kwin(&json))
 }
 

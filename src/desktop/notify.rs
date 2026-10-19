@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
-use zbus::zvariant::Value;
+use zbus::Variant;
 
 use super::sound;
 use crate::ui::session::Waker;
@@ -119,7 +119,7 @@ pub fn install_events() {
 }
 
 /// Does the notification server read markup in the body? (Asked once.)
-fn reads_markup(conn: &zbus::blocking::Connection) -> bool {
+fn reads_markup(conn: &crate::dbus::Bus) -> bool {
     static MARKUP: OnceLock<bool> = OnceLock::new();
     *MARKUP.get_or_init(|| {
         let caps = conn.call_method(Some(SERVICE), PATH, Some(SERVICE), "GetCapabilities", &());
@@ -175,18 +175,18 @@ fn notify(note: &Note, with_actions: bool) -> Result<u32, String> {
     let conn = crate::dbus::session()?;
     let body = util::elide(&note.body, MAX_BODY);
     let body = if reads_markup(conn) { escape_markup(&body) } else { body };
-    let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
-    hints.insert("desktop-entry", Value::from(crate::APP_ID));
-    hints.insert("x-kde-eventId", Value::from(note.event));
+    let mut hints: HashMap<&str, Variant<'_>> = HashMap::new();
+    hints.insert("desktop-entry", Variant::from(crate::APP_ID));
+    hints.insert("x-kde-eventId", Variant::from(note.event));
     if note.urgent {
-        hints.insert("urgency", Value::U8(2));
+        hints.insert("urgency", Variant::U8(2));
     }
     if let Some(image) = &note.image {
-        hints.insert("image-path", Value::from(util::file_uri(image)));
+        hints.insert("image-path", Variant::from(util::file_uri(image)));
     }
     if let Some(file) = note.file.as_ref().or(note.image.as_ref()) {
         // Plasma: a thumbnail, and the file to drag into other programs.
-        hints.insert("x-kde-urls", Value::from(vec![util::file_uri(file)]));
+        hints.insert("x-kde-urls", Variant::from(vec![util::file_uri(file)]));
     }
     let actions: Vec<&str> = if with_actions { note.actions.iter().flat_map(|(k, l)| [k.as_str(), l.as_str()]).collect() } else { Vec::new() };
     let reply = conn
@@ -316,12 +316,7 @@ impl Notifier {
 /// Hear the notification server's ActionInvoked and NotificationClosed for
 /// our notifications, on a thread of its own. False if that can't be done.
 fn listen(ids: Arc<Mutex<HashMap<u32, u64>>>, events: mpsc::Sender<NoteEvent>, wake: Waker) -> bool {
-    let rule = zbus::MatchRule::builder()
-        .msg_type(zbus::message::Type::Signal)
-        .sender(SERVICE)
-        .and_then(|b| b.interface(SERVICE))
-        .and_then(|b| b.path(PATH))
-        .map(|b| b.build());
+    let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(SERVICE).interface(SERVICE).path(PATH).build();
     let Ok(rule) = rule else { return false };
     // (only the notification server's own signals come through)
     let listening = crate::dbus::listen(SERVICE, rule, "flatshot-notify-events", move |msg| {

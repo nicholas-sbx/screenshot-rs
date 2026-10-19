@@ -2,7 +2,7 @@
 name = "flatshot-rs"
 version = "1.6.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "ShareX-style region screenshots for Wayland and X11 (KDE first) with a floating draw toolbar and QR/barcode scanning"
 license = "MIT"
 repository = "https://github.com/nicholas-sbx/screenshot-rs"
@@ -26,8 +26,9 @@ wayland-protocols = { version = "0.32", features = ["client", "staging", "unstab
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 calloop = "0.14"
 calloop-wayland-source = "0.4"
-# D-Bus: pure Rust, with its own small executor thread.
-zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+# D-Bus: pure Rust, on a small runtime of its own (a helper thread runs it
+# between calls).
+zbus = { version = "6", default-features = false, features = ["default-rt", "proxy", "service"] }
 futures-lite = { version = "2", default-features = false, features = ["std"] }
 # Drawing and text.
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }

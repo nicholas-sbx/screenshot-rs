@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use zbus::zvariant::OwnedValue;
+use zbus::OwnedVariant;
 
 struct FakeServer {
     next: AtomicU32,
@@ -29,7 +29,7 @@ impl FakeServer {
         summary: String,
         body: String,
         actions: Vec<String>,
-        hints: HashMap<String, OwnedValue>,
+        hints: HashMap<String, OwnedVariant>,
         _expire_timeout: i32,
     ) -> u32 {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
@@ -64,14 +64,13 @@ impl FakeServer {
 
 fn main() {
     let click = std::env::var("FAKE_NOTIFY_CLICK").ok().filter(|s| !s.is_empty());
-    let _conn = zbus::blocking::connection::Builder::session()
-        .unwrap()
-        .name("org.freedesktop.Notifications")
-        .unwrap()
-        .serve_at("/org/freedesktop/Notifications", FakeServer { next: AtomicU32::new(0), click })
-        .unwrap()
-        .build()
-        .unwrap();
+    let _conn = zbus::block_on(
+        zbus::connection::Builder::session()
+            .name("org.freedesktop.Notifications")
+            .serve_at("/org/freedesktop/Notifications", FakeServer { next: AtomicU32::new(0), click })
+            .build(),
+    )
+    .unwrap();
     println!("fake notification server ready");
     loop {
         std::thread::park();

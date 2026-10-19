@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use zbus::zvariant::Value;
+use zbus::Variant;
 
 use crate::codec;
 use crate::desktop::portal::{self, Answer};
@@ -14,8 +14,8 @@ use crate::util;
 
 /// The whole desktop, without asking the user (where the portal allows it).
 pub fn screenshot() -> Result<Image, String> {
-    let mut options: HashMap<&'static str, Value<'static>> = HashMap::new();
-    options.insert("interactive", Value::Bool(false));
+    let mut options: HashMap<&'static str, Variant<'static>> = HashMap::new();
+    options.insert("interactive", Variant::Bool(false));
     let results = match portal::request("org.freedesktop.portal.Screenshot", "Screenshot", options, |o| ("", o), Duration::from_secs(60))? {
         Answer::Done(r) => r,
         Answer::Cancelled => return Err("the screenshot was cancelled".into()),

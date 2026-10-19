@@ -9,7 +9,7 @@ use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 
 use super::Target;
 use crate::config;
@@ -45,7 +45,7 @@ impl From<String> for Failure {
 
 /// A screen cast: what it shows, and how to read it.
 pub struct ScreenCast {
-    conn: zbus::blocking::Connection,
+    conn: crate::dbus::Bus,
     session: Mutex<Option<OwnedObjectPath>>,
     /// the stream's PipeWire node
     pub node: u32,
@@ -57,7 +57,7 @@ pub struct ScreenCast {
     pub frame_size: Option<(u32, u32)>,
 }
 
-fn answer(a: Answer) -> Result<HashMap<String, OwnedValue>, Failure> {
+fn answer(a: Answer) -> Result<HashMap<String, OwnedVariant>, Failure> {
     match a {
         Answer::Done(r) => Ok(r),
         Answer::Cancelled => Err(Failure::Cancelled),
@@ -76,19 +76,17 @@ impl ScreenCast {
     /// Ask for a stream with `target`'s area in it. Blocks while the desktop
     /// asks the user (call it from a thread of its own).
     pub fn open(target: &Target, cursor: bool) -> Result<ScreenCast, Failure> {
-        let conn = zbus::blocking::connection::Builder::session()
-            .and_then(|b| b.method_timeout(CALL_WAIT).build())
-            .map_err(|e| Failure::Failed(format!("no session bus: {e}")))?;
+        let conn = crate::dbus::Bus::connect(CALL_WAIT)?;
         let property = |name: &str| -> Option<u32> {
             let reply = conn.call_method(Some(portal::DESKTOP), portal::PATH, Some("org.freedesktop.DBus.Properties"), "Get", &(SCREENCAST, name)).ok()?;
-            let v: OwnedValue = reply.body().deserialize().ok()?;
+            let v: OwnedVariant = reply.body().deserialize().ok()?;
             u32::try_from(&v).ok()
         };
         let version = property("version").ok_or_else(|| Failure::Failed("the desktop has no screen-cast portal".into()))?;
         let cursors = property("AvailableCursorModes").unwrap_or(CURSOR_HIDDEN);
 
-        let mut options: HashMap<&'static str, Value<'static>> = HashMap::new();
-        options.insert("session_handle_token", Value::from(token()));
+        let mut options: HashMap<&'static str, Variant<'static>> = HashMap::new();
+        options.insert("session_handle_token", Variant::from(token()));
         let results = answer(portal::request_on(&conn, SCREENCAST, "CreateSession", options, |o| (o,), CALL_WAIT)?)?;
         let session = results
             .get("session_handle")
@@ -103,18 +101,18 @@ impl ScreenCast {
         // Which monitor: the restore token remembers what was shared last
         // time for this kind of area (its monitor, or all of them).
         let key = if target.spans() { WORKSPACE.to_string() } else { target.monitor_name.clone() };
-        let mut options: HashMap<&'static str, Value<'static>> = HashMap::new();
-        options.insert("types", Value::U32(MONITOR));
-        options.insert("multiple", Value::Bool(false));
+        let mut options: HashMap<&'static str, Variant<'static>> = HashMap::new();
+        options.insert("types", Variant::U32(MONITOR));
+        options.insert("multiple", Variant::Bool(false));
         let wanted = if cursor { CURSOR_EMBEDDED } else { CURSOR_HIDDEN };
         if cursors & wanted != 0 {
-            options.insert("cursor_mode", Value::U32(wanted));
+            options.insert("cursor_mode", Variant::U32(wanted));
         }
         if version >= 4 {
-            options.insert("persist_mode", Value::U32(PERSIST_UNTIL_REVOKED));
+            options.insert("persist_mode", Variant::U32(PERSIST_UNTIL_REVOKED));
             let tokens = config::load_state().get("screencast_tokens").cloned();
             if let Some(t) = tokens.as_ref().and_then(|t| t.get(&key)).and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
-                options.insert("restore_token", Value::from(t.to_string()));
+                options.insert("restore_token", Variant::from(t.to_string()));
             }
         }
         let path = session.clone();
@@ -122,7 +120,7 @@ impl ScreenCast {
         // This waits for the user when the desktop asks which screen to share.
         let path = session.clone();
         let results = answer(portal::request_on(&cast.conn, SCREENCAST, "Start", HashMap::new(), move |o| (path, "", o), START_WAIT)?)?;
-        type Stream = (u32, HashMap<String, OwnedValue>);
+        type Stream = (u32, HashMap<String, OwnedVariant>);
         let streams: Vec<Stream> = results.get("streams").and_then(|v| v.try_clone().ok()).and_then(|v| Vec::<Stream>::try_from(v).ok()).unwrap_or_default();
         let (node, props) = streams.into_iter().next().ok_or_else(|| Failure::Failed("the screen-cast portal shared no screen".into()))?;
         cast.node = node;
@@ -184,12 +182,12 @@ impl ScreenCast {
     /// A new PipeWire connection for the stream (one per segment).
     pub fn pipewire_fd(&self) -> Result<OwnedFd, String> {
         let session = self.session.lock().map_err(|_| "the screen cast is gone")?.clone().ok_or("the screen cast is over")?;
-        let options: HashMap<&str, Value<'_>> = HashMap::new();
+        let options: HashMap<&str, Variant<'_>> = HashMap::new();
         let reply = self
             .conn
             .call_method(Some(portal::DESKTOP), portal::PATH, Some(SCREENCAST), "OpenPipeWireRemote", &(session, options))
             .map_err(|e| format!("the screen cast's stream: {e}"))?;
-        let fd: zbus::zvariant::OwnedFd = reply.body().deserialize().map_err(|e| format!("the screen cast's stream: {e}"))?;
+        let fd: zbus::OwnedFd = reply.body().deserialize().map_err(|e| format!("the screen cast's stream: {e}"))?;
         let fd: OwnedFd = fd.into();
         // (D-Bus hands descriptors over without close-on-exec: no program
         // started but the recorder may have this one)

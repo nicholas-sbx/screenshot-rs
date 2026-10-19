@@ -65,7 +65,7 @@ sudo pacman -Sy flatshot-rs
 
 ### From source
 
-Rust 1.88 or newer and libxkbcommon (with its headers):
+Rust 1.89 or newer and libxkbcommon (with its headers):
 
 ```sh
 cargo build --release

@@ -1,28 +1,101 @@
 //! The session bus, shared by everything that talks to the desktop: KWin,
 //! the portals, notifications, global shortcuts and the tray.
+//!
+//! zbus's calls are async, and the rest of Flatshot isn't, so [`Bus`] blocks
+//! on them with zbus::block_on. A connection's own work (reading its socket,
+//! serving our objects) runs on the thread that made it while that thread is
+//! inside zbus::block_on, else on a helper thread of zbus's. zbus::block_on
+//! can't be called from inside a handler zbus runs (a served interface's
+//! method), where it would panic: those only hand things on.
 
+use std::num::NonZeroUsize;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use zbus::blocking::Connection;
+use zbus::ObjectPath;
+use zbus::names::{BusName, InterfaceName, MemberName, OwnedUniqueName, WellKnownName};
 
-static SESSION: OnceLock<Result<Connection, String>> = OnceLock::new();
+static SESSION: OnceLock<Result<Bus, String>> = OnceLock::new();
 
 /// No call waits on the desktop longer than this.
 pub const TIMEOUT: Duration = Duration::from_secs(15);
 
+/// A connection to the session bus, its calls blocking.
+#[derive(Clone, Debug)]
+pub struct Bus(zbus::Connection);
+
+impl Bus {
+    /// A connection of its own (most share [`session`]'s).
+    pub fn connect(timeout: Duration) -> Result<Bus, String> {
+        zbus::block_on(zbus::connection::Builder::session().method_timeout(timeout).build()).map(Bus).map_err(|e| format!("no session bus: {e}"))
+    }
+
+    /// The connection itself, for its async API.
+    pub fn inner(&self) -> &zbus::Connection {
+        &self.0
+    }
+
+    pub fn unique_name(&self) -> Option<&OwnedUniqueName> {
+        self.0.unique_name()
+    }
+
+    /// Call `method` and wait for its reply.
+    pub fn call_method<'d, 'p, 'i, 'm, D, P, I, M, B>(
+        &self,
+        destination: Option<D>,
+        path: P,
+        interface: Option<I>,
+        method: M,
+        body: &B,
+    ) -> zbus::Result<zbus::Message>
+    where
+        D: TryInto<BusName<'d>>,
+        P: TryInto<ObjectPath<'p>>,
+        I: TryInto<InterfaceName<'i>>,
+        M: TryInto<MemberName<'m>>,
+        D::Error: Into<zbus::Error>,
+        P::Error: Into<zbus::Error>,
+        I::Error: Into<zbus::Error>,
+        M::Error: Into<zbus::Error>,
+        B: serde::Serialize + zbus::DynamicType,
+    {
+        zbus::block_on(self.0.call_method(destination, path, interface, method, body))
+    }
+
+    /// Send a signal.
+    pub fn emit_signal<'d, 'p, 'i, 'm, D, P, I, M, B>(&self, destination: Option<D>, path: P, interface: I, signal: M, body: &B) -> zbus::Result<()>
+    where
+        D: TryInto<BusName<'d>>,
+        P: TryInto<ObjectPath<'p>>,
+        I: TryInto<InterfaceName<'i>>,
+        M: TryInto<MemberName<'m>>,
+        D::Error: Into<zbus::Error>,
+        P::Error: Into<zbus::Error>,
+        I::Error: Into<zbus::Error>,
+        M::Error: Into<zbus::Error>,
+        B: serde::Serialize + zbus::DynamicType,
+    {
+        zbus::block_on(self.0.emit_signal(destination, path, interface, signal, body))
+    }
+
+    /// Own the well-known `name`.
+    pub fn request_name<'w, W>(&self, name: W) -> zbus::Result<()>
+    where
+        W: TryInto<WellKnownName<'w>>,
+        W::Error: Into<zbus::Error>,
+    {
+        zbus::block_on(self.0.request_name(name))
+    }
+
+    /// Close it, for all who share it: every stream on it ends.
+    pub fn close(self) -> zbus::Result<()> {
+        zbus::block_on(self.0.close())
+    }
+}
+
 /// The session bus (connected once, then kept).
-pub fn session() -> Result<&'static Connection, String> {
-    SESSION
-        .get_or_init(|| {
-            zbus::blocking::connection::Builder::session()
-                .map_err(|e| e.to_string())?
-                .method_timeout(TIMEOUT)
-                .build()
-                .map_err(|e| format!("no session bus: {e}"))
-        })
-        .as_ref()
-        .map_err(|e| e.clone())
+pub fn session() -> Result<&'static Bus, String> {
+    SESSION.get_or_init(|| Bus::connect(TIMEOUT)).as_ref().map_err(|e| e.clone())
 }
 
 /// Connect in the background (startup: it's ready by the time it's needed).
@@ -71,17 +144,19 @@ pub fn listen_on(
     let owners = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .sender(BUS)
-        .and_then(|b| b.interface(BUS))
-        .and_then(|b| b.member("NameOwnerChanged"))
-        .and_then(|b| b.add_arg(service))
-        .map_err(|e| e.to_string())?
-        .build();
-    let (owners, signals) = futures_lite::future::block_on(async {
-        let owners = zbus::MessageStream::for_match_rule(owners, &conn, Some(16)).await?;
-        let signals = zbus::MessageStream::for_match_rule(rule, &conn, Some(64)).await?;
+        .interface(BUS)
+        .member("NameOwnerChanged")
+        .add_arg(service)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let queue = |n: usize| NonZeroUsize::new(n);
+    let (owners, signals) = zbus::block_on(async {
+        let owners = zbus::MessageStream::for_match_rule(owners, &conn, queue(16)).await?;
+        let signals = zbus::MessageStream::for_match_rule(rule, &conn, queue(64)).await?;
         Ok::<_, zbus::Error>((owners, signals))
     })
     .map_err(|e| e.to_string())?;
+    // (not zbus::block_on: `on_signal` may make blocking calls of its own)
     std::thread::Builder::new()
         .name(thread.into())
         .spawn(move || futures_lite::future::block_on(follow(conn, service, owners, signals, &mut on_signal)))
