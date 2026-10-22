@@ -128,7 +128,8 @@ The keys can be changed in Settings → Shortcuts → Keys in Flatshot RS (so ca
 - **Spotlight** (<kbd>D</kbd>): drag over what matters and everything else is shaded. Several spotlights light up together, overlapping or not; drawings made after them aren't shaded.
 - **Magnifier** (<kbd>Z</kbd>): drag out a box and what's under its middle shows in it enlarged, framed in your colour (2×, 3× or 4× with the stroke size), crisp pixel for pixel.
 - **Across monitors**: drawings can run from one monitor onto another with every tool: they show on each, stacked alike (the last drawn or changed on top), the select tool picks them up (and frames and resizes them) from either, and text can be typed and changed from either. The toolbar follows the pointer from monitor to monitor, during a drag too. Edges snap on whichever monitor a drag reaches. A window across monitors is outlined on each, with its label on the one you're pointing at. A pin of an area across monitors shows on each, and pins and the recording bar can be dragged onto any monitor.
-- **The annotation editor** (**Annotate** on a notification, in the tray menu, or `flatshot-rs -i picture.png`; **Annotate clipboard image** in the tray menu, or `flatshot-rs --from-clipboard`, opens the picture you copied, saved as a new capture when you save it) has the same tools, and:
+- **The annotation editor** (**Annotate** on a notification, in the tray menu, or `flatshot-rs -i picture.png`; **Annotate clipboard image** in the tray menu, or `flatshot-rs --from-clipboard`, for the picture you copied) has the same tools, and:
+  - **The picture you copied is in no file until you save it**: Save asks where, starting in your captures' folder with a capture's name (on a desktop without a file dialog, it's saved there). `flatshot-rs --from-clipboard -o file.png` names the file up front.
   - **Crop, cut out, rotate and resize** (<kbd>C</kbd>): drag the frame's edges in to crop, or out past the picture for a margin (clear, or your colour), then <kbd>Enter</kbd>. The crop can be free, 1:1, 4:3, 16:9 or the original's shape, and snaps to edges in the picture like the magnet. Under the toolbar: cut out rows or columns (drag across them and the rest is joined), rotate, flip, and resize to a size in pixels or a percentage. Your drawings move with the picture and stay drawings, and each step can be undone.
   - **Beautify** (<kbd>Ctrl</kbd>+<kbd>B</kbd>): the picture on a background (a colour, its own edge colour, a gradient, a blurred copy of itself or an image), with padding, rounded corners, a soft shadow and a fixed shape (1:1, 4:3, 16:9) if you like, shown as you work and saved at full resolution. Save styles as presets. The capture toolbar's Beautify button (<kbd>Ctrl</kbd>+<kbd>B</kbd> there too), or Settings → After capture → Beautify, puts every capture on the style you used last.
   - The zoom is at the bottom right: out and in, a slider, the zoom itself (click it for a list) and fit. **Save** is highlighted while there are unsaved changes, greyed out when there are none. The window can't be made so small that its bars overlap.
@@ -179,7 +180,7 @@ flatshot-rs --no-copy --no-save  just print the path / don't keep a file
 flatshot-rs --record             record an area (stops the recording in progress)
 flatshot-rs --ocr                copy the text in an area (needs tesseract)
 flatshot-rs -i picture.png       annotate a picture
-flatshot-rs --from-clipboard     annotate the picture on the clipboard
+flatshot-rs --from-clipboard     annotate the picture on the clipboard (Save asks where)
 flatshot-rs --settings           the settings window
 flatshot-rs --recent             the recent captures
 flatshot-rs --tray               the tray app

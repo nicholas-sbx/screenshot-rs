@@ -184,9 +184,19 @@ pub struct Editor {
     /// the picture's pixels per logical pixel (that of the screen it was
     /// taken on): drawings are as thick as on the capture overlay
     pub dpr: f32,
+    /// the picture's file (for a picture that's in none yet, where Save as
+    /// starts)
     pub path: PathBuf,
     /// where Save writes, its folder held since the file was opened
     target: Option<SaveTarget>,
+    /// the picture isn't in its file yet (the clipboard's): there's
+    /// something to save before anything's drawn
+    unwritten: bool,
+    /// what the title calls a picture that's in no file yet, and isn't
+    /// named either: Save asks where it goes
+    untitled: Option<String>,
+    /// closed once saved (Save, chosen when closing, waits on Save as)
+    close_when_saved: bool,
     alpha: bool,
     cfg: Config,
     keymap: Keymap,
@@ -328,6 +338,9 @@ impl Editor {
             dpr: dpr.max(0.25),
             target: SaveTarget::open(&path).ok(),
             path,
+            unwritten: false,
+            untitled: None,
+            close_when_saved: false,
             alpha,
             color_index: default_color_index(cfg.default_color, palette.len()),
             palette,
@@ -407,11 +420,37 @@ impl Editor {
         ed
     }
 
+    /// An editor for a picture that isn't in `path` yet (the clipboard's).
+    pub fn unwritten(image: Image, dpr: f32, path: PathBuf, cfg: Config) -> Editor {
+        let mut ed = Editor::new(image, dpr, path, cfg);
+        ed.unwritten = true;
+        ed.refresh_bar();
+        ed
+    }
+
+    /// An editor for a picture that's in no file yet, called `name` until
+    /// it's saved: Save asks where, starting at `suggested`.
+    pub fn untitled(image: Image, dpr: f32, name: &str, suggested: PathBuf, cfg: Config) -> Editor {
+        let mut ed = Editor::unwritten(image, dpr, suggested, cfg);
+        ed.target = None;
+        ed.untitled = Some(name.to_string());
+        ed.refresh_bar();
+        ed
+    }
+
+    /// Is the picture in no file yet?
+    pub fn is_untitled(&self) -> bool {
+        self.untitled.is_some()
+    }
+
     // -- the window ------------------------------------------------------------------------
 
     /// The window's title: the file's name, marked while it has unsaved changes.
     pub fn title(&self) -> String {
-        let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = match &self.untitled {
+            Some(name) => name.clone(),
+            None => self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        };
         format!("{}{} — Annotate", if self.dirty { "● " } else { "" }, crate::util::displayable(&name))
     }
 
@@ -546,7 +585,8 @@ impl Editor {
         items.push(beauty);
         self.bar = items;
         let copied = self.copied_until.is_some();
-        let (dirty, path) = (self.dirty, self.path.display().to_string());
+        let (dirty, path, untitled) = (self.dirty, self.path.display().to_string(), self.untitled.is_some());
+        let unsaved = dirty || self.unwritten;
         for b in &mut self.actions {
             match b.id {
                 "copy" => {
@@ -555,10 +595,16 @@ impl Editor {
                 }
                 "save_as" => b.hint = km.hint("Save to another file", "save_as"),
                 _ => {
-                    // Save stands out while there's something to save, and is greyed
-                    // out when there isn't; its word and icon stay the same.
-                    (b.text, b.icon, b.strong, b.enabled) = ("Save", "save", dirty, dirty);
-                    b.hint = if dirty { km.hint(&format!("Save to {path}"), "save") } else { format!("Saved in {path}") };
+                    // Save stands out while there are changes to save, and is greyed
+                    // out when there's nothing to; its word and icon stay the same.
+                    (b.text, b.icon, b.strong, b.enabled) = ("Save", "save", dirty, unsaved);
+                    b.hint = if untitled {
+                        km.hint("Choose where to save it", "save")
+                    } else if unsaved {
+                        km.hint(&format!("Save to {path}"), "save")
+                    } else {
+                        format!("Saved in {path}")
+                    };
                 }
             }
         }
@@ -1976,8 +2022,13 @@ impl Editor {
         }
     }
 
-    /// Save back to the file. False (and why, in the status line) if it couldn't.
+    /// Save back to the file. False (and why, in the status line) if it
+    /// couldn't, or (in no file yet) once Save as is asked where.
     pub fn save(&mut self) -> bool {
+        if self.untitled.is_some() {
+            self.save_as();
+            return false;
+        }
         let target = match self.target.take() {
             Some(t) if t.is_for(&self.path) => Ok(t),
             _ => SaveTarget::open(&self.path),
@@ -1993,6 +2044,11 @@ impl Editor {
     /// Save to `path` (chosen just now: Save as).
     pub fn save_to(&mut self, path: &Path) -> bool {
         self.save_in(SaveTarget::open(path))
+    }
+
+    /// Save as was cancelled: nothing saved, and the window stays.
+    pub fn save_as_cancelled(&mut self) {
+        self.close_when_saved = false;
     }
 
     fn save_in(&mut self, target: Result<SaveTarget, String>) -> bool {
@@ -2013,15 +2069,22 @@ impl Editor {
                 clock.step("saved", path.display().to_string());
                 self.say(format!("Saved to {}", path.display()));
                 self.path = path;
+                self.unwritten = false;
+                self.untitled = None;
                 self.saved = self.shapes.iter().map(|(id, _)| *id).collect();
                 self.saved_image = self.image.clone();
                 self.saved_beauty = self.beauty_state();
                 self.dirty = false;
                 self.refresh_bar();
+                if std::mem::take(&mut self.close_when_saved) {
+                    self.closing = true;
+                    self.requests.push(Request::Close);
+                }
                 true
             }
             Err(e) => {
                 self.say(format!("Couldn't save: {e}"));
+                self.close_when_saved = false;
                 false
             }
         }
@@ -2050,10 +2113,9 @@ impl Editor {
         self.damaged = true;
         match a {
             Answer::Save => {
-                if self.save() {
-                    self.closing = true;
-                    self.requests.push(Request::Close);
-                }
+                // (closed once it's saved: now, or once Save as is answered)
+                self.close_when_saved = true;
+                self.save();
             }
             Answer::Discard => {
                 self.closing = true;
@@ -2869,6 +2931,58 @@ mod tests {
         let back = crate::codec::decode_file(&path).unwrap();
         assert_eq!(back.size(), (400, 300));
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temporary file left");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_clipboards_picture_is_in_no_file_till_saved() {
+        let dir = std::env::temp_dir().join(format!("flatshot-editor-{}", crate::util::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let picture = || Image::filled(400, 300, 0xFF20_4060).unwrap();
+        let cfg = || Config::from_map(&Default::default());
+        let save = |ed: &Editor| ed.actions.iter().find(|b| b.id == "save").map(|b| (b.enabled, b.hint.clone())).unwrap();
+        let mut ed = Editor::untitled(picture(), 1.0, "Clipboard image", dir.join("Screenshot.png"), cfg());
+        ed.set_view(900.0, 600.0);
+        assert_eq!(ed.title(), "Clipboard image — Annotate");
+        // Something to save before anything's drawn, and Save asks where.
+        assert!(save(&ed).0 && save(&ed).1.starts_with("Choose where to save it"));
+        assert!(!ed.save());
+        assert!(matches!(ed.take_requests()[..], [Request::SaveAs]));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "nothing written without asking");
+        // Closed with nothing drawn: no question (the clipboard has it still).
+        ed.close();
+        assert!(matches!(ed.take_requests()[..], [Request::Close]));
+        // With a drawing: Save, when closing, asks where; cancelled, it stays.
+        let mut ed = Editor::untitled(picture(), 1.0, "Clipboard image", dir.join("Screenshot.png"), cfg());
+        ed.set_view(900.0, 600.0);
+        ed.set_tool(Tool::Counter);
+        ed.button(Button::Left, true, at(&ed, 5.0, 5.0), 0);
+        assert!(ed.title().starts_with("● Clipboard image"));
+        ed.close();
+        ed.key(&KeyPress { key: key::RETURN, ..Default::default() });
+        assert!(matches!(ed.take_requests()[..], [Request::SaveAs]));
+        ed.save_as_cancelled();
+        assert!(ed.save_to(&dir.join("kept.png")));
+        assert!(!ed.take_requests().iter().any(|r| matches!(r, Request::Close)), "cancelled: it stays open");
+        // Asked again and answered: saved there, named so, and closed.
+        let mut ed = Editor::untitled(picture(), 1.0, "Clipboard image", dir.join("Screenshot.png"), cfg());
+        ed.set_view(900.0, 600.0);
+        ed.set_tool(Tool::Counter);
+        ed.button(Button::Left, true, at(&ed, 5.0, 5.0), 0);
+        ed.close();
+        ed.key(&KeyPress { key: key::RETURN, ..Default::default() });
+        assert!(matches!(ed.take_requests()[..], [Request::SaveAs]));
+        assert!(ed.save_to(&dir.join("chosen.png")));
+        assert!(matches!(ed.take_requests()[..], [Request::Saved(..), Request::Close]));
+        assert_eq!(crate::codec::decode_file(&dir.join("chosen.png")).unwrap().size(), (400, 300));
+        assert!(!ed.is_untitled() && ed.title() == "chosen.png — Annotate");
+        assert!(!dir.join("Screenshot.png").exists(), "the suggested name only starts the dialog");
+        // Named with -o: not there yet, so Save writes it before anything's drawn.
+        let mut ed = Editor::unwritten(picture(), 1.0, dir.join("named.png"), cfg());
+        assert!(save(&ed).0 && ed.title() == "named.png — Annotate");
+        assert!(ed.save());
+        assert_eq!(crate::codec::decode_file(&dir.join("named.png")).unwrap().size(), (400, 300));
+        assert!(!save(&ed).0, "saved: nothing more to save");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

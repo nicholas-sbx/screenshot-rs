@@ -381,7 +381,7 @@ impl App {
                 "region-delayed" => self.capture_later(Job::new(Mode::Region), Duration::from_secs(3)),
                 "window-delayed" => self.capture_later(Job::new(Mode::Window), Duration::from_secs(3)),
                 "annotate" => self.choose_image(),
-                "annotate-clipboard" => self.annotate_clipboard(),
+                "annotate-clipboard" => self.annotate_clipboard(None),
                 "folder" => {
                     let folder = crate::template::base_folder(&config::load().save_dir);
                     let _ = std::fs::create_dir_all(&folder);
@@ -570,7 +570,7 @@ impl App {
             }
             "settings" => self.show_settings(),
             "recent" => self.show_recent(),
-            "annotate-clipboard" => self.annotate_clipboard(),
+            "annotate-clipboard" => self.annotate_clipboard(None),
             "restart" => self.restart(),
             "quit" => self.quit(),
             "record" => self.record(delay),
