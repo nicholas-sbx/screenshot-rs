@@ -8,9 +8,10 @@ use std::time::Instant;
 
 use super::{App, Input};
 use crate::clipboard::{IMAGE_MIMES, MAX_IMAGE_PASTE, Slot, TEXT_MIMES};
+use crate::config::Config;
 use crate::desktop::portal;
 use crate::geom::{Damage, IRect, Point};
-use crate::image::Canvas;
+use crate::image::{Canvas, Image};
 use crate::platform::{Owner, Painted};
 use crate::ui::editor::{Editor, Request, initial_size};
 use crate::ui::session::Button;
@@ -85,10 +86,26 @@ impl App {
     }
 
     /// An editor window for `image`, saved to `target`.
-    fn open_editor_on(&mut self, image: crate::image::Image, target: PathBuf) -> bool {
+    fn open_editor_on(&mut self, image: Image, target: PathBuf) -> bool {
+        self.open_editor_window(|dpr, cfg| Editor::new(image, dpr, target, cfg))
+    }
+
+    /// An editor window for `image`, which isn't in `target` yet.
+    fn open_unwritten_editor(&mut self, image: Image, target: PathBuf) -> bool {
+        self.open_editor_window(|dpr, cfg| Editor::unwritten(image, dpr, target, cfg))
+    }
+
+    /// An editor window for `image`, in no file yet (`name` in its title):
+    /// Save asks where, starting at `suggested`.
+    fn open_untitled_editor(&mut self, image: Image, name: &str, suggested: PathBuf) -> bool {
+        self.open_editor_window(|dpr, cfg| Editor::untitled(image, dpr, name, suggested, cfg))
+    }
+
+    /// An editor window for what `make` makes (at the first monitor's scale).
+    fn open_editor_window(&mut self, make: impl FnOnce(f32, Config) -> Editor) -> bool {
         let monitors = self.dpy.monitors();
         let (mon, dpr) = monitors.first().map(|m| ((m.rect.w as f32, m.rect.h as f32), m.scale)).unwrap_or(((1920.0, 1080.0), 1.0));
-        let ed = Editor::new(image, dpr, target, crate::config::load());
+        let ed = make(dpr, crate::config::load());
         let min = ed.min_size();
         // (wide enough for the bar in one row, where the monitor is)
         let bar = ed.bar_width().min(mon.0 * 0.85).max(min.0 as f32);
@@ -260,19 +277,28 @@ impl App {
                     Ok(Some(path)) => {
                         w.ed.save_to(&path);
                     }
-                    Ok(None) => {}
+                    Ok(None) => w.ed.save_as_cancelled(),
                     Err(e) => {
-                        // No file dialog here: beside the picture, under a new name.
+                        // No file dialog here: a picture in no file yet goes where
+                        // a capture would; one in a file beside it, under a new name.
                         crate::timing::log(format!("no file dialog ({e})"));
                         let p = &w.ed.path;
-                        let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "picture".into());
-                        let ext = p.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "png".into());
-                        let mut target = p.with_file_name(format!("{stem}-annotated.{ext}"));
-                        let mut n = 1;
-                        while target.exists() && n < 1000 {
-                            target = p.with_file_name(format!("{stem}-annotated-{n}.{ext}"));
-                            n += 1;
-                        }
+                        let target = if w.ed.is_untitled() {
+                            if let Some(dir) = p.parent() {
+                                let _ = std::fs::create_dir_all(dir);
+                            }
+                            unused_name(p)
+                        } else {
+                            let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "picture".into());
+                            let ext = p.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "png".into());
+                            let mut target = p.with_file_name(format!("{stem}-annotated.{ext}"));
+                            let mut n = 1;
+                            while target.exists() && n < 1000 {
+                                target = p.with_file_name(format!("{stem}-annotated-{n}.{ext}"));
+                                n += 1;
+                            }
+                            target
+                        };
                         w.ed.save_to(&target);
                     }
                 }
@@ -315,8 +341,10 @@ impl App {
     /// "Annotate clipboard image": the picture on the clipboard, read in
     /// the background, then opened in the editor (saved, when it is, as a
     /// new capture in the screenshot folder).
-    pub(super) fn annotate_clipboard(&mut self) {
-        self.clipboard_image = Some((self.dpy.paste(IMAGE_MIMES, MAX_IMAGE_PASTE, self.waker.clone()), false));
+    /// "Annotate clipboard image": the clipboard's picture in an editor, in
+    /// no file until it's saved (or in `save_to`, when -o names one).
+    pub(super) fn annotate_clipboard(&mut self, save_to: Option<PathBuf>) {
+        self.clipboard_image = Some((self.dpy.paste(IMAGE_MIMES, MAX_IMAGE_PASTE, self.waker.clone()), false, save_to));
     }
 
     pub(super) fn reading_clipboard(&self) -> bool {
@@ -324,17 +352,24 @@ impl App {
     }
 
     pub(super) fn poll_clipboard_image(&mut self) {
-        let Some((rx, helped)) = &self.clipboard_image else { return };
+        let Some((rx, helped, _)) = &self.clipboard_image else { return };
         let helped = *helped;
         let Ok(answer) = rx.try_recv() else { return };
-        self.clipboard_image = None;
+        let save_to = self.clipboard_image.take().and_then(|c| c.2);
         let code = match answer {
             Some((_, bytes)) => match crate::codec::decode_bytes(&bytes) {
                 Ok(image) => {
-                    let cfg = crate::config::load();
-                    let format = crate::deliver::writable(&cfg.format);
-                    let path = crate::template::screenshot_path(&cfg, &crate::template::Shot::new("clipboard"), image.size(), format, false);
-                    if self.open_editor_on(image, unused_name(&path)) { 0 } else { 2 }
+                    let opened = match save_to {
+                        Some(path) => self.open_unwritten_editor(image, path),
+                        None => {
+                            // (Save as starts with a capture's name, in the captures' folder)
+                            let cfg = crate::config::load();
+                            let format = crate::deliver::writable(&cfg.format);
+                            let suggested = crate::template::screenshot_path(&cfg, &crate::template::Shot::new("clipboard"), image.size(), format, false);
+                            self.open_untitled_editor(image, "Clipboard image", suggested)
+                        }
+                    };
+                    if opened { 0 } else { 2 }
                 }
                 Err(e) => {
                     self.report_failure("Can't annotate the clipboard", &format!("The picture on it can't be opened: {e}"));
@@ -350,7 +385,7 @@ impl App {
                     let _ = tx.send(wl_paste_image());
                     waker();
                 });
-                self.clipboard_image = Some((rx, true));
+                self.clipboard_image = Some((rx, true, save_to));
                 return;
             }
             None => {

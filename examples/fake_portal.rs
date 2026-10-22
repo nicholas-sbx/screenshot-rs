@@ -1,11 +1,13 @@
 //! A stand-in for the desktop portal's global shortcuts (org.freedesktop.
 //! portal.GlobalShortcuts, and its host registry), for testing the tray
-//! app's without GNOME or Hyprland. Prints what it's asked, one line each,
-//! and then:
+//! app's without GNOME or Hyprland, and for its file chooser's Save
+//! dialog. Prints what it's asked, one line each, and then:
 //!
 //! FAKE_PORTAL_PRESS="screen@1000": presses that action's shortcut that
 //! many milliseconds after the shortcuts are bound (Activated, for the
 //! session they were bound in).
+//! FAKE_PORTAL_SAVE=PATH: a Save dialog answers with PATH, as if it were
+//! chosen (without it, the dialog is cancelled).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -28,10 +30,15 @@ fn text(options: &HashMap<String, OwnedVariant>, key: &str) -> String {
 /// Answer the request at `path`, a moment after the call has returned (as
 /// a portal does, once its dialog is done).
 fn respond(conn: &zbus::Connection, path: String, results: HashMap<String, OwnedVariant>) {
+    respond_with(conn, path, 0, results);
+}
+
+/// The same, with the response's code (0 done, 1 cancelled).
+fn respond_with(conn: &zbus::Connection, path: String, code: u32, results: HashMap<String, OwnedVariant>) {
     let conn = conn.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(50));
-        let r = zbus::block_on(conn.emit_signal(None::<()>, path.as_str(), "org.freedesktop.portal.Request", "Response", &(0u32, results)));
+        let r = zbus::block_on(conn.emit_signal(None::<()>, path.as_str(), "org.freedesktop.portal.Request", "Response", &(code, results)));
         println!("portal: answered {path}: {}", r.is_ok());
     });
 }
@@ -103,6 +110,37 @@ impl Shortcuts {
     }
 }
 
+struct Files;
+
+#[zbus::interface(name = "org.freedesktop.portal.FileChooser")]
+impl Files {
+    #[zbus(name = "SaveFile")]
+    fn save_file(
+        &self,
+        _parent_window: String,
+        title: String,
+        options: HashMap<String, OwnedVariant>,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> OwnedObjectPath {
+        let request = format!("{PATH}/request/{}/{}", sender_part(&header), text(&options, "handle_token"));
+        println!("portal: save file \"{title}\" as {}", text(&options, "current_name"));
+        match std::env::var("FAKE_PORTAL_SAVE") {
+            Ok(path) => {
+                let uris = OwnedVariant::try_from(Variant::from(vec![format!("file://{path}")])).unwrap();
+                respond(conn, request.clone(), HashMap::from([("uris".to_string(), uris)]));
+            }
+            Err(_) => respond_with(conn, request.clone(), 1, HashMap::new()),
+        }
+        OwnedObjectPath::try_from(request).unwrap()
+    }
+
+    #[zbus(property, name = "version")]
+    fn version(&self) -> u32 {
+        4
+    }
+}
+
 struct Registry;
 
 #[zbus::interface(name = "org.freedesktop.host.portal.Registry")]
@@ -114,9 +152,15 @@ impl Registry {
 }
 
 fn main() {
-    let _conn =
-        zbus::block_on(zbus::connection::Builder::session().name("org.freedesktop.portal.Desktop").serve_at(PATH, Shortcuts).serve_at(PATH, Registry).build())
-            .unwrap();
+    let _conn = zbus::block_on(
+        zbus::connection::Builder::session()
+            .name("org.freedesktop.portal.Desktop")
+            .serve_at(PATH, Shortcuts)
+            .serve_at(PATH, Files)
+            .serve_at(PATH, Registry)
+            .build(),
+    )
+    .unwrap();
     println!("fake portal ready");
     loop {
         std::thread::park();

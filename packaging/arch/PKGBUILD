@@ -4,7 +4,7 @@
 # pacman repository with it) comes with each GitHub release; see README.md.
 # To build the code you have checked out instead: FLATSHOT_SRC=$PWD/../.. makepkg
 pkgname=flatshot-rs
-pkgver=1.6.0
+pkgver=1.6.1
 pkgrel=1
 pkgdesc="Region screenshots for Wayland and X11 (KDE first) with a floating draw toolbar and QR code scanning"
 arch=('x86_64' 'aarch64')

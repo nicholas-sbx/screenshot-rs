@@ -154,7 +154,8 @@ finish $pid 3
 [ "$(md5sum < "$work/edit.png")" != "$before" ] && pass "editor saved the drawing" || fail "editor didn't save"
 expect_size "edited picture" "$work/edit.png" "256 256"
 
-# 4b. The picture on the clipboard, annotated: saved as a new capture.
+# 4b. The picture on the clipboard, annotated. It's in no file yet; with no
+# file dialog to ask where it goes, it's saved where a capture would be.
 wl-copy --type image/png < assets/flatshot-rs.png
 before=$(ls "$shots" | wc -l)
 $BIN --from-clipboard -v > "$work/clip-editor.log" 2>&1 &
@@ -164,6 +165,27 @@ $EX/inject move 700 500 key b drag 700 450 850 580 sleep 200 key ctrl+s sleep 40
 finish $pid 3
 [ $code = 0 ] && pass "clipboard picture's editor closed" || { fail "the clipboard picture's editor didn't close (exit $code)"; tail -n 5 "$work/clip-editor.log"; }
 [ $(( $(ls "$shots" | wc -l) - before )) = 1 ] && expect_size "clipboard picture saved as a capture" "$(newest)" "256 256" || fail "the clipboard picture wasn't saved in $shots"
+# 4c. With a file dialog (a stand-in portal's), Save asks where, and the
+# picture goes there: no name is made up for it.
+wl-copy --type image/png < assets/flatshot-rs.png
+before=$(ls "$shots" | wc -l)
+cat > "$work/clip-dialog.sh" <<SH
+#!/usr/bin/env bash
+FAKE_PORTAL_SAVE="$work/chosen.png" $EX/fake_portal > "$work/clip-portal.log" 2>&1 &
+sleep 0.4
+$BIN --from-clipboard -v > "$work/clip-dialog.log" 2>&1 &
+pid=\$!
+for _ in \$(seq 150); do grep -qE "first frame|painted" "$work/clip-dialog.log" && break; sleep 0.1; done
+$EX/inject move 700 500 key b drag 700 450 850 580 sleep 200 key ctrl+s sleep 800 key ctrl+w sleep 300
+for _ in \$(seq 30); do kill -0 \$pid 2>/dev/null || break; sleep 0.1; done
+kill \$pid 2>/dev/null
+kill %1 2>/dev/null
+SH
+chmod +x "$work/clip-dialog.sh"
+dbus-run-session -- "$work/clip-dialog.sh" 2>/dev/null || true
+grep -q 'portal: save file "Save as"' "$work/clip-portal.log" && pass "Save asked where the clipboard picture goes" || fail "no Save dialog asked: $(cat "$work/clip-portal.log")"
+expect_size "clipboard picture saved where the dialog said" "$work/chosen.png" "256 256"
+[ "$(ls "$shots" | wc -l)" = "$before" ] && pass "nothing saved under a name of its own" || fail "a file appeared in $shots: $(ls -t "$shots" | head -n1)"
 # Text on the clipboard: no picture to annotate (exit 1).
 printf 'just text' | wl-copy
 $BIN --from-clipboard > /dev/null 2>&1 && code=0 || code=$?

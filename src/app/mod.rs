@@ -106,9 +106,9 @@ pub struct App {
     recent: Option<recent::RecentWin>,
     /// a delayed capture counting down
     countdown: Option<countdown::Countdown>,
-    /// "Annotate clipboard image": the clipboard's picture being read (and
-    /// whether by wl-paste, the second try)
-    clipboard_image: Option<(crate::clipboard::Pasted, bool)>,
+    /// "Annotate clipboard image": the clipboard's picture being read
+    /// (whether by wl-paste, the second try, and the file -o named for it)
+    clipboard_image: Option<(crate::clipboard::Pasted, bool, Option<std::path::PathBuf>)>,
 }
 
 impl Painted for Session {
@@ -625,7 +625,7 @@ pub fn run_editor(args: &Args) -> i32 {
         Err(code) => return code,
     };
     if args.from_clipboard {
-        app.annotate_clipboard();
+        app.annotate_clipboard(args.output.as_ref().map(|o| std::path::PathBuf::from(config::expand_user(o))));
     } else {
         let Some(image) = &args.image else { return 2 };
         let path = std::path::PathBuf::from(config::expand_user(image));

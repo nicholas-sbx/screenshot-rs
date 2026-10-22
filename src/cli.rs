@@ -67,7 +67,7 @@ options:
                         save to this file instead of the screenshot folder ('-' writes PNG to stdout)
   -i FILE, --image FILE
                         open an image in the annotation editor (Save writes back to it, or to --output)
-  --from-clipboard      open the picture on the clipboard in the annotation editor
+  --from-clipboard      open the picture on the clipboard in the annotation editor (Save asks where, or writes to --output)
   --backend {{{backends}}}
                         screen capture helper (default: from settings, else auto)
   --no-copy             don't copy the result to the clipboard
