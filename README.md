@@ -80,6 +80,8 @@ Or `packaging/arch/PKGBUILD` with `makepkg`, or `packaging/build-packages.sh` (w
 
 **On KDE, the binary must be at `/usr/bin/flatshot-rs`** with `flatshot-rs-kwin.desktop` installed: KWin only lets programs named (by their full path) in such a desktop file use its screenshot API. Anywhere else Flatshot RS falls back to the screenshot portal or Spectacle, which are slower.
 
+**After an upgrade, restart the tray app** (tray menu → **Restart Flatshot RS**, or log out and in). The running one is still the old binary, which the upgrade deleted, and KWin no longer recognises it as `/usr/bin/flatshot-rs`. So captures go through the screenshot portal until it restarts: KDE asks for permission to take screenshots, the pointer is always in the picture, and captures are slower. This happens with any upgrade of Flatshot RS, including one in the same `pacman -Syu` as a Plasma update.
+
 ## Getting started
 
 1. Start **Flatshot RS** from the app menu. This runs `flatshot-rs --tray`, and the icon appears in the system tray.
