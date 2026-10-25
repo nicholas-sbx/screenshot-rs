@@ -109,6 +109,9 @@ pub struct App {
     /// "Annotate clipboard image": the clipboard's picture being read
     /// (whether by wl-paste, the second try, and the file -o named for it)
     clipboard_image: Option<(crate::clipboard::Pasted, bool, Option<std::path::PathBuf>)>,
+    /// that KWin's screenshot API didn't take the capture's screen, to say
+    /// once the capture is over
+    fallback_note: Option<crate::desktop::notify::Note>,
 }
 
 impl Painted for Session {
@@ -530,6 +533,7 @@ fn setup(started: Instant, output_file: Option<String>) -> Result<(App, EventLoo
         recent: None,
         countdown: None,
         clipboard_image: None,
+        fallback_note: None,
     };
     match queue {
         Some(mut queue) => {

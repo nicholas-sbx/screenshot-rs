@@ -78,9 +78,9 @@ sudo install -Dm644 assets/flatshot-rs.svg /usr/share/icons/hicolor/scalable/app
 
 Or `packaging/arch/PKGBUILD` with `makepkg`, or `packaging/build-packages.sh` (with [nfpm](https://nfpm.goreleaser.com)) for all three package formats.
 
-**On KDE, the binary must be at `/usr/bin/flatshot-rs`** with `flatshot-rs-kwin.desktop` installed: KWin only lets programs named (by their full path) in such a desktop file use its screenshot API. Anywhere else Flatshot RS falls back to the screenshot portal or Spectacle, which are slower.
+**On KDE, the binary must be at `/usr/bin/flatshot-rs`** with `flatshot-rs-kwin.desktop` installed: KWin only lets programs named (by their full path) in such a desktop file use its screenshot API. Anywhere else Flatshot RS falls back to the screenshot portal or Spectacle, which are slower, and says so in a notification after each capture (Settings → Capture → **Notify when KWin isn't used** turns it off).
 
-**After an upgrade, restart the tray app** (tray menu → **Restart Flatshot RS**, or log out and in). The running one is still the old binary, which the upgrade deleted, and KWin no longer recognises it as `/usr/bin/flatshot-rs`. So captures go through the screenshot portal until it restarts: KDE asks for permission to take screenshots, the pointer is always in the picture, and captures are slower. This happens with any upgrade of Flatshot RS, including one in the same `pacman -Syu` as a Plasma update.
+**After an upgrade, restart the tray app** (tray menu → **Restart Flatshot RS**, or log out and in). The running one is still the old binary, which the upgrade deleted, and KWin no longer recognises it as `/usr/bin/flatshot-rs`. So captures go through the screenshot portal until it restarts: KDE asks for permission to take screenshots, the pointer is always in the picture, and captures are slower. A notification after each capture says so, and to restart. This happens with any upgrade of Flatshot RS, including one in the same `pacman -Syu` as a Plasma update.
 
 ## Getting started
 

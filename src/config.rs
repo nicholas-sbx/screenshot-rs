@@ -83,6 +83,9 @@ pub struct Config {
     pub show_codes: bool,
     pub toolbar_follows_mouse: bool,
     pub backend: String,
+    /// On KDE Plasma, a notification after a capture that KWin's screenshot
+    /// API couldn't take (so another, slower way did).
+    pub notify_fallback: bool,
     /// "desktop": one picture of the whole desktop; "screens": each screen
     /// on its own, at its own scale, all at once.
     pub screenshot_method: String,
@@ -251,6 +254,7 @@ impl Config {
             show_codes: b("show_codes", true),
             toolbar_follows_mouse: b("toolbar_follows_mouse", true),
             backend: one_of(get_str(data, "backend"), BACKENDS, "auto"),
+            notify_fallback: b("notify_fallback", true),
             screenshot_method: one_of(get_str(data, "screenshot_method"), SCREENSHOT_METHODS, "screens"),
             include_pointer: b("include_pointer", false),
             region_pointer: one_of(get_str(data, "region_pointer"), REGION_POINTER, "hidden"),
@@ -312,6 +316,7 @@ impl Config {
         put("show_codes", self.show_codes.into());
         put("toolbar_follows_mouse", self.toolbar_follows_mouse.into());
         put("backend", self.backend.clone().into());
+        put("notify_fallback", self.notify_fallback.into());
         put("screenshot_method", self.screenshot_method.clone().into());
         put("include_pointer", self.include_pointer.into());
         put("region_pointer", self.region_pointer.clone().into());
@@ -608,7 +613,7 @@ mod tests {
     #[test]
     fn defaults_match_the_python_version() {
         let c = Config::from_map(&Map::new());
-        assert!(c.save_to_disk && c.notify && c.show_loupe && c.show_codes);
+        assert!(c.save_to_disk && c.notify && c.show_loupe && c.show_codes && c.notify_fallback);
         assert_eq!(c.filename, "Screenshot_%Y-%m-%d_%H-%M-%S");
         assert_eq!((c.quality, c.dim_opacity, c.loupe_size), (90, 60, 120));
         assert_eq!((c.clipboard.as_str(), c.open_after.as_str(), c.backend.as_str()), ("image", "none", "auto"));

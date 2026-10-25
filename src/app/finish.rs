@@ -70,11 +70,9 @@ impl App {
                 0
             }
             Outcome::Record(job) => {
-                if self.start_recording(*job) {
-                    0
-                } else {
-                    2
-                }
+                // (no notice of how the screen was taken: it would be in the video)
+                self.fallback_note = None;
+                if self.start_recording(*job) { 0 } else { 2 }
             }
             Outcome::Cancelled => 1,
             Outcome::Failed(e) => {
@@ -88,6 +86,11 @@ impl App {
     /// The session is over with `code`: a one-off capture exits once
     /// nothing is left for it to do.
     pub(super) fn ended(&mut self, code: i32) {
+        // (after the capture, not over it: how its screen was taken, when
+        // that wasn't as it should have been)
+        if let Some(note) = self.fallback_note.take() {
+            self.notify(note);
+        }
         if self.one_shot {
             self.finished = Some(code);
             if self.dpy.holds() {

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use super::recording::Recorder;
 use super::{App, layer_namespace, names_window};
 use crate::capture::{self, Grabbed, Plan};
+use crate::desktop::notify;
 use crate::geom::{IPoint, IRect};
 use crate::image::Image;
 use crate::platform::{Monitor, Owner};
@@ -118,6 +119,9 @@ pub(super) struct Pending {
     mode: Mode,
     monitors: Vec<Monitor>,
     plan: Plan,
+    /// the way meant to take it (the first to try)
+    intended: &'static str,
+    /// the way trying now
     backend: &'static str,
     pub(super) source: Source,
     /// the backends left to try if this one fails, and why the others did
@@ -166,6 +170,7 @@ impl App {
             both: !instant && self.cfg.region_pointer == "toggle",
         };
         let order = capture::backend_order(&self.cfg.backend, self.dpy.has_screencopy());
+        self.fallback_note = None;
         // Ask the compositor about its windows now, while they are as captured.
         self.desktop = None;
         self.desktop_rx = None;
@@ -191,7 +196,8 @@ impl App {
             }
             self.monitors = monitors.clone();
         }
-        let mut pending = Pending { job, mode, monitors, plan, backend: "none", source: Source::Screencopy, rest: order, errors: Vec::new() };
+        let intended = order.first().copied().unwrap_or("none");
+        let mut pending = Pending { job, mode, monitors, plan, intended, backend: "none", source: Source::Screencopy, rest: order, errors: Vec::new() };
         if mode == Mode::Window && !pending.job.record && pending.rest.first() == Some(&"kwin") && capture::kwin::available() {
             // KWin's picture of the window itself, where it gives one (else
             // it's cut from the desktop, as elsewhere).
@@ -336,6 +342,17 @@ impl App {
         }
         let detail = pictures.iter().map(|(p, _)| format!("{} × {}", p.width(), p.height())).collect::<Vec<_>>().join(", ");
         self.clock.step("screenshot", format!("{detail} via {}", p.backend));
+        // On KDE, KWin's screenshot API should have taken it: when it
+        // couldn't, the user is told (once the capture is over), unless
+        // they'd rather not be.
+        if p.intended == "kwin" && p.backend != "kwin" {
+            crate::timing::log(format!("KWin's screenshot API didn't take it: {}", p.errors.join("; ")));
+            if self.cfg.notify_fallback {
+                // (upgraded while running: KWin doesn't know the old program)
+                let replaced = std::env::current_exe().is_ok_and(|e| e.to_string_lossy().ends_with(" (deleted)"));
+                self.fallback_note = Some(fallback_note(p.backend, &p.errors, replaced));
+            }
+        }
         if p.mode != Mode::Region {
             let screens = p.monitors.into_iter().zip(pictures.into_iter().map(|(pic, _)| pic)).collect();
             self.taken = Some(Taken { job: p.job, mode: p.mode, screens, alone: None, wait_until: Instant::now() + DESKTOP_WAIT });
@@ -434,5 +451,61 @@ impl App {
         let code = self.deliver_image(image, shot, Some(area), remember, t.job.pin, None);
         crate::mem::trim();
         self.ended(code);
+    }
+}
+
+/// The notice that KWin's screenshot API couldn't take the screen on KDE,
+/// so `used` did (`errors`: why the ways before it failed; `replaced`:
+/// this program's file has been replaced since it started), what to do
+/// about it, and how not to be told again.
+fn fallback_note(used: &str, errors: &[String], replaced: bool) -> notify::Note {
+    let how = match used {
+        "screencopy" => "the compositor's screen copy",
+        "portal" => "the desktop's screenshot portal",
+        "spectacle" => "Spectacle",
+        other => other,
+    };
+    let (why, fix) = match errors.iter().find_map(|e| e.strip_prefix("kwin: ")) {
+        Some(e) if e.contains("refused") && replaced => {
+            ("KWin doesn't recognise this Flatshot RS since it was upgraded".to_string(), " Restart it (tray menu → Restart Flatshot RS) to fix this.")
+        }
+        Some(e) if e.contains("refused") => {
+            ("KWin lets only /usr/bin/flatshot-rs (with flatshot-rs-kwin.desktop installed) use its screenshot API".to_string(), "")
+        }
+        Some(e) if e.contains("isn't there") => ("KWin's screenshot API isn't there".to_string(), ""),
+        Some(e) => (format!("KWin's screenshot API failed ({})", crate::util::elide(e, 160)), ""),
+        None => ("KWin's screenshot API couldn't take it".to_string(), ""),
+    };
+    notify::Note {
+        summary: "Screenshot taken without KWin".into(),
+        body: format!("{why}, so {how} took it instead, which is slower.{fix} You can turn this off in Settings → Capture → Notify when KWin isn't used."),
+        event: "fallback",
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_fallback_notice_says_why() {
+        let refusal = ["kwin: KWin refused the screenshot (AccessDenied): is its desktop file installed?".to_string()];
+        let refused = fallback_note("portal", &refusal, false);
+        assert_eq!(refused.event, "fallback");
+        assert!(
+            refused.body.starts_with("KWin lets only /usr/bin/flatshot-rs") && refused.body.contains("so the desktop's screenshot portal took it"),
+            "{}",
+            refused.body
+        );
+        assert!(refused.body.ends_with("Settings → Capture → Notify when KWin isn't used."), "{}", refused.body);
+        // Upgraded while running: KWin refuses the old program; restarting fixes it.
+        let upgraded = fallback_note("portal", &refusal, true);
+        assert!(upgraded.body.starts_with("KWin doesn't recognise this Flatshot RS since it was upgraded, so the desktop's"), "{}", upgraded.body);
+        assert!(upgraded.body.contains("slower. Restart it (tray menu → Restart Flatshot RS) to fix this. You can turn"), "{}", upgraded.body);
+        let gone = fallback_note("spectacle", &["kwin: KWin's screenshot API isn't there: ServiceUnknown".into(), "portal: no portal".into()], true);
+        assert!(gone.body.starts_with("KWin's screenshot API isn't there, so Spectacle took it"), "{}", gone.body);
+        let other = fallback_note("screencopy", &["kwin: short picture from KWin (3 of 4 bytes)".into()], false);
+        assert!(other.body.starts_with("KWin's screenshot API failed (short picture from KWin (3 of 4 bytes)), so the compositor's"), "{}", other.body);
     }
 }
