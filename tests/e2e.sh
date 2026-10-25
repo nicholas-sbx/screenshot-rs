@@ -327,6 +327,43 @@ PY
 [ "$(ring "$work/dial.png" 2>/dev/null || echo 0)" -gt 50 ] && pass "the countdown shows on screen" || fail "no countdown on screen ($(ring "$work/dial.png" 2>/dev/null || echo none) ring pixels)"
 [ "$(ring "$work/delayed.png" 2>/dev/null || echo 1)" = 0 ] && pass "the countdown isn't in the capture" || fail "the countdown is in the capture"
 
+# Counting down before a recording: the overlay is gone at once, so a click
+# in the area goes to the desktop (and the countdown goes on); its dial is
+# over the area, the bar under it one button that cancels it.
+countdown() {
+    python3 - "$XDG_CONFIG_HOME/flatshot-rs/config.json" "$1" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["record_countdown"] = int(sys.argv[2]); json.dump(c, open(sys.argv[1], "w"))
+PY
+}
+countdown 6
+before=$(ls "$work/videos" | wc -l)
+rm -f "$work/record.code"
+record FLATSHOT_RECORDER=wf-recorder
+grim -g "548,348 104x104" "$work/counting.png" 2>/dev/null || true
+# (the overlay framed the area: halfway down its left edge, that's gone)
+grim -g "294,396 10x8" "$work/area-edge.png" 2>/dev/null || true
+[ "$(ring "$work/area-edge.png" 2>/dev/null || echo 1)" = 0 ] && pass "the overlay is gone while it counts down" || fail "the overlay is still up during the countdown"
+$EX/inject move 600 400 sleep 100 click 600 400 sleep 400
+[ ! -s "$work/record.code" ] && pass "a click in the area goes to the desktop, and it counts on" || fail "a click in the area ended the countdown"
+[ "$(ring "$work/counting.png" 2>/dev/null || echo 0)" -gt 50 ] && pass "the countdown shows over the area" || fail "no countdown over the area"
+$EX/inject move 600 641 sleep 200 click 600 641
+for _ in $(seq 100); do [ -s "$work/record.code" ] && break; sleep 0.1; done
+[ "$(cat "$work/record.code" 2>/dev/null)" = 1 ] && [ "$(ls "$work/videos" | wc -l)" = "$before" ] && pass "the bar cancels the countdown" \
+    || { fail "cancelling the countdown: exit $(cat "$work/record.code" 2>/dev/null)"; cat "$work/record.log"; }
+# Once it's over, the bar is the recording's (the same size: stop is where
+# it always is), and the dial isn't in the video.
+countdown 2
+rm -f "$work/record.code"
+record FLATSHOT_RECORDER=wf-recorder
+sleep 2
+$EX/inject move 641 641 sleep 200 click 641 641
+for _ in $(seq 100); do [ -s "$work/record.code" ] && break; sleep 0.1; done
+[ "$(cat "$work/record.code" 2>/dev/null)" = 0 ] && pass "recorded after the countdown" || { fail "recording after the countdown: exit $(cat "$work/record.code" 2>/dev/null)"; cat "$work/record.log"; }
+ffmpeg -v error -y -i "$(newest_video)" -frames:v 1 "$work/first-frame.png" 2>/dev/null || true
+[ "$(ring "$work/first-frame.png" 2>/dev/null || echo 1)" = 0 ] && pass "the countdown isn't in the video" || fail "the countdown is in the video"
+countdown 0
+
 # Beautify after capture: on the last style's background (64 px padding).
 python3 - "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<'PY'
 import json, sys

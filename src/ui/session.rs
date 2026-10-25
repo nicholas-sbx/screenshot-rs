@@ -33,9 +33,6 @@ use crate::ui::widgets::Look;
 pub const RECORD_FORMATS: &[(&str, &str)] = &[("mp4", "MP4"), ("webm", "WebM"), ("gif", "GIF")];
 const SCAN_AFTER: Duration = Duration::from_millis(60);
 const RAINBOW_EVERY: Duration = Duration::from_millis(50);
-/// How often the countdown's ring moves on where the display doesn't pace
-/// it (X11; on Wayland each frame shown asks for the next).
-const COUNTDOWN_FRAME: Duration = Duration::from_millis(16);
 /// How long the toolbar waits to learn which monitor the pointer is on
 /// before it shows on the primary one.
 const TOOLBAR_WAIT: Duration = Duration::from_millis(300);
@@ -103,6 +100,9 @@ pub struct RecordJob {
     pub mic: bool,
     pub system_audio: bool,
     pub cursor: bool,
+    /// seconds to count down first (on the desktop itself: the overlay's
+    /// gone by then, so everything can be got ready)
+    pub countdown: u32,
 }
 
 /// How a session ended.
@@ -178,10 +178,6 @@ enum Background {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Timer {
-    /// the countdown's end: recording starts
-    Countdown,
-    /// the countdown's ring moved on (where frames don't come by themselves)
-    CountdownFrame,
     Rainbow,
     Scan,
     Toolbar,
@@ -263,8 +259,6 @@ pub struct Session {
     primary: usize,
     timers: Vec<(Instant, Timer)>,
     started: Instant,
-    /// when the countdown before recording began
-    countdown_began: Option<Instant>,
     pub clock: Clock,
     tx: mpsc::Sender<Background>,
     rx: mpsc::Receiver<Background>,
@@ -342,7 +336,6 @@ impl Session {
             primary: primary.min(n.saturating_sub(1)),
             timers: Vec::new(),
             started: Instant::now(),
-            countdown_began: None,
             clock: Clock::new(what),
             tx,
             rx,
@@ -454,7 +447,6 @@ impl Session {
             }
             if self.st.tool == Tool::Record
                 && ov.sel_origin.is_none()
-                && self.st.countdown.is_none()
                 && let Some(h) = ov.cursor_pos.and_then(|p| ov.handle_at(&self.st, p))
             {
                 return handle_cursor(h);
@@ -512,8 +504,6 @@ impl Session {
 
     /// Work done in the background (codes found, edge maps) is ready.
     pub fn poll(&mut self) {
-        // (each frame: the countdown's ring where it is now)
-        self.count_down(Instant::now());
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Background::Codes(o, codes) => self.codes_found(o, codes),
@@ -537,13 +527,6 @@ impl Session {
                 return;
             }
             match t {
-                Timer::Countdown => self.tick(),
-                Timer::CountdownFrame => {
-                    self.count_down(now);
-                    if self.st.countdown.is_some() {
-                        self.schedule(Timer::CountdownFrame, COUNTDOWN_FRAME);
-                    }
-                }
                 Timer::Rainbow => {
                     self.st.rainbow_t = now.duration_since(self.started).as_secs_f32();
                     self.schedule(Timer::Rainbow, RAINBOW_EVERY);
@@ -832,9 +815,6 @@ impl Session {
             self.escape_down = !press.repeat || self.escape_down;
             return;
         }
-        if self.st.countdown.is_some() {
-            return;
-        }
         if self.st.tool == Tool::Select
             && let Some(so) = self.selected_on()
         {
@@ -848,7 +828,7 @@ impl Session {
         let save_keys = ctrl && (press.key == key::S || press.key == key::C);
         if self.st.tool == Tool::Record && enter {
             if self.st.rec_area.is_some() {
-                self.start_countdown();
+                self.confirm_recording();
             } else {
                 self.whole_screen(target);
             }
@@ -867,9 +847,7 @@ impl Session {
             return;
         }
         self.escape_down = false;
-        if self.st.countdown.is_some() {
-            self.cancel_countdown();
-        } else if self.st.eyedropper {
+        if self.st.eyedropper {
             self.close_picker(); // (its hint says Esc stops it)
         } else {
             self.close_picker(); // it closes, and Esc still does what it does
@@ -969,10 +947,9 @@ impl Session {
 
     fn sync_toolbars(&mut self) {
         let dragging = self.overlays.iter().any(|o| o.sel_rect.is_some());
-        let countdown = self.st.countdown.is_some();
         let target = self.st.toolbar_overlay;
         for (i, o) in self.overlays.iter_mut().enumerate() {
-            o.toolbar_visible = o.toolbar.is_some() && target == Some(i) && !dragging && !countdown;
+            o.toolbar_visible = o.toolbar.is_some() && target == Some(i) && !dragging;
         }
     }
 
@@ -1463,60 +1440,17 @@ impl Session {
         }
     }
 
-    fn start_countdown(&mut self) {
-        if self.done || self.st.rec_area.is_none() || self.st.countdown.is_some() {
+    /// Record the area chosen, if this desktop can (else say what's missing).
+    /// Any countdown happens after the overlay is gone, on the desktop
+    /// itself, so the windows to record can be got ready meanwhile.
+    fn confirm_recording(&mut self) {
+        if self.done || self.st.rec_area.is_none() {
             return;
         }
         if let Some(problem) = self.record_problem() {
             self.st.hint = Some(problem);
             return;
         }
-        if self.st.cfg.record_countdown <= 0 {
-            self.start_recording();
-            return;
-        }
-        let total = self.st.cfg.record_countdown;
-        (self.st.countdown, self.st.countdown_ring, self.countdown_began) = (Some(total), 1.0, Some(Instant::now()));
-        // (nothing is chosen any more: the window that was under the pointer goes)
-        for o in 0..self.overlays.len() {
-            self.update_hover(o);
-        }
-        self.schedule(Timer::Countdown, Duration::from_secs(total as u64));
-        self.schedule(Timer::CountdownFrame, COUNTDOWN_FRAME);
-        self.refresh();
-    }
-
-    fn cancel_countdown(&mut self) -> bool {
-        if self.st.countdown.is_none() {
-            return false;
-        }
-        self.timers.retain(|t| !matches!(t.1, Timer::Countdown | Timer::CountdownFrame));
-        (self.st.countdown, self.countdown_began) = (None, None);
-        self.refresh();
-        true
-    }
-
-    /// The countdown as of `now`: its ring running down smoothly, its
-    /// number a whole second at a time.
-    fn count_down(&mut self, now: Instant) {
-        let (Some(n), Some(began)) = (self.st.countdown, self.countdown_began) else { return };
-        let total = self.st.cfg.record_countdown.max(1) as f32;
-        let left = (total - now.saturating_duration_since(began).as_secs_f32()).max(0.0);
-        self.st.countdown_ring = left / total;
-        let shown = (left.ceil() as i64).max(1);
-        if shown != n {
-            self.st.countdown = Some(shown);
-            self.refresh();
-        }
-    }
-
-    /// The countdown's end: recording starts.
-    fn tick(&mut self) {
-        if self.st.countdown.take().is_none() {
-            return;
-        }
-        self.countdown_began = None;
-        self.timers.retain(|t| t.1 != Timer::CountdownFrame);
         self.start_recording();
     }
 
@@ -1561,6 +1495,7 @@ impl Session {
             mic: cfg.record_mic,
             system_audio: cfg.record_system_audio,
             cursor: cfg.record_cursor,
+            countdown: cfg.record_countdown.clamp(0, 10) as u32,
         };
         let rate = if job.fps > 0 { format!("{} fps", job.fps) } else { "native frame rate".into() };
         self.clock.step("recording area chosen", format!("{} × {}, {}, {rate}", area.w, area.h, job.format));
@@ -2075,7 +2010,7 @@ impl Session {
     /// Under the area chosen for recording, else above it, else inside: on
     /// the monitor with most of it.
     fn place_panel(&mut self, o: usize) {
-        if self.st.rec_area.is_none() || o != self.st.rec_home || self.st.area_moving || self.st.countdown.is_some() {
+        if self.st.rec_area.is_none() || o != self.st.rec_home || self.st.area_moving {
             return;
         }
         let formats: Vec<(String, String, bool)> = RECORD_FORMATS.iter().map(|(v, l)| (v.to_string(), l.to_string(), self.problem_for(v).is_none())).collect();
@@ -2632,7 +2567,7 @@ impl Session {
     fn panel_click(&mut self, id: &str) {
         let cfg = &self.st.cfg;
         match id {
-            "record" => self.start_countdown(),
+            "record" => self.confirm_recording(),
             "mic" => self.set_record_option(RecordOption::Mic(!cfg.record_mic)),
             "system" => self.set_record_option(RecordOption::SystemAudio(!cfg.record_system_audio)),
             "cursor" => self.set_record_option(RecordOption::Cursor(!cfg.record_cursor)),
@@ -2652,7 +2587,7 @@ impl Session {
 
     fn canvas_press(&mut self, o: usize, button: Button, pos: Point, mods: i32) {
         if button == Button::Right {
-            if !(self.cancel_countdown() || self.close_picker() || self.cancel_gesture(o) || self.cancel_area()) {
+            if !(self.close_picker() || self.cancel_gesture(o) || self.cancel_area()) {
                 self.cancel();
             }
             return;
@@ -2685,9 +2620,6 @@ impl Session {
         // typed and starts another there)
         self.commit_text();
         let tool = self.st.tool;
-        if tool == Tool::Record && self.st.countdown.is_some() {
-            return;
-        }
         // (the area's handles and inside, from whichever monitor they're on)
         let handle = if tool == Tool::Record { self.overlays[o].handle_at(&self.st, pos) } else { None };
         if let Some(h) = handle

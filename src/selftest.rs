@@ -710,7 +710,7 @@ fn codes_on_demand(tmp: &Path, desktop: Arc<Image>) -> R {
     Ok(())
 }
 
-/// Recording: choose an area, the panel's options, the countdown, the job.
+/// Recording: choose an area, the panel's options, the job (with its countdown).
 fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     let mut cfg = test_config(tmp);
     cfg.record_countdown = 2;
@@ -758,25 +758,12 @@ fn recording(tmp: &Path, out: &Option<PathBuf>, desktop: Arc<Image>) -> R {
     check!(!s.done && s.overlays[0].area(&s.st).is_none() && !s.st.rec_area.is_some());
     drag(&mut s, 0, Point::new(200.0, 200.0), Point::new(700.0, 500.0), 0);
     tap(&mut s, 0, key::RETURN, "", 0);
-    check!(s.st.countdown == Some(2), "{:?}", s.st.countdown);
-    check!(!s.overlays[0].toolbar_visible, "the toolbar shows during the countdown");
-    save_png(&frame(&mut s, 0)?, out, "overlay-countdown.png")?;
-    let full = frame(&mut s, 0)?;
-    // The ring runs down smoothly in between, the number a whole second at a time.
-    s.on_timer(Instant::now() + Duration::from_millis(500));
-    // (half a second on, and the time the frames took: neither full nor a whole second's worth gone)
-    check!(s.st.countdown == Some(2) && (0.55..0.76).contains(&s.st.countdown_ring), "{:?} {}", s.st.countdown, s.st.countdown_ring);
-    let later = frame(&mut s, 0)?;
-    save_png(&later, out, "overlay-countdown-later.png")?;
-    // (the area's middle is (450, 350), the ring 76 out: gone from its top going left,
-    // past 45° up there, still lit round the right)
-    check!(full.pixel(396, 296) != later.pixel(396, 296) && full.pixel(526, 350) == later.pixel(526, 350), "the ring didn't run down");
-    s.on_timer(Instant::now() + Duration::from_secs(1));
-    check!(s.st.countdown == Some(1));
-    s.on_timer(Instant::now() + Duration::from_secs(3));
+    // The overlay's gone at once: the countdown is on the desktop itself
+    // (the app's), so the windows to record can be got ready meanwhile.
+    check!(s.done, "the overlay stays for the countdown");
     match s.take_outcome() {
         Some(Outcome::Record(job)) => {
-            check!(job.area == IRect::new(200, 200, 500, 300) && job.fps == 60 && job.shot.mode == "region", "{job:?}");
+            check!(job.area == IRect::new(200, 200, 500, 300) && job.fps == 60 && job.countdown == 2 && job.shot.mode == "region", "{job:?}");
             check!(job.thumbnail.size() == (500, 300));
             // (and its picture has no drawings, as the video won't)
             check!(job.thumbnail.pixel(125, 125) == desktop.pixel(325, 325), "the drawing is in the recording's picture");
@@ -1144,17 +1131,15 @@ fn record_across_monitors(tmp: &Path) -> R {
     // A click there chooses the window instead.
     click(&mut s, 0, Point::new(200.0, 400.0), 0);
     check!(s.st.rec_area == Some(Rect::new(100.0, 300.0, 300.0, 200.0)) && s.st.rec_home == 0, "{:?}", s.st.rec_area);
-    // Counting down, nothing else is chosen.
+    // Enter hands it over at once, the countdown to come with it.
     let mut cfg = s.st.cfg.clone();
     cfg.record_countdown = 3;
     s.st.cfg = cfg;
-    s.pointer_motion(0, Point::new(600.0, 100.0), 0, false);
     tap(&mut s, 0, key::RETURN, "", 0);
-    s.pointer_motion(0, Point::new(200.0, 400.0), 0, false);
-    check!(
-        s.st.countdown.is_some() && s.overlays[0].hover_window.is_none() && s.overlays[0].loupe_at(&s.st).is_none(),
-        "something can be chosen during the countdown"
-    );
+    match s.take_outcome() {
+        Some(Outcome::Record(job)) => check!(job.countdown == 3 && job.area == IRect::new(100, 300, 300, 200), "{job:?}"),
+        other => return Err(format!("recording gave {other:?}")),
+    }
     Ok(())
 }
 

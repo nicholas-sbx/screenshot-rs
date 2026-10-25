@@ -16,7 +16,7 @@ use crate::geom::{Damage, IPoint, IRect, Point, Rect};
 use crate::image::{self, Canvas, Image};
 use crate::render::Painter;
 use crate::render::paint::{Align, Pen};
-use crate::render::text::{self, BOLD, DEMIBOLD, MEDIUM};
+use crate::render::text::{self, DEMIBOLD, MEDIUM};
 use crate::render::theme::{self, Color};
 use crate::ui::panels::{CodeChip, ColorPicker, RecordPanel};
 use crate::ui::selection::Selection;
@@ -280,7 +280,7 @@ impl Overlay {
 
     /// Does this monitor show the recording panel?
     pub fn panel_shown(&self, st: &State) -> bool {
-        st.rec_area.is_some() && st.rec_home == self.index && !st.area_moving && st.countdown.is_none() && self.panel.is_some()
+        st.rec_area.is_some() && st.rec_home == self.index && !st.area_moving && self.panel.is_some()
     }
 
     /// Which handle of the recording area is at `at`, or Move inside it
@@ -554,12 +554,7 @@ impl Overlay {
             elements.push(Element { id: Id::Selection, bounds: b, key: hash(&(rect_key(sel), &label, st.theme_key)) });
         } else if let Some(r) = self.area(st) {
             elements.push(Element { id: Id::Area, bounds: self.dev(r.adjusted(-2.0, -2.0, 2.0, 2.0), 2), key: hash(&(rect_key(r), st.theme_key)) });
-            if let Some(n) = st.countdown {
-                let size = 56f32.max(140f32.min(r.w * 0.6).min(r.h * 0.6));
-                let bx = Rect::new(r.center().x - size / 2.0, r.center().y - size / 2.0, size, size);
-                let ring = (st.countdown_ring * RING_STEPS).round() as i32;
-                elements.push(Element { id: Id::Countdown, bounds: self.dev(bx.adjusted(-9.0, -9.0, 9.0, 9.0), 2), key: hash(&(n, ring)) });
-            } else if !st.area_moving {
+            if !st.area_moving {
                 elements.push(Element {
                     id: Id::Handles,
                     bounds: self.dev(r.adjusted(-HANDLE, -HANDLE, HANDLE, HANDLE), 2),
@@ -654,7 +649,7 @@ impl Overlay {
     /// the window under the pointer show. Not while the area to record
     /// counts down or is moved, nor over it (its handles move and resize it).
     pub fn picking(&self, st: &State) -> bool {
-        st.tool.picks_area() && st.countdown.is_none() && !st.area_moving && !self.cursor_pos.is_some_and(|p| self.handle_at(st, p).is_some())
+        st.tool.picks_area() && !st.area_moving && !self.cursor_pos.is_some_and(|p| self.handle_at(st, p).is_some())
     }
 
     /// The window under the pointer here, else (across monitors) the one
@@ -906,9 +901,7 @@ impl Overlay {
             }
         } else if let Some(r) = self.area(st) {
             p.stroke_rect(r.adjusted(-1.0, -1.0, 1.0, 1.0), Pen::new(c.accent, 2.0));
-            if let Some(n) = st.countdown {
-                paint_countdown(&mut p, r, n, st.countdown_ring);
-            } else if !st.area_moving {
+            if !st.area_moving {
                 for x in [r.left(), r.center().x, r.right()] {
                     for y in [r.top(), r.center().y, r.bottom()] {
                         if (x, y) != (r.center().x, r.center().y) {
@@ -1255,28 +1248,6 @@ fn cut(r: R4, hole: R4) -> Vec<R4> {
     out
 }
 
-/// The steps the countdown's ring is drawn in, round the whole of it (a
-/// quarter of a degree: well under a pixel, so it runs down smoothly).
-const RING_STEPS: f32 = 1440.0;
-
-/// The countdown before recording, in the middle of the area: the seconds
-/// left, and a ring of how much of it is left (`ring`, 1 to 0).
-fn paint_countdown(p: &mut Painter<'_>, r: Rect, n: i64, ring: f32) {
-    let c = theme::c();
-    let size = 56f32.max(140f32.min(r.w * 0.6).min(r.h * 0.6));
-    let bx = Rect::new(r.center().x - size / 2.0, r.center().y - size / 2.0, size, size);
-    p.fill_ellipse(bx, c.base);
-    let sweep = 360.0 * (ring * RING_STEPS).round() / RING_STEPS;
-    if sweep > 0.0 {
-        let mut pb = tiny_skia::PathBuilder::new();
-        crate::render::icons::arc_to(&mut pb, bx.adjusted(-6.0, -6.0, 6.0, 6.0), 90.0, -sweep, true);
-        if let Some(path) = pb.finish() {
-            p.stroke_path(&path, Pen::new(c.accent, 4.0));
-        }
-    }
-    p.draw_text(bx, Align::Center, &n.to_string(), text::font((size / 2.0).round(), BOLD), c.text);
-}
-
 /// The green box round a code: padded in proportion to its size.
 pub fn code_box(poly: &[Point]) -> Rect {
     let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
@@ -1393,9 +1364,6 @@ pub fn with_keys(text: &str, keymap: &crate::keys::Keymap) -> String {
 
 fn hint_text(st: &State, o: &Overlay) -> String {
     if st.tool == Tool::Record {
-        if let Some(n) = st.countdown {
-            return format!("Recording starts in {n}  ·  Esc to cancel");
-        }
         if let Some(h) = &st.hint {
             return h.clone();
         }
@@ -1563,7 +1531,6 @@ enum Id {
     Selection,
     Area,
     Handles,
-    Countdown,
     CrossV,
     CrossH,
     Loupe,

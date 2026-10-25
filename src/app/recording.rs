@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use calloop::generic::Generic;
 use calloop::{Interest, Mode as PollMode, PostAction};
 
+use super::countdown::{self, DialPaint};
 use super::tray::NoteTarget;
 use super::{App, Input};
 use crate::clipboard::TEXT_MIMES;
@@ -52,6 +53,7 @@ pub struct Recorder {
 
 impl RecordSupport for Recorder {
     fn problem(&mut self, format: &str) -> Option<String> {
+        warm_up(); // (by the time an area is chosen, the GPU's encoders are known)
         record::problem(self.how, format)
     }
     fn can_span(&self) -> bool {
@@ -59,32 +61,39 @@ impl RecordSupport for Recorder {
     }
 }
 
-/// Find out in the background which GStreamer parts are installed, so the
-/// overlay's record tool doesn't wait for it.
+/// Find out in the background which GStreamer parts are installed (the
+/// GPU's encoders too), so neither the overlay's record tool nor a
+/// recording's start waits for it. Once a run.
 pub fn warm_up() {
-    let how = record::method();
-    if !matches!(how, Method::Portal | Method::TestGst) || !util::have("gst-inspect-1.0") {
-        return;
-    }
-    let elements = [
-        "pipewiresrc",
-        "x264enc",
-        "openh264enc",
-        "h264parse",
-        "vp8enc",
-        "videoconvert",
-        "videocrop",
-        "videorate",
-        "videoscale",
-        "mp4mux",
-        "webmmux",
-        "pulsesrc",
-        "opusenc",
-        "avenc_aac",
-    ];
-    for e in elements {
-        let _ = std::thread::Builder::new().name("flatshot-gst".into()).spawn(move || record::gst_has(e));
-    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let how = record::method();
+        if !matches!(how, Method::Portal | Method::TestGst) || !util::have("gst-inspect-1.0") {
+            return;
+        }
+        let elements = [
+            "pipewiresrc",
+            "x264enc",
+            "openh264enc",
+            "h264parse",
+            "vp8enc",
+            "videoconvert",
+            "videocrop",
+            "videorate",
+            "videoscale",
+            "mp4mux",
+            "webmmux",
+            "pulsesrc",
+            "opusenc",
+            "avenc_aac",
+            "vah264enc",
+            "vah264lpenc",
+            "nvh264enc",
+        ];
+        for e in elements {
+            let _ = std::thread::Builder::new().name("flatshot-gst".into()).spawn(move || record::gst_has(e));
+        }
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,11 +144,18 @@ pub struct Recording {
     cfg: Config,
     shot: Shot,
     thumbnail: Option<Image>,
-    /// when the first segment may start (the overlays gone by then)
+    /// when the first segment may start (the overlays gone by then, and
+    /// the countdown over)
     start_at: Option<Instant>,
+    /// the countdown before it: when it began, and how long it is
+    counting: Option<(Instant, Duration)>,
     cast: Option<Arc<ScreenCast>>,
+    /// the screen cast has been asked for
+    cast_asked: bool,
     cast_rx: Option<mpsc::Receiver<Result<ScreenCast, Failure>>>,
     proc: Option<Child>,
+    /// it encodes with the GPU
+    gpu: bool,
     /// the recorder's process descriptor is watched by the event loop
     watched: bool,
     /// it didn't stop when asked, and was killed
@@ -225,7 +241,7 @@ fn place(src: &Path, target: &Path) -> Result<PathBuf, String> {
 impl Recording {
     /// `refresh`: how often the area's monitor shows a new picture, if known.
     pub fn new(job: RecordJob, monitors: &[Monitor], refresh: Option<f64>, cfg: Config, waker: Waker) -> Result<Recording, String> {
-        let RecordJob { area, output, scale, shot, thumbnail, format, fps, mic, system_audio, cursor } = job;
+        let RecordJob { area, output, scale, shot, thumbnail, format, fps, mic, system_audio, cursor, countdown } = job;
         let target = Target {
             rect: area,
             monitor: output.rect,
@@ -236,6 +252,7 @@ impl Recording {
         };
         // (0: native)
         let opts = Options { format, fps: (fps > 0).then(|| fps.clamp(1, 120) as u32), mic, system_audio, cursor };
+        let (now, countdown) = (Instant::now(), Duration::from_secs(countdown.into()));
         Ok(Recording {
             state: State::Starting,
             target,
@@ -245,10 +262,13 @@ impl Recording {
             shot,
             // (only a small copy is kept while recording)
             thumbnail: small_thumbnail(thumbnail),
-            start_at: Some(Instant::now() + SETTLE),
+            start_at: Some(now + countdown.max(SETTLE)),
+            counting: (!countdown.is_zero()).then_some((now, countdown)),
             cast: None,
+            cast_asked: false,
             cast_rx: None,
             proc: None,
+            gpu: false,
             watched: false,
             killed: false,
             lost: false,
@@ -280,6 +300,19 @@ impl Recording {
 
     pub fn elapsed(&self) -> Duration {
         self.recorded + self.segment_start.map(|t| t.elapsed()).unwrap_or_default()
+    }
+
+    /// When the countdown before recording ends, while it runs.
+    pub fn countdown_end(&self) -> Option<Instant> {
+        let (began, total) = self.counting?;
+        (self.state == State::Starting && Instant::now() < began + total).then_some(began + total)
+    }
+
+    /// The countdown, while it runs: the seconds left (as shown), and how
+    /// much of it is left (1 to 0).
+    pub fn countdown(&self) -> Option<(u64, f32)> {
+        let end = self.countdown_end()?;
+        Some(countdown::dial_shows(end.saturating_duration_since(Instant::now()), self.counting?.1))
     }
 
     // -- control -------------------------------------------------------------------------
@@ -348,6 +381,7 @@ impl Recording {
         };
         drop(launch.stream); // (the recorder has its own)
         self.stop_signal = launch.stop;
+        self.gpu = launch.gpu;
         self.segments.push(path);
         self.segment_start = Some(Instant::now());
         self.proc = Some(child);
@@ -430,6 +464,16 @@ impl Recording {
             && let Some(last) = self.segments.pop()
         {
             let _ = fs::remove_file(last);
+            // The GPU's encoder didn't start (a driver that can't, a size it
+            // won't take): the CPU's, from now on, and this recording goes
+            // on with it. (Only at the start: parts made by different
+            // encoders may not join.)
+            if self.gpu && self.segments.is_empty() && self.state == State::Recording {
+                crate::warn!("the GPU's video encoder didn't start, so the CPU's records instead: {}", self.log_tail());
+                record::gpu_failed();
+                self.recorded = Duration::ZERO;
+                return self.begin_segment();
+            }
         }
         if self.state == State::Recording && self.has_video() {
             crate::warn!("the recorder stopped by itself: {}", self.log_tail());
@@ -464,7 +508,10 @@ impl Recording {
         match answer {
             Ok(cast) => {
                 self.cast = Some(Arc::new(cast));
-                self.begin_segment();
+                // (else once the countdown's over)
+                if self.start_at.is_none() {
+                    self.begin_segment();
+                }
             }
             Err(Failure::Cancelled) => self.done(End::Discarded),
             Err(Failure::Failed(e)) => self.fail(e),
@@ -601,6 +648,10 @@ impl Drop for Recording {
 /// A recording, and its controls on screen.
 pub struct RecordingRun {
     pub rec: Recording,
+    /// the bar and marks have been put up (for the countdown, or since it started)
+    controls: bool,
+    /// the countdown's dial over the area: the scale it was drawn at, and what it showed
+    dial: Option<(f32, Option<countdown::Shows>)>,
     bar: Option<RecBar>,
     /// the bar's monitor and place on it (logical), as a layer surface
     bar_place: Option<(Monitor, (i32, i32))>,
@@ -660,7 +711,12 @@ impl App {
             return false;
         }
         let monitors = self.dpy.monitors();
-        let refresh = monitors.iter().find(|m| m.name == job.output.name).and_then(|m| self.dpy.refresh_rate(m));
+        // (an area across monitors: the fastest of them)
+        let refresh = monitors
+            .iter()
+            .filter(|m| m.name == job.output.name || m.rect.intersects(&job.area))
+            .filter_map(|m| self.dpy.refresh_rate(m))
+            .max_by(f64::total_cmp);
         let rec = match Recording::new(job, &monitors, refresh, self.cfg.clone(), self.waker.clone()) {
             Ok(r) => r,
             Err(e) => {
@@ -668,7 +724,16 @@ impl App {
                 return false;
             }
         };
-        self.recording = Some(RecordingRun { rec, bar: None, bar_place: None, bar_drag: None, marks: Vec::new(), shown: String::new() });
+        let counting = rec.countdown().is_some();
+        self.recording =
+            Some(RecordingRun { rec, controls: false, dial: None, bar: None, bar_place: None, bar_drag: None, marks: Vec::new(), shown: String::new() });
+        if counting {
+            // Counting down: the bar (one button, that cancels it) and the
+            // marks show where it'll be, the dial in the middle; none of
+            // them takes the keyboard, and only the bar the pointer.
+            self.show_controls();
+            self.show_dial();
+        }
         self.recording_changed();
         self.refresh_tray_menu();
         true
@@ -687,33 +752,51 @@ impl App {
     }
 
     pub(super) fn recording_deadline(&self) -> Option<Instant> {
-        self.recording.as_ref().and_then(|r| r.rec.next_deadline())
+        let r = self.recording.as_ref()?;
+        let next = r.rec.next_deadline();
+        let Some(end) = r.rec.countdown_end() else { return next };
+        // Counting down: its ring runs on (where frames don't come by
+        // themselves), and the dial goes a moment before the end.
+        let mut tick = Instant::now() + countdown::FRAME;
+        if r.dial.is_some() {
+            tick = tick.min(end.checked_sub(countdown::GONE_BEFORE).unwrap_or(end));
+        }
+        Some(next.map_or(tick, |n| n.min(tick)))
     }
 
     /// Start what's due, hear the recorder, the portal and the saving.
     pub(super) fn poll_recording(&mut self) {
         let Some(r) = &mut self.recording else { return };
         let rec = &mut r.rec;
+        // The screen cast is asked for at once: the desktop may ask which
+        // screen to share, which can be answered while it counts down.
+        if rec.how == Method::Portal && !rec.cast_asked && rec.state == State::Starting {
+            rec.cast_asked = true;
+            let (tx, rx) = mpsc::channel();
+            let (target, cursor, waker) = (rec.target.clone(), rec.opts.cursor, self.waker.clone());
+            let spawned = std::thread::Builder::new().name("flatshot-screencast".into()).spawn(move || {
+                let _ = tx.send(ScreenCast::open(&target, cursor));
+                waker();
+            });
+            match spawned {
+                Ok(_) => rec.cast_rx = Some(rx),
+                Err(e) => rec.fail(e.to_string()),
+            }
+        }
         if rec.start_at.is_some_and(|t| t <= Instant::now()) {
             rec.start_at = None;
-            if rec.how == Method::Portal {
-                let (tx, rx) = mpsc::channel();
-                let (target, cursor, waker) = (rec.target.clone(), rec.opts.cursor, self.waker.clone());
-                let spawned = std::thread::Builder::new().name("flatshot-screencast".into()).spawn(move || {
-                    let _ = tx.send(ScreenCast::open(&target, cursor));
-                    waker();
-                });
-                match spawned {
-                    Ok(_) => rec.cast_rx = Some(rx),
-                    Err(e) => rec.fail(e.to_string()),
-                }
-            } else {
+            // (the portal's stream, once it's there: see poll_cast)
+            if rec.how != Method::Portal || rec.cast.is_some() {
                 rec.begin_segment();
             }
         }
         rec.poll_cast();
         rec.check();
         rec.poll_saving();
+        // The dial is over the area: it's gone before the recording starts.
+        if r.dial.is_some() && r.rec.countdown_end().is_none_or(|end| Instant::now() + countdown::GONE_BEFORE >= end) {
+            self.hide_dial();
+        }
         self.serve_recording();
     }
 
@@ -746,7 +829,10 @@ impl App {
         let events = r.rec.take_events();
         for e in events {
             match e {
-                Event::Started => self.show_controls(),
+                Event::Started => {
+                    self.hide_dial();
+                    self.show_controls();
+                }
                 Event::Saving => self.hide_controls(),
                 Event::Ended(end) => {
                     self.hide_controls();
@@ -768,28 +854,43 @@ impl App {
         };
         let clock = record::clock(r.rec.elapsed());
         let paused = r.rec.state == State::Paused;
+        let countdown = r.rec.countdown().map(|c| c.0);
         if let Some(bar) = &mut r.bar {
+            // Until it starts, the bar cancels it (with the seconds left
+            // where there's no dial to show them).
+            let cancel = (r.rec.state == State::Starting).then(|| match countdown {
+                Some(n) if !self.dpy.can_place() => format!("Cancel  ·  {n}"),
+                _ => "Cancel".to_string(),
+            });
+            bar.set_cancel(cancel);
             bar.set_state(clock.clone(), paused);
         }
         if clock != r.shown || r.rec.state != State::Recording {
             r.shown = clock.clone();
             if let Some(t) = &self.tray.tray {
                 t.set_recording(true);
-                let state = match r.rec.state {
-                    State::Starting => "Starting to record",
-                    State::Paused => "Recording paused",
-                    State::Saving | State::Done => "Saving the recording",
-                    State::Recording => "Recording",
+                let state = match (r.rec.state, countdown) {
+                    (State::Starting, Some(n)) => format!("Recording in {n}  ·  click to cancel"),
+                    (State::Starting, None) => "Starting to record  ·  click to cancel".into(),
+                    (State::Paused, _) => format!("Recording paused  {clock}  ·  click to stop"),
+                    (State::Saving | State::Done, _) => format!("Saving the recording  {clock}"),
+                    (State::Recording, _) => format!("Recording  {clock}  ·  click to stop"),
                 };
-                t.set_tooltip(&format!("{}: {state}  {clock}  ·  click to stop", crate::APP_NAME));
+                t.set_tooltip(&format!("{}: {state}", crate::APP_NAME));
             }
         }
     }
 
     // -- the controls ----------------------------------------------------------------------
 
+    /// The bar and the marks (once: put up for the countdown, the bar turns
+    /// into the recording's controls when it starts).
     fn show_controls(&mut self) {
         let Some(r) = &mut self.recording else { return };
+        if std::mem::replace(&mut r.controls, true) {
+            self.recording_changed();
+            return;
+        }
         let area = r.rec.area();
         let monitors = self.dpy.monitors();
         let own = monitors.iter().find(|m| m.name == r.rec.target.monitor_name).or_else(|| monitors.iter().find(|m| m.rect.contains(area.center()))).cloned();
@@ -861,9 +962,42 @@ impl App {
                 ..Default::default()
             });
         }
+        self.recording_changed(); // (the bar cancels it, until it starts)
+    }
+
+    /// The countdown's dial, over the middle of the area. It takes neither
+    /// the keyboard nor the pointer: clicks go to what's under it.
+    fn show_dial(&mut self) {
+        let Some(r) = &mut self.recording else { return };
+        if r.rec.countdown().is_none() || !self.dpy.can_place() {
+            return;
+        }
+        let area = r.rec.area();
+        let monitors = self.dpy.monitors();
+        let Some(m) = monitors.iter().find(|m| m.rect.contains(area.center())).or_else(|| monitors.iter().find(|m| m.name == r.rec.target.monitor_name)) else {
+            return;
+        };
+        let size = countdown::DIAL.ceil() as i32;
+        let at = (
+            (area.center().x - size / 2 - m.rect.x).clamp(0, (m.rect.w - size).max(0)),
+            (area.center().y - size / 2 - m.rect.y).clamp(0, (m.rect.h - size).max(0)),
+        );
+        if self.dpy.add_control(Owner::RecDial, m, at, (size as u32, size as u32), &super::layer_namespace(), true) {
+            r.dial = Some((0.0, None));
+        }
+        self.dpy.flush();
+    }
+
+    fn hide_dial(&mut self) {
+        let Some(r) = &mut self.recording else { return };
+        if r.dial.take().is_some() {
+            self.dpy.remove(Owner::RecDial);
+            self.dpy.flush();
+        }
     }
 
     fn hide_controls(&mut self) {
+        self.hide_dial();
         let Some(r) = &mut self.recording else { return };
         if r.bar.take().is_some() {
             self.dpy.remove(Owner::RecBar);
@@ -914,7 +1048,7 @@ impl App {
         match action {
             Some(BarAction::Pause) => r.rec.toggle_pause(),
             Some(BarAction::Stop) => r.rec.stop(),
-            Some(BarAction::Discard) => r.rec.discard(),
+            Some(BarAction::Discard | BarAction::Cancel) => r.rec.discard(),
             None => {}
         }
         if dropped {
@@ -1000,6 +1134,15 @@ impl App {
                         && self.dpy.redraw(owner, 0, &mut MarkPaint { corner: m.1, scale, damaged: true })
                     {
                         m.2 = scale;
+                    }
+                }
+                Owner::RecDial => {
+                    // (when its second or ring changed)
+                    if let (Some((drawn_at, drawn)), Some((seconds, fraction))) = (&mut r.dial, r.rec.countdown()) {
+                        let shows = countdown::shows(seconds, fraction);
+                        if (*drawn != Some(shows) || *drawn_at != scale) && self.dpy.redraw(owner, 0, &mut DialPaint { scale, seconds, fraction }) {
+                            (*drawn_at, *drawn) = (scale, Some(shows));
+                        }
                     }
                 }
                 _ => {}
