@@ -541,7 +541,8 @@ if command -v gst-launch-1.0 > /dev/null && gst-inspect-1.0 pipewiresrc > /dev/n
 $EX/fake_portal > "$work/cast-portal.log" 2>&1 &
 sleep 0.4
 FLATSHOT_RECORDER=portal $BIN --tray -v > "$work/tray-cast.log" 2>&1 &
-sleep 1
+# (the tray app records: once it's ready, --record is passed to it)
+for _ in \$(seq 150); do grep -q "tray app ready" "$work/tray-cast.log" && break; sleep 0.1; done
 $BIN --record > /dev/null 2>&1 &
 for _ in \$(seq 150); do grep -qE "first frame|painted" "$work/tray-cast.log" && break; sleep 0.1; done
 $EX/inject move 400 300 drag 300 200 900 600 sleep 400 key Return sleep 1500 move 600 641 sleep 200 click 600 641 sleep 800
