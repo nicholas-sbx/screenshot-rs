@@ -426,7 +426,9 @@ kde_capture() { # name, [kwin]
     cat > "$work/$1.sh" <<SH
 #!/usr/bin/env bash
 $EX/fake_notify > "$work/$1-notify.log" 2>&1 &
-[ "${2:-}" = kwin ] && FAKE_KWIN_SCREENS=HEADLESS-1:1600x1000 $EX/fake_kwin > /dev/null 2>&1 &
+# (in an if, not after &&: the job is then the stand-in itself, which the
+# kill below stops, not a subshell that would leave it running)
+if [ "${2:-}" = kwin ]; then FAKE_KWIN_SCREENS=HEADLESS-1:1600x1000 $EX/fake_kwin > /dev/null 2>&1 & fi
 sleep 0.4
 XDG_CURRENT_DESKTOP=KDE $BIN -v -r 64x48+0+0 -o "$work/$1.png" --no-copy > "$work/$1.log" 2>&1
 sleep 0.3
