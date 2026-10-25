@@ -3,9 +3,11 @@
 # pointer and keyboard, instant captures, the clipboard, and the tray app
 # against stand-ins for KDE's shortcut service, tray and notifications,
 # the editor and settings windows, and screen recording (wf-recorder, and
-# ffmpeg's test pattern).
+# ffmpeg's and GStreamer's test patterns).
 #
-# Needs sway, wl-clipboard, dbus (dbus-run-session), ffmpeg and wf-recorder.
+# Needs sway, wl-clipboard, dbus (dbus-run-session), ffmpeg and wf-recorder
+# (and, for the GStreamer recorder's checks, its x264enc, h264parse and
+# pipewiresrc).
 #
 # Run from the repository root after `cargo build --examples`. BIN picks the flatshot-rs
 # binary (default target/debug/flatshot-rs).
@@ -364,6 +366,34 @@ ffmpeg -v error -y -i "$(newest_video)" -frames:v 1 "$work/first-frame.png" 2>/d
 [ "$(ring "$work/first-frame.png" 2>/dev/null || echo 1)" = 0 ] && pass "the countdown isn't in the video" || fail "the countdown is in the video"
 countdown 0
 
+# GStreamer's recorder (KDE's and GNOME's), on its test pattern: told to use
+# a GPU's encoder that isn't there, it records with the CPU's instead.
+if command -v gst-launch-1.0 > /dev/null && gst-inspect-1.0 x264enc > /dev/null 2>&1 && gst-inspect-1.0 h264parse > /dev/null 2>&1; then
+    python3 - "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["record_format"] = "mp4"; json.dump(c, open(sys.argv[1], "w"))
+PY
+    rm -f "$work/record.code"
+    record FLATSHOT_RECORDER=test-gst FLATSHOT_GPU_ENCODER=vah264enc
+    $EX/inject move 641 641 sleep 200 click 641 641
+    for _ in $(seq 100); do [ -s "$work/record.code" ] && break; sleep 0.1; done
+    if [ "$(cat "$work/record.code" 2>/dev/null)" = 0 ] && grep -q "so the CPU's encoder records instead" "$work/record.log"; then
+        pass "the CPU's encoder records when the GPU's can't"
+    else
+        fail "GStreamer's recorder: exit $(cat "$work/record.code" 2>/dev/null)"
+        cat "$work/record.log"
+    fi
+    video_check "GStreamer video" "$(newest_video)" "600x400"
+    # Its picture (the notification's, the history's) is the video's first
+    # frame, not the screen the area was chosen on: the pattern's yellow bar.
+    thumb=$(python3 -c 'import json, sys; print(json.loads(open(sys.argv[1]).read().splitlines()[-1]).get("thumbnail", ""))' "$recent" 2>/dev/null || true)
+    rgb=$(ffmpeg -v error -i "$thumb" -vf crop=1:1:8:8 -f rawvideo -pix_fmt rgb24 - 2>/dev/null | od -An -tu1 | xargs || true)
+    read -r r g b <<< "${rgb:-0 0 255}"
+    [ "$r" -gt 150 ] && [ "$g" -gt 150 ] && [ "$b" -lt 80 ] && pass "the recording's picture is its first frame" || fail "the recording's picture ($thumb) is $rgb there"
+else
+    echo "skip: GStreamer's recorder (no gst-launch-1.0, x264enc or h264parse)"
+fi
+
 # Beautify after capture: on the last style's background (64 px padding).
 python3 - "$XDG_CONFIG_HOME/flatshot-rs/config.json" <<'PY'
 import json, sys
@@ -500,6 +530,37 @@ grep -q "portal: registered flatshot-rs" "$work/portal.log" && grep -q 'portal: 
     && pass "shortcuts asked of the portal" || fail "shortcuts not asked of the portal: $(cat "$work/portal.log")"
 grep -q "shortcut screen pressed" "$work/tray-portal.log" && [ $((after - before)) -ge 1 ] && pass "a portal shortcut heard ($((after - before)) saved)" \
     || fail "portal shortcut not heard: $(grep -i -E "portal|shortcut" "$work/tray-portal.log")"
+
+# 10. Recording on KDE and GNOME: the screen is asked of the desktop's portal
+# as the countdown begins (which to share may be asked meanwhile); cancelled
+# while it's asking, its dialog goes too.
+if command -v gst-launch-1.0 > /dev/null && gst-inspect-1.0 pipewiresrc > /dev/null 2>&1 && gst-inspect-1.0 x264enc > /dev/null 2>&1; then
+    countdown 5
+    cat > "$work/cast.sh" <<SH
+#!/usr/bin/env bash
+$EX/fake_portal > "$work/cast-portal.log" 2>&1 &
+sleep 0.4
+FLATSHOT_RECORDER=portal $BIN --tray -v > "$work/tray-cast.log" 2>&1 &
+sleep 1
+$BIN --record > /dev/null 2>&1 &
+for _ in \$(seq 150); do grep -qE "first frame|painted" "$work/tray-cast.log" && break; sleep 0.1; done
+$EX/inject move 400 300 drag 300 200 900 600 sleep 400 key Return sleep 1500 move 600 641 sleep 200 click 600 641 sleep 800
+# (what the portal heard by then: not what quitting the tray app does)
+cp "$work/cast-portal.log" "$work/cast-cancelled.log"
+$BIN --quit
+sleep 1
+kill %1 2>/dev/null
+SH
+    chmod +x "$work/cast.sh"
+    dbus-run-session -- "$work/cast.sh" 2>/dev/null || true
+    countdown 0
+    grep -q "portal: which screen to share?" "$work/cast-cancelled.log" && pass "the screen is asked for as the countdown begins" \
+        || fail "the screen wasn't asked for: $(cat "$work/cast-portal.log")"
+    grep -q "portal: closed .*/request/" "$work/cast-cancelled.log" && pass "cancelling the countdown closes the portal's dialog" \
+        || { fail "the portal's dialog was left up: $(cat "$work/cast-portal.log")"; tail -n 20 "$work/tray-cast.log"; }
+else
+    echo "skip: the screen-cast portal (no GStreamer with pipewiresrc and x264enc)"
+fi
 
 kill $keeper 2>/dev/null || true
 if [ $failures -gt 0 ]; then

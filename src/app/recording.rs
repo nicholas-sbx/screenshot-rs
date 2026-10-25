@@ -11,6 +11,7 @@ use std::fs;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -45,6 +46,8 @@ const POLL: Duration = Duration::from_millis(150);
 const BROKEN: Duration = Duration::from_secs(1);
 /// Thumbnails kept for recordings' notifications.
 const THUMBNAILS: usize = 10;
+/// The most pixels across they are.
+const THUMBNAIL: u32 = 640;
 
 /// What this desktop's recorder can do, for the capture overlay.
 pub struct Recorder {
@@ -123,8 +126,8 @@ pub enum End {
     Failed(String),
 }
 
-/// A finished video: where, and how long.
-type Saved = (PathBuf, Option<Duration>);
+/// A finished video: where, how long, and its first frame (small).
+type Saved = (PathBuf, Option<Duration>, Option<Image>);
 
 /// Things the app is to do for the recording.
 #[derive(Debug)]
@@ -152,10 +155,14 @@ pub struct Recording {
     cast: Option<Arc<ScreenCast>>,
     /// the screen cast has been asked for
     cast_asked: bool,
+    /// it's no longer wanted (the desktop's dialog, if it's still asking, goes)
+    cast_cancelled: Arc<AtomicBool>,
     cast_rx: Option<mpsc::Receiver<Result<ScreenCast, Failure>>>,
     proc: Option<Child>,
-    /// it encodes with the GPU
-    gpu: bool,
+    /// the GPU's encoder the recorder encodes with, if it does
+    gpu: Option<&'static str>,
+    /// the CPU's encoders only (the GPU's failed)
+    cpu_only: bool,
     /// the recorder's process descriptor is watched by the event loop
     watched: bool,
     /// it didn't stop when asked, and was killed
@@ -266,9 +273,11 @@ impl Recording {
             counting: (!countdown.is_zero()).then_some((now, countdown)),
             cast: None,
             cast_asked: false,
+            cast_cancelled: Arc::new(AtomicBool::new(false)),
             cast_rx: None,
             proc: None,
-            gpu: false,
+            gpu: None,
+            cpu_only: false,
             watched: false,
             killed: false,
             lost: false,
@@ -365,7 +374,7 @@ impl Recording {
             return;
         }
         let path = self.dir.join(format!("part-{:03}.{}", self.segments.len() + 1, record::segment_extension(&self.opts.format)));
-        let launch = match record::launch(self.how, &self.target, &self.opts, &path, self.cast.as_deref()) {
+        let launch = match record::launch(self.how, &self.target, &self.opts, &path, self.cast.as_deref(), !self.cpu_only) {
             Ok(l) => l,
             Err(e) => return self.fail(e),
         };
@@ -464,13 +473,19 @@ impl Recording {
             && let Some(last) = self.segments.pop()
         {
             let _ = fs::remove_file(last);
-            // The GPU's encoder didn't start (a driver that can't, a size it
-            // won't take): the CPU's, from now on, and this recording goes
-            // on with it. (Only at the start: parts made by different
-            // encoders may not join.)
-            if self.gpu && self.segments.is_empty() && self.state == State::Recording {
-                crate::warn!("the GPU's video encoder didn't start, so the CPU's records instead: {}", self.log_tail());
-                record::gpu_failed();
+            // Recording with the GPU's encoder didn't start (a driver that
+            // can't, a size it won't take): this recording goes on with the
+            // CPU's, and if it was the encoder, so does the rest of the run.
+            // (Only at the start: parts made by different encoders may not
+            // join.)
+            if let Some(encoder) = self.gpu.filter(|_| self.segments.is_empty() && self.state == State::Recording) {
+                let what = if record::gpu_failed(encoder, &self.log_text()) {
+                    format!("the GPU's video encoder ({encoder})")
+                } else {
+                    format!("the recorder (with the GPU's {encoder})")
+                };
+                crate::warn!("{what} didn't start, so the CPU's encoder records instead: {}", self.log_tail());
+                self.cpu_only = true;
                 self.recorded = Duration::ZERO;
                 return self.begin_segment();
             }
@@ -490,10 +505,15 @@ impl Recording {
         self.segments.iter().any(|p| fs::metadata(p).is_ok_and(|m| m.len() > 0))
     }
 
+    /// What the recorders said.
+    fn log_text(&self) -> String {
+        let text = util::read_limited(&self.dir.join("recorder.log"), 1 << 20).unwrap_or_default();
+        String::from_utf8_lossy(&text).into_owned()
+    }
+
     /// The recorder's last words.
     fn log_tail(&self) -> String {
-        let text = util::read_limited(&self.dir.join("recorder.log"), 1 << 20).unwrap_or_default();
-        let text = String::from_utf8_lossy(&text);
+        let text = self.log_text();
         util::elide(text.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or(""), 300)
     }
 
@@ -547,6 +567,10 @@ impl Recording {
                 } else {
                     parts[0].clone()
                 };
+                // (what it starts with: the screen may have changed since
+                // the area was chosen, during the countdown)
+                let first = dir.join("first.png");
+                let first = record::first_frame(&video, &first, THUMBNAIL).ok().and_then(|_| crate::codec::decode_file(&first).ok()).and_then(small_thumbnail);
                 let finished = if format == "gif" {
                     let gif = dir.join("recording.gif");
                     record::to_gif(&video, &gif, fps)?;
@@ -556,7 +580,7 @@ impl Recording {
                 };
                 let placed = place(&finished, &target)?;
                 let length = record::duration(&placed).map(Duration::from_secs_f64);
-                Ok((placed, length))
+                Ok((placed, length, first))
             })();
             let _ = tx.send(result);
             waker();
@@ -570,8 +594,11 @@ impl Recording {
     fn poll_saving(&mut self) {
         let Some(rx) = &self.saving else { return };
         match rx.try_recv() {
-            Ok(Ok((path, length))) => {
+            Ok(Ok((path, length, first))) => {
                 self.saving = None;
+                if first.is_some() {
+                    self.thumbnail = first;
+                }
                 self.done(End::Saved(path, length));
             }
             Ok(Err(e)) => {
@@ -602,6 +629,7 @@ impl Recording {
         if let Some(c) = self.cast.take() {
             c.close();
         }
+        self.cast_cancelled.store(true, Ordering::Relaxed);
         let _ = fs::remove_dir_all(&self.dir);
         self.state = State::Done;
         self.events.push(Event::Ended(end));
@@ -755,12 +783,17 @@ impl App {
         let r = self.recording.as_ref()?;
         let next = r.rec.next_deadline();
         let Some(end) = r.rec.countdown_end() else { return next };
-        // Counting down: its ring runs on (where frames don't come by
-        // themselves), and the dial goes a moment before the end.
-        let mut tick = Instant::now() + countdown::FRAME;
-        if r.dial.is_some() {
-            tick = tick.min(end.checked_sub(countdown::GONE_BEFORE).unwrap_or(end));
-        }
+        // Counting down: the dial's ring runs on (where frames don't come by
+        // themselves), and the dial goes a moment before the end. With no
+        // dial, the seconds left (the bar's, the tray's) change each second:
+        // as shown, rounded up.
+        let now = Instant::now();
+        let tick = if r.dial.is_some() {
+            (now + countdown::FRAME).min(end.checked_sub(countdown::GONE_BEFORE).unwrap_or(end))
+        } else {
+            let whole = end.saturating_duration_since(now).as_nanos().div_ceil(1_000_000_000).saturating_sub(1);
+            end.checked_sub(Duration::from_secs(whole as u64)).unwrap_or(end)
+        };
         Some(next.map_or(tick, |n| n.min(tick)))
     }
 
@@ -773,9 +806,9 @@ impl App {
         if rec.how == Method::Portal && !rec.cast_asked && rec.state == State::Starting {
             rec.cast_asked = true;
             let (tx, rx) = mpsc::channel();
-            let (target, cursor, waker) = (rec.target.clone(), rec.opts.cursor, self.waker.clone());
+            let (target, cursor, cancelled, waker) = (rec.target.clone(), rec.opts.cursor, rec.cast_cancelled.clone(), self.waker.clone());
             let spawned = std::thread::Builder::new().name("flatshot-screencast".into()).spawn(move || {
-                let _ = tx.send(ScreenCast::open(&target, cursor));
+                let _ = tx.send(ScreenCast::open(&target, cursor, &cancelled));
                 waker();
             });
             match spawned {
@@ -1274,18 +1307,18 @@ fn human_size(n: u64) -> String {
     if n >= 1_000_000 { format!("{:.1} MB", n as f64 / 1e6) } else { format!("{} KB", (n as f64 / 1e3).round().max(1.0)) }
 }
 
-/// The frozen screen at no more than 640 pixels across.
+/// A picture of the recording at no more than [`THUMBNAIL`] pixels across.
 fn small_thumbnail(thumb: Image) -> Option<Image> {
     let (w, h) = thumb.size();
-    if w <= 640 && h <= 640 {
+    if w <= THUMBNAIL && h <= THUMBNAIL {
         return Some(thumb);
     }
-    let k = 640.0 / w.max(h) as f64;
+    let k = THUMBNAIL as f64 / w.max(h) as f64;
     thumb.scaled_area(((w as f64 * k).round() as u32).max(1), ((h as f64 * k).round() as u32).max(1)).ok()
 }
 
-/// The first frame (the frozen screen), for the notification; the newest
-/// few are kept.
+/// The first frame (else the frozen screen it was chosen on), for the
+/// notification; the newest few are kept.
 fn save_thumbnail(thumb: &Image, video: &Path) -> Option<PathBuf> {
     let folder = config::cache_home().join(crate::APP_ID).join("thumbnails");
     fs::DirBuilder::new().recursive(true).mode(0o700).create(&folder).ok()?;

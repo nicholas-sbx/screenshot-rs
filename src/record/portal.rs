@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::process::Stdio;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use zbus::{OwnedObjectPath, OwnedVariant, Variant};
@@ -74,8 +75,8 @@ fn screens(target: &Target) -> Vec<IRect> {
 
 impl ScreenCast {
     /// Ask for a stream with `target`'s area in it. Blocks while the desktop
-    /// asks the user (call it from a thread of its own).
-    pub fn open(target: &Target, cursor: bool) -> Result<ScreenCast, Failure> {
+    /// asks the user (call it from a thread of its own), until `cancelled`.
+    pub fn open(target: &Target, cursor: bool, cancelled: &AtomicBool) -> Result<ScreenCast, Failure> {
         let conn = crate::dbus::Bus::connect(CALL_WAIT)?;
         let property = |name: &str| -> Option<u32> {
             let reply = conn.call_method(Some(portal::DESKTOP), portal::PATH, Some("org.freedesktop.DBus.Properties"), "Get", &(SCREENCAST, name)).ok()?;
@@ -87,7 +88,7 @@ impl ScreenCast {
 
         let mut options: HashMap<&'static str, Variant<'static>> = HashMap::new();
         options.insert("session_handle_token", Variant::from(token()));
-        let results = answer(portal::request_on(&conn, SCREENCAST, "CreateSession", options, |o| (o,), CALL_WAIT)?)?;
+        let results = answer(portal::request_on(&conn, SCREENCAST, "CreateSession", options, |o| (o,), CALL_WAIT, Some(cancelled))?)?;
         let session = results
             .get("session_handle")
             .and_then(|v| {
@@ -116,10 +117,10 @@ impl ScreenCast {
             }
         }
         let path = session.clone();
-        answer(portal::request_on(&cast.conn, SCREENCAST, "SelectSources", options, move |o| (path, o), CALL_WAIT)?)?;
+        answer(portal::request_on(&cast.conn, SCREENCAST, "SelectSources", options, move |o| (path, o), CALL_WAIT, Some(cancelled))?)?;
         // This waits for the user when the desktop asks which screen to share.
         let path = session.clone();
-        let results = answer(portal::request_on(&cast.conn, SCREENCAST, "Start", HashMap::new(), move |o| (path, "", o), START_WAIT)?)?;
+        let results = answer(portal::request_on(&cast.conn, SCREENCAST, "Start", HashMap::new(), move |o| (path, "", o), START_WAIT, Some(cancelled))?)?;
         type Stream = (u32, HashMap<String, OwnedVariant>);
         let streams: Vec<Stream> = results.get("streams").and_then(|v| v.try_clone().ok()).and_then(|v| Vec::<Stream>::try_from(v).ok()).unwrap_or_default();
         let (node, props) = streams.into_iter().next().ok_or_else(|| Failure::Failed("the screen-cast portal shared no screen".into()))?;

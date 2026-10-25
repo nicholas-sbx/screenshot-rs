@@ -79,7 +79,7 @@ pub fn start(events: impl Fn(ShortcutEvent) + Send + 'static) -> Result<(Session
     }
     let mut options: HashMap<&'static str, Variant<'static>> = HashMap::new();
     options.insert("session_handle_token", Variant::from(format!("flatshot{}", crate::util::random_hex(6))));
-    let session = match portal::request_on(&conn, IFACE, "CreateSession", options, |o| (o,), WAIT)? {
+    let session = match portal::request_on(&conn, IFACE, "CreateSession", options, |o| (o,), WAIT, None)? {
         Answer::Done(r) => r.get("session_handle").and_then(handle).ok_or("the desktop gave no session")?,
         Answer::Cancelled => return Err("the desktop said no".into()),
     };
@@ -114,7 +114,7 @@ pub fn start(events: impl Fn(ShortcutEvent) + Send + 'static) -> Result<(Session
             (action.to_string(), p)
         })
         .collect();
-    let bound = match portal::request_on(&conn, IFACE, "BindShortcuts", HashMap::new(), |o| (session.clone(), wanted, "", o), WAIT)? {
+    let bound = match portal::request_on(&conn, IFACE, "BindShortcuts", HashMap::new(), |o| (session.clone(), wanted, "", o), WAIT, None)? {
         Answer::Done(r) => described(&r),
         Answer::Cancelled => return Err("they weren't given keys".into()),
     };

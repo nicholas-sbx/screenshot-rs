@@ -4,8 +4,10 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use zbus::{OwnedVariant, Variant};
 
@@ -13,6 +15,8 @@ use crate::util;
 
 pub const DESKTOP: &str = "org.freedesktop.portal.Desktop";
 pub const PATH: &str = "/org/freedesktop/portal/desktop";
+/// How often a request that can be cancelled looks whether it has been.
+const CANCEL_POLL: Duration = Duration::from_millis(100);
 
 /// How a request ended.
 #[derive(Debug)]
@@ -35,11 +39,13 @@ pub fn request<B>(
 where
     B: serde::Serialize + zbus::DynamicType,
 {
-    request_on(crate::dbus::session()?, iface, method, options, body, wait)
+    request_on(crate::dbus::session()?, iface, method, options, body, wait, None)
 }
 
 /// [`request`] on a connection of the caller's (a screen cast lives as
-/// long as the connection that asked for it).
+/// long as the connection that asked for it). Once `cancelled` is set (if
+/// there is one), the request is closed (its dialog goes) and answers
+/// Cancelled.
 pub fn request_on<B>(
     conn: &crate::dbus::Bus,
     iface: &str,
@@ -47,10 +53,15 @@ pub fn request_on<B>(
     mut options: HashMap<&'static str, Variant<'static>>,
     body: impl FnOnce(HashMap<&'static str, Variant<'static>>) -> B,
     wait: Duration,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<Answer, String>
 where
     B: serde::Serialize + zbus::DynamicType,
 {
+    let unwanted = || cancelled.is_some_and(|c| c.load(Ordering::Relaxed));
+    if unwanted() {
+        return Ok(Answer::Cancelled);
+    }
     let token = format!("flatshot{}", util::random_hex(6));
     // The request object is named after us and the token: listen on it
     // before asking, so the answer can't come first.
@@ -63,17 +74,38 @@ where
     .map_err(|e| format!("portal: {e}"))?;
     options.insert("handle_token", Variant::from(token));
     conn.call_method(Some(DESKTOP), PATH, Some(iface), method, &body(options)).map_err(|e| format!("{iface}: {e}"))?;
-    // Wait for the answer, but not for ever.
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(futures_lite::future::block_on(futures_lite::StreamExt::next(&mut signals)));
-    });
-    let msg = rx.recv_timeout(wait).map_err(|_| "the desktop didn't answer".to_string())?.ok_or("the portal went away")?;
+    // Wait for the answer, but not for ever, nor once it's not wanted.
+    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    let deadline = Instant::now() + wait;
+    let msg = loop {
+        if let Poll::Ready(msg) = futures_lite::StreamExt::poll_next(&mut signals, &mut cx) {
+            break msg.ok_or("the portal went away")?;
+        }
+        if unwanted() {
+            let _ = conn.call_method(Some(DESKTOP), path.as_str(), Some("org.freedesktop.portal.Request"), "Close", &());
+            return Ok(Answer::Cancelled);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err("the desktop didn't answer".into());
+        }
+        std::thread::park_timeout(if cancelled.is_some() { left.min(CANCEL_POLL) } else { left });
+    };
     let (response, results): (u32, HashMap<String, OwnedVariant>) = msg.body().deserialize().map_err(|e| format!("portal reply: {e}"))?;
     match response {
         0 => Ok(Answer::Done(results)),
         1 => Ok(Answer::Cancelled),
         _ => Err("the desktop refused".into()),
+    }
+}
+
+/// Wakes the thread waiting for a request's answer.
+struct Unpark(std::thread::Thread);
+
+impl std::task::Wake for Unpark {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
     }
 }
 
