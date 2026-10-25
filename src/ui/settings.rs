@@ -593,6 +593,12 @@ impl Settings {
                         "Automatic uses the fastest one the desktop has.",
                         Control::Combo { options: backends, value: if c.backend == "qt" { "auto".into() } else { c.backend.clone() } },
                     ),
+                    Row::new(
+                        "notify_fallback",
+                        "Notify when KWin isn't used",
+                        "After a capture that KWin's screenshot API couldn't take, so a slower way did. KDE Plasma only.",
+                        Control::Toggle(c.notify_fallback),
+                    ),
                 ],
             },
         ];

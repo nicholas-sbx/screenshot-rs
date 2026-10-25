@@ -28,3 +28,8 @@ Action=Popup
 Name=Notice
 Comment=Something worth knowing while recording
 Action=Popup
+
+[Event/fallback]
+Name=Taken without KWin
+Comment=KWin's screenshot API couldn't take a screenshot, so a slower way did
+Action=Popup

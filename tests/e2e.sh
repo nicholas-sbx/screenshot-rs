@@ -418,6 +418,44 @@ chmod +x "$work/window.sh"
 dbus-run-session -- "$work/window.sh" 2>/dev/null || true
 expect_size "active window from KWin" "$work/window.png" "300 200"
 
+# On KDE without KWin's screenshot API, the screen is taken another way,
+# and a notification says so (unless that's turned off); none when KWin's
+# API takes it. Each capture in a session of its own, with a stand-in
+# notification server (and, given "kwin", KWin's API).
+kde_capture() { # name, [kwin]
+    cat > "$work/$1.sh" <<SH
+#!/usr/bin/env bash
+$EX/fake_notify > "$work/$1-notify.log" 2>&1 &
+# (in an if, not after &&: the job is then the stand-in itself, which the
+# kill below stops, not a subshell that would leave it running)
+if [ "${2:-}" = kwin ]; then FAKE_KWIN_SCREENS=HEADLESS-1:1600x1000 $EX/fake_kwin > /dev/null 2>&1 & fi
+sleep 0.4
+XDG_CURRENT_DESKTOP=KDE $BIN -v -r 64x48+0+0 -o "$work/$1.png" --no-copy > "$work/$1.log" 2>&1
+sleep 0.3
+kill %1 %2 2>/dev/null
+SH
+    chmod +x "$work/$1.sh"
+    dbus-run-session -- "$work/$1.sh" 2>/dev/null || true
+}
+fallback_notice() { # on or off
+    python3 - "$XDG_CONFIG_HOME/flatshot-rs/config.json" "$1" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["notify_fallback"] = sys.argv[2] == "on"; json.dump(c, open(sys.argv[1], "w"))
+PY
+}
+kde_capture no-kwin
+expect_size "KDE without KWin's screenshot API: captured another way" "$work/no-kwin.png" "64 48"
+grep -q 'summary="Screenshot taken without KWin"' "$work/no-kwin-notify.log" && grep -q "screen copy took it instead" "$work/no-kwin-notify.log" \
+    && pass "a notification says KWin's screenshot API didn't take it" || fail "no notice that KWin didn't take it: $(cat "$work/no-kwin-notify.log")"
+fallback_notice off
+kde_capture no-kwin-quiet
+fallback_notice on
+expect_size "captured another way, the notice turned off" "$work/no-kwin-quiet.png" "64 48"
+grep -q "without KWin" "$work/no-kwin-quiet-notify.log" && fail "told that KWin didn't take it, with that turned off" || pass "turned off, it isn't told"
+kde_capture kwin-api kwin
+grep -q "via kwin" "$work/kwin-api.log" && expect_size "captured by KWin's screenshot API" "$work/kwin-api.png" "64 48" || fail "KWin's stand-in didn't take it: $(grep -i screenshot "$work/kwin-api.log")"
+grep -q "without KWin" "$work/kwin-api-notify.log" && fail "told that KWin didn't take it, though it did" || pass "no notice when KWin's API takes it"
+
 # KDE's windows under the pointer: KWin's script reports them late (after
 # 2.5 s, from another connection of its own); once known, a click on one
 # captures it.
