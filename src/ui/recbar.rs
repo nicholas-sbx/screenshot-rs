@@ -1,7 +1,8 @@
 //! The controls on screen while recording: a small bar with the time,
-//! pause / resume, stop and discard, and red corner marks just outside the
-//! recorded area. Painted here; the app puts each in a surface of its own,
-//! outside the area, so none of it ends up in the video.
+//! pause / resume, stop and discard (before it starts, the bar is one
+//! button that cancels it), and red corner marks just outside the recorded
+//! area. Painted here; the app puts each in a surface of its own, outside
+//! the area, so none of it ends up in the video.
 
 use crate::geom::{Damage, IRect, Point, Rect};
 use crate::image::Canvas;
@@ -26,6 +27,8 @@ pub enum BarAction {
     Pause,
     Stop,
     Discard,
+    /// before it started
+    Cancel,
 }
 
 pub struct RecBar {
@@ -35,6 +38,9 @@ pub struct RecBar {
     /// the time shown
     clock: String,
     paused: bool,
+    /// Before the recording starts: the bar is one button, all of it, that
+    /// cancels it, saying this.
+    cancel: Option<String>,
     size: (f32, f32),
     damaged: bool,
 }
@@ -51,7 +57,8 @@ impl RecBar {
         }
         items.push(Item::new("stop", Look::Icon { icon: "stop", size: 36.0 }, "Stop and save"));
         items.push(Item::new("trash", Look::Icon { icon: "trash", size: 36.0 }, "Discard the recording"));
-        let mut bar = RecBar { items, ptr: Pointer::default(), scale: 1.0, clock: "00:00".into(), paused: false, size: (0.0, HEIGHT), damaged: true };
+        let mut bar =
+            RecBar { items, ptr: Pointer::default(), scale: 1.0, clock: "00:00".into(), paused: false, cancel: None, size: (0.0, HEIGHT), damaged: true };
         bar.layout();
         bar
     }
@@ -107,11 +114,32 @@ impl RecBar {
         }
     }
 
+    /// Until the recording starts, the bar is one button that cancels it,
+    /// saying `label` (None: the recording's controls). It keeps its size,
+    /// so nothing jumps when the recording starts.
+    pub fn set_cancel(&mut self, label: Option<String>) {
+        if label != self.cancel {
+            if label.is_none() != self.cancel.is_none() {
+                self.ptr = Pointer::default();
+            }
+            self.cancel = label;
+            self.damaged = true;
+        }
+    }
+
     pub fn damage(&mut self) -> Damage {
         if std::mem::take(&mut self.damaged) { Damage::full() } else { Damage::new() }
     }
 
+    /// The cancel button: all of the bar but its edge.
+    fn cancel_rect(&self) -> Rect {
+        Rect::new(5.0, 5.0, self.size.0 - 10.0, self.size.1 - 10.0)
+    }
+
     fn button_at(&self, at: Point) -> Option<&'static str> {
+        if self.cancel.is_some() {
+            return self.cancel_rect().contains(at).then_some("cancel");
+        }
         self.items.iter().find(|i| matches!(i.look, Look::Icon { .. }) && i.rect.contains(at)).map(|i| i.id)
     }
 
@@ -142,6 +170,7 @@ impl RecBar {
                 "pause" => Some(BarAction::Pause),
                 "stop" => Some(BarAction::Stop),
                 "trash" => Some(BarAction::Discard),
+                "cancel" => Some(BarAction::Cancel),
                 _ => None,
             },
             _ => None,
@@ -154,6 +183,27 @@ impl RecBar {
         let mut p = Painter::for_region(target.pixmap_mut(), self.scale, origin);
         let r = Rect::new(0.0, 0.0, self.size.0, self.size.1);
         p.draw_rounded_rect(r.adjusted(0.5, 0.5, -0.5, -0.5), r.h / 2.0 - 0.5, Some(c.base), Some(Pen::new(c.line, 1.0)));
+        if let Some(label) = &self.cancel {
+            let bx = self.cancel_rect();
+            let fill = if self.ptr.is_down("cancel") {
+                Some(c.line)
+            } else if self.ptr.is_hovered("cancel") {
+                Some(c.hover)
+            } else {
+                None
+            };
+            if let Some(fill) = fill {
+                p.fill_rounded_rect(bx, bx.h / 2.0, fill);
+            }
+            // (the cross and the words, centred together)
+            let font = text::font(14.0, DEMIBOLD);
+            let (icon, gap) = (18.0, 7.0);
+            let tw = text::width(label, font).ceil();
+            let x = (bx.center().x - (icon + gap + tw) / 2.0).round();
+            icons::paint(&mut p, "close", Rect::new(x, bx.center().y - icon / 2.0, icon, icon), c.text);
+            p.draw_text(Rect::new(x + icon + gap, bx.y, tw + 2.0, bx.h), Align::Left, label, font, c.text);
+            return;
+        }
         for it in &self.items {
             match it.id {
                 "clock" => {
@@ -267,6 +317,17 @@ mod tests {
         assert!(!bar.on_button(clock));
         bar.set_state("00:05".into(), true);
         assert!(matches!(bar.items.iter().find(|i| i.id == "pause").unwrap().look, Look::Icon { icon: "resume", .. }));
+        // Before it starts, all of it cancels, at the same size.
+        let size = bar.size();
+        bar.set_cancel(Some("Cancel".into()));
+        assert_eq!(bar.size(), size);
+        assert!(bar.on_button(stop) && bar.on_button(clock));
+        bar.button(true, clock);
+        assert_eq!(bar.button(false, stop), Some(BarAction::Cancel));
+        assert!(!bar.on_button(Point::new(1.0, 1.0)));
+        bar.set_cancel(None);
+        bar.button(true, stop);
+        assert_eq!(bar.button(false, stop), Some(BarAction::Stop));
     }
 
     #[test]

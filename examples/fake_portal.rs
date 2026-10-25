@@ -1,7 +1,9 @@
 //! A stand-in for the desktop portal's global shortcuts (org.freedesktop.
 //! portal.GlobalShortcuts, and its host registry), for testing the tray
-//! app's without GNOME or Hyprland, and for its file chooser's Save
-//! dialog. Prints what it's asked, one line each, and then:
+//! app's without GNOME or Hyprland, for its file chooser's Save dialog,
+//! and for the screen cast's: its Start asks which screen to share, and
+//! never hears (until the request is closed). Prints what it's asked, one
+//! line each, and then:
 //!
 //! FAKE_PORTAL_PRESS="screen@1000": presses that action's shortcut that
 //! many milliseconds after the shortcuts are bound (Activated, for the
@@ -43,6 +45,17 @@ fn respond_with(conn: &zbus::Connection, path: String, code: u32, results: HashM
     });
 }
 
+/// A session, made at once.
+fn create_session(options: &HashMap<String, OwnedVariant>, header: &Header<'_>, conn: &zbus::Connection) -> OwnedObjectPath {
+    let who = sender_part(header);
+    let session = format!("{PATH}/session/{who}/{}", text(options, "session_handle_token"));
+    let request = format!("{PATH}/request/{who}/{}", text(options, "handle_token"));
+    println!("portal: session {session}");
+    let handle = OwnedVariant::try_from(Variant::from(ObjectPath::try_from(session).unwrap())).unwrap();
+    respond(conn, request.clone(), HashMap::from([("session_handle".to_string(), handle)]));
+    OwnedObjectPath::try_from(request).unwrap()
+}
+
 struct Shortcuts;
 
 #[zbus::interface(name = "org.freedesktop.portal.GlobalShortcuts")]
@@ -54,13 +67,7 @@ impl Shortcuts {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
     ) -> OwnedObjectPath {
-        let who = sender_part(&header);
-        let session = format!("{PATH}/session/{who}/{}", text(&options, "session_handle_token"));
-        let request = format!("{PATH}/request/{who}/{}", text(&options, "handle_token"));
-        println!("portal: session {session}");
-        let handle = OwnedVariant::try_from(Variant::from(ObjectPath::try_from(session).unwrap())).unwrap();
-        respond(conn, request.clone(), HashMap::from([("session_handle".to_string(), handle)]));
-        OwnedObjectPath::try_from(request).unwrap()
+        create_session(&options, &header, conn)
     }
 
     #[zbus(name = "BindShortcuts")]
@@ -141,6 +148,76 @@ impl Files {
     }
 }
 
+struct ScreenCast;
+
+#[zbus::interface(name = "org.freedesktop.portal.ScreenCast")]
+impl ScreenCast {
+    #[zbus(name = "CreateSession")]
+    fn create_session(
+        &self,
+        options: HashMap<String, OwnedVariant>,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> OwnedObjectPath {
+        create_session(&options, &header, conn)
+    }
+
+    #[zbus(name = "SelectSources")]
+    fn select_sources(
+        &self,
+        _session: OwnedObjectPath,
+        options: HashMap<String, OwnedVariant>,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> OwnedObjectPath {
+        let request = format!("{PATH}/request/{}/{}", sender_part(&header), text(&options, "handle_token"));
+        respond(conn, request.clone(), HashMap::new());
+        OwnedObjectPath::try_from(request).unwrap()
+    }
+
+    /// Its dialog is up until the request is closed: no answer.
+    #[zbus(name = "Start")]
+    fn start(
+        &self,
+        _session: OwnedObjectPath,
+        _parent_window: String,
+        options: HashMap<String, OwnedVariant>,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> OwnedObjectPath {
+        let request = format!("{PATH}/request/{}/{}", sender_part(&header), text(&options, "handle_token"));
+        println!("portal: which screen to share? {request}");
+        let (conn, path) = (conn.clone(), request.clone());
+        std::thread::spawn(move || {
+            let _ = zbus::block_on(conn.object_server().at(path.as_str(), Request { path: path.clone() }));
+        });
+        OwnedObjectPath::try_from(request).unwrap()
+    }
+
+    #[zbus(property, name = "version")]
+    fn version(&self) -> u32 {
+        4
+    }
+
+    #[zbus(property, name = "AvailableCursorModes")]
+    fn cursor_modes(&self) -> u32 {
+        3
+    }
+}
+
+/// A request whose dialog is up, until the asker closes it.
+struct Request {
+    path: String,
+}
+
+#[zbus::interface(name = "org.freedesktop.portal.Request")]
+impl Request {
+    #[zbus(name = "Close")]
+    fn close(&self) {
+        println!("portal: closed {}", self.path);
+    }
+}
+
 struct Registry;
 
 #[zbus::interface(name = "org.freedesktop.host.portal.Registry")]
@@ -157,6 +234,7 @@ fn main() {
             .name("org.freedesktop.portal.Desktop")
             .serve_at(PATH, Shortcuts)
             .serve_at(PATH, Files)
+            .serve_at(PATH, ScreenCast)
             .serve_at(PATH, Registry)
             .build(),
     )

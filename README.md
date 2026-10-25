@@ -145,7 +145,7 @@ The keys can be changed in Settings → Shortcuts → Keys in Flatshot RS (so ca
 
 ### Delayed captures
 
-**Capture region in 3 seconds** and **Capture active window in 3 seconds** in the tray menu, and `flatshot-rs -d SECONDS`, count down on screen: a small dial at the bottom of each monitor shows the seconds left, with a ring running down. It never takes the keyboard or the pointer (clicks go through it to what's under it), so a menu you open for the capture stays open, and it's gone a moment before the picture is taken, so it's never in it.
+**Capture region in 3 seconds** and **Capture active window in 3 seconds** in the tray menu, and `flatshot-rs -d SECONDS`, count down on screen: a small dial at the bottom of each monitor shows the seconds left, with a ring running down, and lets what's under it show through. It never takes the keyboard or the pointer (clicks go through it to what's under it), so a menu you open for the capture stays open, and it's gone a moment before the picture is taken, so it's never in it.
 
 ### Recent captures
 
@@ -155,14 +155,18 @@ Only the list is kept (`~/.local/state/flatshot-rs/recent.jsonl`, private to you
 
 ### Recording the screen
 
-Choose **Record screen** in the tray menu (or its shortcut, or <kbd>V</kbd> on the overlay, or `flatshot-rs --record`), pick an area or a window or a whole monitor, set MP4, WebM or GIF, sound and frame rate in the panel under it, and press <kbd>Enter</kbd>. Drawings made before choosing it are out of sight meanwhile (a video never has any) and come back with any other tool. Until then you can drag another area or click another window on any monitor; an area across monitors has its handles on each, so it's moved and resized from either, and the panel goes with most of it. The frame rate **Native** records the frames as the screen gives them (the screen-cast stream's own rate; on X11, the monitor's refresh rate). A small bar under the area (outside it, so it's never in the video) shows the time and has pause, stop and discard; red marks show the area's corners. Stop with the bar, the tray icon, the shortcut again, or <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal: the video is saved to `~/Videos/Screencasts` (settings: Recording), copied as a file, and announced.
+Choose **Record screen** in the tray menu (or its shortcut, or <kbd>V</kbd> on the overlay, or `flatshot-rs --record`), pick an area or a window or a whole monitor, set MP4, WebM or GIF, sound and frame rate in the panel under it, and press <kbd>Enter</kbd>. Drawings made before choosing it are out of sight meanwhile (a video never has any) and come back with any other tool. Until then you can drag another area or click another window on any monitor; an area across monitors has its handles on each, so it's moved and resized from either, and the panel goes with most of it. The frame rate **Native** records as often as the monitor shows a new picture (144 fps on a 144 Hz monitor; across monitors, the fastest; a GIF, no more than 30), at a steady rate as players and editors expect, a still screen costing next to nothing; where the monitor doesn't say, the frames as the screen gives them.
+
+The overlay goes as soon as you press <kbd>Enter</kbd>, and the countdown (Settings → Recording, 3 seconds unless you change it) runs on the desktop itself: the keyboard and pointer are yours, to get the windows you're recording ready. A dial over the middle of the area counts down (it lets what's under it show through, and clicks go through it), red marks show the area's corners, and the bar under the area is one button, **Cancel** (where the desktop can't place a dial, as on GNOME, it shows the seconds); the tray icon or the shortcut again cancel it too. The first time, the desktop asks which screen to share meanwhile. Once it records, the bar (the same size: nothing moves) shows the time and has pause, stop and discard, outside the area so it's never in the video. Stop with the bar, the tray icon, the shortcut again, or <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal: the video is saved to `~/Videos/Screencasts` (settings: Recording), copied as a file, and announced.
 
 | | KDE Plasma, GNOME | Sway, Hyprland, wlroots | X11 |
 |---|---|---|---|
 | Records with | the screen-cast portal and GStreamer (the first time, the desktop asks which screen to share) | wf-recorder | ffmpeg (x11grab) |
-| Needs | `gst-launch-1.0` with the PipeWire plugin, and x264enc (MP4) or vp8enc (WebM) | `wf-recorder` | `ffmpeg` |
+| Needs | `gst-launch-1.0` with the PipeWire plugin, and x264enc or openh264enc (MP4) or vp8enc (WebM) | `wf-recorder` | `ffmpeg` |
 
 Pausing and GIFs also need `ffmpeg`. The recorders are programs of their own: no frame passes through Flatshot RS.
+
+**Keeping up with fast monitors.** With GStreamer, MP4s are encoded on the GPU when there's an encoder for it that works: `vah264enc` (VA-API: AMD, Intel; in gst-plugins-bad, with the GPU's VA-API driver) or `nvh264enc` (NVIDIA). It keeps up at any frame rate and leaves the CPU to what you're recording. Should a recording with it fail to start, it goes on with the CPU's encoder, and if the GPU's was to blame, so does the rest of the session (`FLATSHOT_GPU_ENCODER=none` never tries it). On the CPU, the colours are converted on several cores, frames beyond the rate chosen are dropped before they cost anything, and x264 takes the best preset this CPU keeps up with at the area's size and frame rate, at a constant quality, so a still screen costs next to nothing.
 
 ### Copying text from the screen
 

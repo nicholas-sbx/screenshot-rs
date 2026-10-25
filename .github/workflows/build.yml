@@ -80,7 +80,7 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev sway grim wl-clipboard dbus fonts-dejavu-core python3 ffmpeg wf-recorder xvfb xkb-data stalonetray tesseract-ocr tesseract-ocr-eng
+          sudo apt-get install -y -q --no-install-recommends libxkbcommon-dev sway grim wl-clipboard dbus fonts-dejavu-core python3 ffmpeg wf-recorder xvfb xkb-data stalonetray tesseract-ocr tesseract-ocr-eng gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad gstreamer1.0-pipewire
       - name: Rust
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt

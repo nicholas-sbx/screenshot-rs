@@ -84,10 +84,6 @@ pub struct State {
     pub eyedropper: bool,
     /// magnifier screen pixels per captured pixel (the wheel changes it)
     pub loupe_zoom: f32,
-    /// seconds left before recording starts (whole ones, as shown)
-    pub countdown: Option<i64>,
-    /// how much of the countdown is left, 1 to 0, as it runs down (its ring)
-    pub countdown_ring: f32,
     /// what the control under the pointer does, or a problem to show
     pub hint: Option<String>,
     /// why recording in the chosen format can't work here
@@ -146,8 +142,6 @@ impl State {
             pin_mode: false,
             eyedropper: false,
             loupe_zoom: 8.0,
-            countdown: None,
-            countdown_ring: 0.0,
             hint: None,
             record_problem: None,
             ocr_problem: None,

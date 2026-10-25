@@ -11,12 +11,14 @@ use std::fs;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use calloop::generic::Generic;
 use calloop::{Interest, Mode as PollMode, PostAction};
 
+use super::countdown::{self, DialPaint};
 use super::tray::NoteTarget;
 use super::{App, Input};
 use crate::clipboard::TEXT_MIMES;
@@ -44,6 +46,8 @@ const POLL: Duration = Duration::from_millis(150);
 const BROKEN: Duration = Duration::from_secs(1);
 /// Thumbnails kept for recordings' notifications.
 const THUMBNAILS: usize = 10;
+/// The most pixels across they are.
+const THUMBNAIL: u32 = 640;
 
 /// What this desktop's recorder can do, for the capture overlay.
 pub struct Recorder {
@@ -52,6 +56,7 @@ pub struct Recorder {
 
 impl RecordSupport for Recorder {
     fn problem(&mut self, format: &str) -> Option<String> {
+        warm_up(); // (by the time an area is chosen, the GPU's encoders are known)
         record::problem(self.how, format)
     }
     fn can_span(&self) -> bool {
@@ -59,32 +64,39 @@ impl RecordSupport for Recorder {
     }
 }
 
-/// Find out in the background which GStreamer parts are installed, so the
-/// overlay's record tool doesn't wait for it.
+/// Find out in the background which GStreamer parts are installed (the
+/// GPU's encoders too), so neither the overlay's record tool nor a
+/// recording's start waits for it. Once a run.
 pub fn warm_up() {
-    let how = record::method();
-    if !matches!(how, Method::Portal | Method::TestGst) || !util::have("gst-inspect-1.0") {
-        return;
-    }
-    let elements = [
-        "pipewiresrc",
-        "x264enc",
-        "openh264enc",
-        "h264parse",
-        "vp8enc",
-        "videoconvert",
-        "videocrop",
-        "videorate",
-        "videoscale",
-        "mp4mux",
-        "webmmux",
-        "pulsesrc",
-        "opusenc",
-        "avenc_aac",
-    ];
-    for e in elements {
-        let _ = std::thread::Builder::new().name("flatshot-gst".into()).spawn(move || record::gst_has(e));
-    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let how = record::method();
+        if !matches!(how, Method::Portal | Method::TestGst) || !util::have("gst-inspect-1.0") {
+            return;
+        }
+        let elements = [
+            "pipewiresrc",
+            "x264enc",
+            "openh264enc",
+            "h264parse",
+            "vp8enc",
+            "videoconvert",
+            "videocrop",
+            "videorate",
+            "videoscale",
+            "mp4mux",
+            "webmmux",
+            "pulsesrc",
+            "opusenc",
+            "avenc_aac",
+            "vah264enc",
+            "vah264lpenc",
+            "nvh264enc",
+        ];
+        for e in elements {
+            let _ = std::thread::Builder::new().name("flatshot-gst".into()).spawn(move || record::gst_has(e));
+        }
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,8 +126,8 @@ pub enum End {
     Failed(String),
 }
 
-/// A finished video: where, and how long.
-type Saved = (PathBuf, Option<Duration>);
+/// A finished video: where, how long, and its first frame (small).
+type Saved = (PathBuf, Option<Duration>, Option<Image>);
 
 /// Things the app is to do for the recording.
 #[derive(Debug)]
@@ -135,11 +147,22 @@ pub struct Recording {
     cfg: Config,
     shot: Shot,
     thumbnail: Option<Image>,
-    /// when the first segment may start (the overlays gone by then)
+    /// when the first segment may start (the overlays gone by then, and
+    /// the countdown over)
     start_at: Option<Instant>,
+    /// the countdown before it: when it began, and how long it is
+    counting: Option<(Instant, Duration)>,
     cast: Option<Arc<ScreenCast>>,
+    /// the screen cast has been asked for
+    cast_asked: bool,
+    /// it's no longer wanted (the desktop's dialog, if it's still asking, goes)
+    cast_cancelled: Arc<AtomicBool>,
     cast_rx: Option<mpsc::Receiver<Result<ScreenCast, Failure>>>,
     proc: Option<Child>,
+    /// the GPU's encoder the recorder encodes with, if it does
+    gpu: Option<&'static str>,
+    /// the CPU's encoders only (the GPU's failed)
+    cpu_only: bool,
     /// the recorder's process descriptor is watched by the event loop
     watched: bool,
     /// it didn't stop when asked, and was killed
@@ -225,7 +248,7 @@ fn place(src: &Path, target: &Path) -> Result<PathBuf, String> {
 impl Recording {
     /// `refresh`: how often the area's monitor shows a new picture, if known.
     pub fn new(job: RecordJob, monitors: &[Monitor], refresh: Option<f64>, cfg: Config, waker: Waker) -> Result<Recording, String> {
-        let RecordJob { area, output, scale, shot, thumbnail, format, fps, mic, system_audio, cursor } = job;
+        let RecordJob { area, output, scale, shot, thumbnail, format, fps, mic, system_audio, cursor, countdown } = job;
         let target = Target {
             rect: area,
             monitor: output.rect,
@@ -236,6 +259,7 @@ impl Recording {
         };
         // (0: native)
         let opts = Options { format, fps: (fps > 0).then(|| fps.clamp(1, 120) as u32), mic, system_audio, cursor };
+        let (now, countdown) = (Instant::now(), Duration::from_secs(countdown.into()));
         Ok(Recording {
             state: State::Starting,
             target,
@@ -245,10 +269,15 @@ impl Recording {
             shot,
             // (only a small copy is kept while recording)
             thumbnail: small_thumbnail(thumbnail),
-            start_at: Some(Instant::now() + SETTLE),
+            start_at: Some(now + countdown.max(SETTLE)),
+            counting: (!countdown.is_zero()).then_some((now, countdown)),
             cast: None,
+            cast_asked: false,
+            cast_cancelled: Arc::new(AtomicBool::new(false)),
             cast_rx: None,
             proc: None,
+            gpu: None,
+            cpu_only: false,
             watched: false,
             killed: false,
             lost: false,
@@ -280,6 +309,19 @@ impl Recording {
 
     pub fn elapsed(&self) -> Duration {
         self.recorded + self.segment_start.map(|t| t.elapsed()).unwrap_or_default()
+    }
+
+    /// When the countdown before recording ends, while it runs.
+    pub fn countdown_end(&self) -> Option<Instant> {
+        let (began, total) = self.counting?;
+        (self.state == State::Starting && Instant::now() < began + total).then_some(began + total)
+    }
+
+    /// The countdown, while it runs: the seconds left (as shown), and how
+    /// much of it is left (1 to 0).
+    pub fn countdown(&self) -> Option<(u64, f32)> {
+        let end = self.countdown_end()?;
+        Some(countdown::dial_shows(end.saturating_duration_since(Instant::now()), self.counting?.1))
     }
 
     // -- control -------------------------------------------------------------------------
@@ -332,7 +374,7 @@ impl Recording {
             return;
         }
         let path = self.dir.join(format!("part-{:03}.{}", self.segments.len() + 1, record::segment_extension(&self.opts.format)));
-        let launch = match record::launch(self.how, &self.target, &self.opts, &path, self.cast.as_deref()) {
+        let launch = match record::launch(self.how, &self.target, &self.opts, &path, self.cast.as_deref(), !self.cpu_only) {
             Ok(l) => l,
             Err(e) => return self.fail(e),
         };
@@ -348,6 +390,7 @@ impl Recording {
         };
         drop(launch.stream); // (the recorder has its own)
         self.stop_signal = launch.stop;
+        self.gpu = launch.gpu;
         self.segments.push(path);
         self.segment_start = Some(Instant::now());
         self.proc = Some(child);
@@ -430,6 +473,22 @@ impl Recording {
             && let Some(last) = self.segments.pop()
         {
             let _ = fs::remove_file(last);
+            // Recording with the GPU's encoder didn't start (a driver that
+            // can't, a size it won't take): this recording goes on with the
+            // CPU's, and if it was the encoder, so does the rest of the run.
+            // (Only at the start: parts made by different encoders may not
+            // join.)
+            if let Some(encoder) = self.gpu.filter(|_| self.segments.is_empty() && self.state == State::Recording) {
+                let what = if record::gpu_failed(encoder, &self.log_text()) {
+                    format!("the GPU's video encoder ({encoder})")
+                } else {
+                    format!("the recorder (with the GPU's {encoder})")
+                };
+                crate::warn!("{what} didn't start, so the CPU's encoder records instead: {}", self.log_tail());
+                self.cpu_only = true;
+                self.recorded = Duration::ZERO;
+                return self.begin_segment();
+            }
         }
         if self.state == State::Recording && self.has_video() {
             crate::warn!("the recorder stopped by itself: {}", self.log_tail());
@@ -446,10 +505,15 @@ impl Recording {
         self.segments.iter().any(|p| fs::metadata(p).is_ok_and(|m| m.len() > 0))
     }
 
+    /// What the recorders said.
+    fn log_text(&self) -> String {
+        let text = util::read_limited(&self.dir.join("recorder.log"), 1 << 20).unwrap_or_default();
+        String::from_utf8_lossy(&text).into_owned()
+    }
+
     /// The recorder's last words.
     fn log_tail(&self) -> String {
-        let text = util::read_limited(&self.dir.join("recorder.log"), 1 << 20).unwrap_or_default();
-        let text = String::from_utf8_lossy(&text);
+        let text = self.log_text();
         util::elide(text.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or(""), 300)
     }
 
@@ -464,7 +528,10 @@ impl Recording {
         match answer {
             Ok(cast) => {
                 self.cast = Some(Arc::new(cast));
-                self.begin_segment();
+                // (else once the countdown's over)
+                if self.start_at.is_none() {
+                    self.begin_segment();
+                }
             }
             Err(Failure::Cancelled) => self.done(End::Discarded),
             Err(Failure::Failed(e)) => self.fail(e),
@@ -500,6 +567,10 @@ impl Recording {
                 } else {
                     parts[0].clone()
                 };
+                // (what it starts with: the screen may have changed since
+                // the area was chosen, during the countdown)
+                let first = dir.join("first.png");
+                let first = record::first_frame(&video, &first, THUMBNAIL).ok().and_then(|_| crate::codec::decode_file(&first).ok()).and_then(small_thumbnail);
                 let finished = if format == "gif" {
                     let gif = dir.join("recording.gif");
                     record::to_gif(&video, &gif, fps)?;
@@ -509,7 +580,7 @@ impl Recording {
                 };
                 let placed = place(&finished, &target)?;
                 let length = record::duration(&placed).map(Duration::from_secs_f64);
-                Ok((placed, length))
+                Ok((placed, length, first))
             })();
             let _ = tx.send(result);
             waker();
@@ -523,8 +594,11 @@ impl Recording {
     fn poll_saving(&mut self) {
         let Some(rx) = &self.saving else { return };
         match rx.try_recv() {
-            Ok(Ok((path, length))) => {
+            Ok(Ok((path, length, first))) => {
                 self.saving = None;
+                if first.is_some() {
+                    self.thumbnail = first;
+                }
                 self.done(End::Saved(path, length));
             }
             Ok(Err(e)) => {
@@ -555,6 +629,7 @@ impl Recording {
         if let Some(c) = self.cast.take() {
             c.close();
         }
+        self.cast_cancelled.store(true, Ordering::Relaxed);
         let _ = fs::remove_dir_all(&self.dir);
         self.state = State::Done;
         self.events.push(Event::Ended(end));
@@ -601,6 +676,10 @@ impl Drop for Recording {
 /// A recording, and its controls on screen.
 pub struct RecordingRun {
     pub rec: Recording,
+    /// the bar and marks have been put up (for the countdown, or since it started)
+    controls: bool,
+    /// the countdown's dial over the area: the scale it was drawn at, and what it showed
+    dial: Option<(f32, Option<countdown::Shows>)>,
     bar: Option<RecBar>,
     /// the bar's monitor and place on it (logical), as a layer surface
     bar_place: Option<(Monitor, (i32, i32))>,
@@ -660,7 +739,12 @@ impl App {
             return false;
         }
         let monitors = self.dpy.monitors();
-        let refresh = monitors.iter().find(|m| m.name == job.output.name).and_then(|m| self.dpy.refresh_rate(m));
+        // (an area across monitors: the fastest of them)
+        let refresh = monitors
+            .iter()
+            .filter(|m| m.name == job.output.name || m.rect.intersects(&job.area))
+            .filter_map(|m| self.dpy.refresh_rate(m))
+            .max_by(f64::total_cmp);
         let rec = match Recording::new(job, &monitors, refresh, self.cfg.clone(), self.waker.clone()) {
             Ok(r) => r,
             Err(e) => {
@@ -668,7 +752,16 @@ impl App {
                 return false;
             }
         };
-        self.recording = Some(RecordingRun { rec, bar: None, bar_place: None, bar_drag: None, marks: Vec::new(), shown: String::new() });
+        let counting = rec.countdown().is_some();
+        self.recording =
+            Some(RecordingRun { rec, controls: false, dial: None, bar: None, bar_place: None, bar_drag: None, marks: Vec::new(), shown: String::new() });
+        if counting {
+            // Counting down: the bar (one button, that cancels it) and the
+            // marks show where it'll be, the dial in the middle; none of
+            // them takes the keyboard, and only the bar the pointer.
+            self.show_controls();
+            self.show_dial();
+        }
         self.recording_changed();
         self.refresh_tray_menu();
         true
@@ -687,33 +780,56 @@ impl App {
     }
 
     pub(super) fn recording_deadline(&self) -> Option<Instant> {
-        self.recording.as_ref().and_then(|r| r.rec.next_deadline())
+        let r = self.recording.as_ref()?;
+        let next = r.rec.next_deadline();
+        let Some(end) = r.rec.countdown_end() else { return next };
+        // Counting down: the dial's ring runs on (where frames don't come by
+        // themselves), and the dial goes a moment before the end. With no
+        // dial, the seconds left (the bar's, the tray's) change each second:
+        // as shown, rounded up.
+        let now = Instant::now();
+        let tick = if r.dial.is_some() {
+            (now + countdown::FRAME).min(end.checked_sub(countdown::GONE_BEFORE).unwrap_or(end))
+        } else {
+            let whole = end.saturating_duration_since(now).as_nanos().div_ceil(1_000_000_000).saturating_sub(1);
+            end.checked_sub(Duration::from_secs(whole as u64)).unwrap_or(end)
+        };
+        Some(next.map_or(tick, |n| n.min(tick)))
     }
 
     /// Start what's due, hear the recorder, the portal and the saving.
     pub(super) fn poll_recording(&mut self) {
         let Some(r) = &mut self.recording else { return };
         let rec = &mut r.rec;
+        // The screen cast is asked for at once: the desktop may ask which
+        // screen to share, which can be answered while it counts down.
+        if rec.how == Method::Portal && !rec.cast_asked && rec.state == State::Starting {
+            rec.cast_asked = true;
+            let (tx, rx) = mpsc::channel();
+            let (target, cursor, cancelled, waker) = (rec.target.clone(), rec.opts.cursor, rec.cast_cancelled.clone(), self.waker.clone());
+            let spawned = std::thread::Builder::new().name("flatshot-screencast".into()).spawn(move || {
+                let _ = tx.send(ScreenCast::open(&target, cursor, &cancelled));
+                waker();
+            });
+            match spawned {
+                Ok(_) => rec.cast_rx = Some(rx),
+                Err(e) => rec.fail(e.to_string()),
+            }
+        }
         if rec.start_at.is_some_and(|t| t <= Instant::now()) {
             rec.start_at = None;
-            if rec.how == Method::Portal {
-                let (tx, rx) = mpsc::channel();
-                let (target, cursor, waker) = (rec.target.clone(), rec.opts.cursor, self.waker.clone());
-                let spawned = std::thread::Builder::new().name("flatshot-screencast".into()).spawn(move || {
-                    let _ = tx.send(ScreenCast::open(&target, cursor));
-                    waker();
-                });
-                match spawned {
-                    Ok(_) => rec.cast_rx = Some(rx),
-                    Err(e) => rec.fail(e.to_string()),
-                }
-            } else {
+            // (the portal's stream, once it's there: see poll_cast)
+            if rec.how != Method::Portal || rec.cast.is_some() {
                 rec.begin_segment();
             }
         }
         rec.poll_cast();
         rec.check();
         rec.poll_saving();
+        // The dial is over the area: it's gone before the recording starts.
+        if r.dial.is_some() && r.rec.countdown_end().is_none_or(|end| Instant::now() + countdown::GONE_BEFORE >= end) {
+            self.hide_dial();
+        }
         self.serve_recording();
     }
 
@@ -746,7 +862,10 @@ impl App {
         let events = r.rec.take_events();
         for e in events {
             match e {
-                Event::Started => self.show_controls(),
+                Event::Started => {
+                    self.hide_dial();
+                    self.show_controls();
+                }
                 Event::Saving => self.hide_controls(),
                 Event::Ended(end) => {
                     self.hide_controls();
@@ -768,28 +887,43 @@ impl App {
         };
         let clock = record::clock(r.rec.elapsed());
         let paused = r.rec.state == State::Paused;
+        let countdown = r.rec.countdown().map(|c| c.0);
         if let Some(bar) = &mut r.bar {
+            // Until it starts, the bar cancels it (with the seconds left
+            // where there's no dial to show them).
+            let cancel = (r.rec.state == State::Starting).then(|| match countdown {
+                Some(n) if !self.dpy.can_place() => format!("Cancel  ·  {n}"),
+                _ => "Cancel".to_string(),
+            });
+            bar.set_cancel(cancel);
             bar.set_state(clock.clone(), paused);
         }
         if clock != r.shown || r.rec.state != State::Recording {
             r.shown = clock.clone();
             if let Some(t) = &self.tray.tray {
                 t.set_recording(true);
-                let state = match r.rec.state {
-                    State::Starting => "Starting to record",
-                    State::Paused => "Recording paused",
-                    State::Saving | State::Done => "Saving the recording",
-                    State::Recording => "Recording",
+                let state = match (r.rec.state, countdown) {
+                    (State::Starting, Some(n)) => format!("Recording in {n}  ·  click to cancel"),
+                    (State::Starting, None) => "Starting to record  ·  click to cancel".into(),
+                    (State::Paused, _) => format!("Recording paused  {clock}  ·  click to stop"),
+                    (State::Saving | State::Done, _) => format!("Saving the recording  {clock}"),
+                    (State::Recording, _) => format!("Recording  {clock}  ·  click to stop"),
                 };
-                t.set_tooltip(&format!("{}: {state}  {clock}  ·  click to stop", crate::APP_NAME));
+                t.set_tooltip(&format!("{}: {state}", crate::APP_NAME));
             }
         }
     }
 
     // -- the controls ----------------------------------------------------------------------
 
+    /// The bar and the marks (once: put up for the countdown, the bar turns
+    /// into the recording's controls when it starts).
     fn show_controls(&mut self) {
         let Some(r) = &mut self.recording else { return };
+        if std::mem::replace(&mut r.controls, true) {
+            self.recording_changed();
+            return;
+        }
         let area = r.rec.area();
         let monitors = self.dpy.monitors();
         let own = monitors.iter().find(|m| m.name == r.rec.target.monitor_name).or_else(|| monitors.iter().find(|m| m.rect.contains(area.center()))).cloned();
@@ -861,9 +995,42 @@ impl App {
                 ..Default::default()
             });
         }
+        self.recording_changed(); // (the bar cancels it, until it starts)
+    }
+
+    /// The countdown's dial, over the middle of the area. It takes neither
+    /// the keyboard nor the pointer: clicks go to what's under it.
+    fn show_dial(&mut self) {
+        let Some(r) = &mut self.recording else { return };
+        if r.rec.countdown().is_none() || !self.dpy.can_place() {
+            return;
+        }
+        let area = r.rec.area();
+        let monitors = self.dpy.monitors();
+        let Some(m) = monitors.iter().find(|m| m.rect.contains(area.center())).or_else(|| monitors.iter().find(|m| m.name == r.rec.target.monitor_name)) else {
+            return;
+        };
+        let size = countdown::DIAL.ceil() as i32;
+        let at = (
+            (area.center().x - size / 2 - m.rect.x).clamp(0, (m.rect.w - size).max(0)),
+            (area.center().y - size / 2 - m.rect.y).clamp(0, (m.rect.h - size).max(0)),
+        );
+        if self.dpy.add_control(Owner::RecDial, m, at, (size as u32, size as u32), &super::layer_namespace(), true) {
+            r.dial = Some((0.0, None));
+        }
+        self.dpy.flush();
+    }
+
+    fn hide_dial(&mut self) {
+        let Some(r) = &mut self.recording else { return };
+        if r.dial.take().is_some() {
+            self.dpy.remove(Owner::RecDial);
+            self.dpy.flush();
+        }
     }
 
     fn hide_controls(&mut self) {
+        self.hide_dial();
         let Some(r) = &mut self.recording else { return };
         if r.bar.take().is_some() {
             self.dpy.remove(Owner::RecBar);
@@ -914,7 +1081,7 @@ impl App {
         match action {
             Some(BarAction::Pause) => r.rec.toggle_pause(),
             Some(BarAction::Stop) => r.rec.stop(),
-            Some(BarAction::Discard) => r.rec.discard(),
+            Some(BarAction::Discard | BarAction::Cancel) => r.rec.discard(),
             None => {}
         }
         if dropped {
@@ -1000,6 +1167,15 @@ impl App {
                         && self.dpy.redraw(owner, 0, &mut MarkPaint { corner: m.1, scale, damaged: true })
                     {
                         m.2 = scale;
+                    }
+                }
+                Owner::RecDial => {
+                    // (when its second or ring changed)
+                    if let (Some((drawn_at, drawn)), Some((seconds, fraction))) = (&mut r.dial, r.rec.countdown()) {
+                        let shows = countdown::shows(seconds, fraction);
+                        if (*drawn != Some(shows) || *drawn_at != scale) && self.dpy.redraw(owner, 0, &mut DialPaint { scale, seconds, fraction }) {
+                            (*drawn_at, *drawn) = (scale, Some(shows));
+                        }
                     }
                 }
                 _ => {}
@@ -1131,18 +1307,18 @@ fn human_size(n: u64) -> String {
     if n >= 1_000_000 { format!("{:.1} MB", n as f64 / 1e6) } else { format!("{} KB", (n as f64 / 1e3).round().max(1.0)) }
 }
 
-/// The frozen screen at no more than 640 pixels across.
+/// A picture of the recording at no more than [`THUMBNAIL`] pixels across.
 fn small_thumbnail(thumb: Image) -> Option<Image> {
     let (w, h) = thumb.size();
-    if w <= 640 && h <= 640 {
+    if w <= THUMBNAIL && h <= THUMBNAIL {
         return Some(thumb);
     }
-    let k = 640.0 / w.max(h) as f64;
+    let k = THUMBNAIL as f64 / w.max(h) as f64;
     thumb.scaled_area(((w as f64 * k).round() as u32).max(1), ((h as f64 * k).round() as u32).max(1)).ok()
 }
 
-/// The first frame (the frozen screen), for the notification; the newest
-/// few are kept.
+/// The first frame (else the frozen screen it was chosen on), for the
+/// notification; the newest few are kept.
 fn save_thumbnail(thumb: &Image, video: &Path) -> Option<PathBuf> {
     let folder = config::cache_home().join(crate::APP_ID).join("thumbnails");
     fs::DirBuilder::new().recursive(true).mode(0o700).create(&folder).ok()?;

@@ -2,7 +2,8 @@
 //! each monitor, counting the seconds left with a ring running down. It
 //! never takes the keyboard or the pointer (they go to what's under it),
 //! so a menu opened for the capture stays open, and it's gone a moment
-//! before the picture is taken, so it's never in it.
+//! before the picture is taken, so it's never in it. (A recording counts
+//! down on the same dial, in the middle of its area.)
 
 use std::time::{Duration, Instant};
 
@@ -19,15 +20,15 @@ use crate::render::text::{self, DEMIBOLD};
 use crate::render::theme::{self, Color};
 
 /// The dial's size (logical pixels).
-const DIAL: f32 = 104.0;
+pub(super) const DIAL: f32 = 104.0;
 /// How far above the bottom of the monitor it sits.
 const ABOVE: i32 = 72;
 /// How long before the picture it goes: off the screen by then, a desktop
 /// that fades it out included.
-const GONE_BEFORE: Duration = Duration::from_millis(350);
+pub(super) const GONE_BEFORE: Duration = Duration::from_millis(350);
 /// How often the ring moves on where the display doesn't pace it (X11; on
 /// Wayland each frame shown asks for the next).
-const FRAME: Duration = Duration::from_millis(16);
+pub(super) const FRAME: Duration = Duration::from_millis(16);
 /// The steps the ring is drawn in, round the whole of it (a quarter of a
 /// degree: well under a pixel, so it runs down smoothly).
 const RING_STEPS: f32 = 1440.0;
@@ -46,21 +47,32 @@ pub(super) struct Countdown {
 }
 
 /// What a dial shows: the seconds left, and its ring (in RING_STEPS).
-type Shows = (u64, u16);
+pub(super) type Shows = (u64, u16);
+
+/// What a dial shows with `left` seconds left of `total`: the whole seconds
+/// (counting down to 1) and how much of the ring (1 to 0).
+pub(super) fn dial_shows(left: Duration, total: Duration) -> (u64, f32) {
+    let (left, total) = (left.as_secs_f32(), total.as_secs_f32().max(0.001));
+    (left.ceil().max(1.0) as u64, (left / total).clamp(0.0, 1.0))
+}
+
+/// The steps of the ring a dial shows (it's drawn again when they change).
+pub(super) fn shows(seconds: u64, fraction: f32) -> Shows {
+    (seconds, (fraction * RING_STEPS).round() as u16)
+}
 
 impl Countdown {
     /// The seconds left, and how much of the wait is (1 to 0), at `now`.
-    fn left(&self, now: Instant) -> (f32, f32) {
-        let total = self.at.saturating_duration_since(self.started).as_secs_f32().max(0.001);
-        let left = self.at.saturating_duration_since(now).as_secs_f32();
-        (left, (left / total).clamp(0.0, 1.0))
+    fn left(&self, now: Instant) -> (u64, f32) {
+        dial_shows(self.at.saturating_duration_since(now), self.at.saturating_duration_since(self.started))
     }
 }
 
-struct DialPaint {
-    scale: f32,
-    seconds: u64,
-    fraction: f32,
+/// A dial, drawn at `scale`.
+pub(super) struct DialPaint {
+    pub scale: f32,
+    pub seconds: u64,
+    pub fraction: f32,
 }
 
 impl Painted for DialPaint {
@@ -79,11 +91,13 @@ impl Painted for DialPaint {
 }
 
 /// The dial: the seconds left in the middle, a ring of how much of the
-/// wait is left, from the top, clockwise.
+/// wait is left, from the top, clockwise. Its face lets what's under it
+/// show through a little (the seconds and the ring don't).
 pub fn paint_dial(p: &mut Painter<'_>, seconds: u64, fraction: f32) {
     let c = theme::c();
     let face = Rect::new(4.0, 4.0, DIAL - 8.0, DIAL - 8.0);
-    p.fill_ellipse(face, Color::rgba(14, 14, 20, 236));
+    // (at least half: an X server without a compositor shows it whole)
+    p.fill_ellipse(face, Color::rgba(14, 14, 20, 168));
     p.stroke_ellipse(face, Pen::new(Color::rgba(255, 255, 255, 36), 1.0));
     let ring = face.adjusted(9.0, 9.0, -9.0, -9.0);
     p.stroke_ellipse(ring, Pen::new(Color::rgba(255, 255, 255, 40), 5.0));
@@ -163,9 +177,8 @@ impl App {
     /// Draw the dials whose second or ring changed.
     pub(super) fn redraw_countdown(&mut self) {
         let Some(cd) = &mut self.countdown else { return };
-        let (left, fraction) = cd.left(Instant::now());
-        let seconds = left.ceil().max(1.0) as u64;
-        let key = (seconds, (fraction * RING_STEPS).round() as u16);
+        let (seconds, fraction) = cd.left(Instant::now());
+        let key = shows(seconds, fraction);
         for (i, scale, drawn) in &mut cd.dials {
             let Some((_, s)) = self.dpy.surface(Owner::Countdown(*i)) else { continue };
             if *drawn == Some(key) && *scale == s {
@@ -197,6 +210,9 @@ mod tests {
         let (full, half) = (draw(1.0), draw(0.5));
         // See-through round the face; the ring's left half lit when full, not at half.
         assert_eq!(full.pixel(0, 0) >> 24, 0);
+        // The face shows a little of what's under it, but no less than half of itself.
+        let face = full.pixel((DIAL / 2.0) as u32, 22) >> 24;
+        assert!((128..240).contains(&face), "{face}");
         // (the ring's middle: 4 + 9 in from each side)
         let left_of_ring = (13, (DIAL / 2.0) as u32);
         assert_ne!(full.pixel(left_of_ring.0, left_of_ring.1), half.pixel(left_of_ring.0, left_of_ring.1));

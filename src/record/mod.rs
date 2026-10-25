@@ -5,10 +5,11 @@
 //!
 //! - KDE Plasma, GNOME and other Wayland desktops: the screen-cast portal.
 //!   It hands over a PipeWire stream of a monitor, which GStreamer
-//!   (`gst-launch-1.0` with `pipewiresrc`) crops to the area and encodes.
-//!   The first time, the desktop asks which screen to share; the portal's
-//!   restore token is kept per monitor, so later recordings of it start
-//!   without asking.
+//!   (`gst-launch-1.0` with `pipewiresrc`) crops to the area and encodes,
+//!   with the GPU's H.264 encoder where there's one that works (VA-API,
+//!   NVENC), else x264. The first time, the desktop asks which screen to
+//!   share; the portal's restore token is kept per monitor, so later
+//!   recordings of it start without asking.
 //! - Sway, Hyprland and other wlroots compositors: `wf-recorder`.
 //! - X11: `ffmpeg` with x11grab.
 //!
@@ -26,6 +27,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::geom::IRect;
@@ -100,10 +102,16 @@ pub struct Options {
     pub cursor: bool,
 }
 
+/// A GIF's frames a second, at most (as fast as a GIF goes here).
+pub const GIF_FPS: u32 = 30;
+
 impl Options {
-    /// The frame rate the bitrate is worked out for (native: as for 60).
-    fn budget_fps(&self) -> u32 {
-        self.fps.unwrap_or(60)
+    /// The steady frame rate to record at: the one chosen, else (native)
+    /// as often as the monitor shows a new picture, when it says (for a
+    /// GIF, no more than it takes). None: the frames as the stream gives them.
+    pub fn rate(&self, refresh: Option<f64>) -> Option<u32> {
+        let rate = self.fps.or_else(|| refresh.filter(|r| (1.0..=500.0).contains(r)).map(|r| r.round() as u32));
+        rate.map(|r| if self.format == "gif" { r.min(GIF_FPS) } else { r })
     }
 
     /// The PulseAudio sources to record (none for a GIF).
@@ -301,8 +309,9 @@ pub fn problem(how: Method, format: &str) -> Option<String> {
             if how == Method::Portal && !gst_has("pipewiresrc") {
                 return Some("Recording needs GStreamer's PipeWire plugin (gstreamer1.0-pipewire or gst-plugin-pipewire).".into());
             }
-            let fmt = if format == "webm" { "webm" } else { "mp4" };
-            if gst_video_encoder(fmt).is_none() {
+            let fmt = segment_extension(format);
+            // (the CPU's: the GPU's, if any, is looked for in the background)
+            if cpu_encoder(fmt).is_none() {
                 return Some(
                     "Recording needs a GStreamer video encoder: x264enc or openh264enc for MP4, vp8enc for WebM (gst-plugins-ugly / -bad / -good).".into(),
                 );
@@ -327,20 +336,61 @@ fn bitrate(w: i32, h: i32, fps: u32) -> u32 {
     ((w as f64 * h as f64 * fps as f64 * 0.08 / 1000.0).round() as u32).clamp(1500, 40000)
 }
 
+/// The most x264 may spend (kbit/s) on the quality it's asked for: twice
+/// the generous rate, for the busiest moments.
+fn bitrate_cap(w: i32, h: i32, fps: u32) -> u32 {
+    ((w as f64 * h as f64 * fps as f64 * 0.16 / 1000.0).round() as u32).clamp(4000, 100_000)
+}
+
+/// The frame rate the bitrate is worked out for (frames as they come: as for 60).
+fn budget_fps(rate: Option<u32>) -> u32 {
+    rate.unwrap_or(60)
+}
+
+/// Frames between keyframes: two seconds' worth.
+fn keyframe_interval(rate: Option<u32>) -> u32 {
+    (budget_fps(rate) * 2).clamp(2, 1024)
+}
+
+/// The CPU threads an encoder can count on (beyond a dozen, they're mostly
+/// a second thread on each core).
+fn cpu_threads() -> u32 {
+    std::thread::available_parallelism().map_or(4, |n| n.get() as u32).clamp(1, 12)
+}
+
+/// x264's speed preset for `w` × `h` at `fps`: the slower, better ones
+/// while this CPU can keep up with them (with room to spare for what's
+/// being recorded: busy video costs far more than a still desktop), faster
+/// ones where it couldn't, so no frame is lost waiting for the encoder.
+fn x264_preset(w: i32, h: i32, fps: u32) -> &'static str {
+    let pixels = w as f64 * h as f64 * fps as f64;
+    let threads = cpu_threads() as f64;
+    if pixels <= 35e6 * threads {
+        "veryfast"
+    } else if pixels <= 60e6 * threads {
+        "superfast"
+    } else {
+        "ultrafast"
+    }
+}
+
 fn strings(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| w.to_string()).collect()
 }
 
-fn ffmpeg_codecs(ext: &str, crop: IRect, fps: u32, audio: bool) -> Vec<String> {
+fn ffmpeg_codecs(ext: &str, crop: IRect, rate: Option<u32>, audio: bool) -> Vec<String> {
+    let fps = budget_fps(rate);
+    let keys = keyframe_interval(rate).to_string();
     let (mut video, sound) = if ext == "webm" {
         let b = format!("{}k", bitrate(crop.w, crop.h, fps));
         (
-            strings(&["-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8", "-b:v", &b, "-crf", "10", "-auto-alt-ref", "0"]),
+            strings(&["-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8", "-b:v", &b, "-crf", "10", "-auto-alt-ref", "0", "-g", &keys]),
             strings(&["-c:a", "libopus", "-b:a", "128k"]),
         )
     } else {
         // mp4, and the intermediate file for a GIF
-        (strings(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-tune", "zerolatency"]), strings(&["-c:a", "aac", "-b:a", "160k"]))
+        let preset = x264_preset(crop.w, crop.h, fps);
+        (strings(&["-c:v", "libx264", "-preset", preset, "-crf", "20", "-tune", "zerolatency", "-g", &keys]), strings(&["-c:a", "aac", "-b:a", "160k"]))
     };
     video.extend(strings(&["-pix_fmt", "yuv420p"]));
     if audio {
@@ -365,23 +415,110 @@ fn ffmpeg_audio(sources: &[&str], first_index: usize) -> (Vec<String>, Vec<Strin
     }
 }
 
-/// GStreamer's video encoder for `fmt` (with `{kbps}` and `{bps}` to fill in).
-fn gst_video_encoder(fmt: &str) -> Option<Vec<&'static str>> {
-    if fmt == "webm" {
-        return gst_has("vp8enc")
-            .then(|| vec!["vp8enc", "deadline=1", "cpu-used=8", "threads=4", "end-usage=cbr", "target-bitrate={bps}", "keyframe-max-dist=120"]);
+/// A GStreamer video encoder: its words of the pipeline (with `{kbps}`,
+/// `{bps}`, `{cap}`, `{keys}`, `{threads}` and `{preset}` to fill in), the
+/// raw format it takes, and whether it's the GPU's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GstEncoder {
+    pub name: &'static str,
+    words: Vec<&'static str>,
+    format: &'static str,
+    pub gpu: bool,
+}
+
+/// The GPU's H.264 encoders, best first: VA-API (AMD and Intel), its
+/// low-power kind (all some Intel GPUs have), NVENC. Each at a constant
+/// quality, which costs next to nothing where the screen is still.
+const GPU_H264: &[(&str, &[&str])] = &[
+    ("vah264enc", &["vah264enc", "rate-control=cqp", "qpi=21", "qpp=23", "qpb=25", "key-int-max={keys}"]),
+    ("vah264lpenc", &["vah264lpenc", "rate-control=cqp", "qpi=21", "qpp=23", "qpb=25", "key-int-max={keys}"]),
+    ("nvh264enc", &["nvh264enc", "rc-mode=constqp", "qp-const=23", "gop-size={keys}"]),
+];
+/// The largest frame the GPUs' H.264 encoders generally take, either way.
+const GPU_MAX: i32 = 4096;
+/// And the smallest (NVENC's is 145 × 49): a smaller area is easy for the
+/// CPU anyway.
+const GPU_MIN: (i32, i32) = (256, 128);
+
+/// Set once the GPU's encoder failed to start: the CPU's from then on.
+static GPU_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// A recorder that encoded with the GPU's `encoder` ended at once, its
+/// stderr `log` saying why: if that was the encoder (the log names it: it
+/// can't be made, or won't start), the rest of this run records with the
+/// CPU's. True if so. (Anything else, as a microphone that isn't there,
+/// fails the CPU's alike.)
+pub fn gpu_failed(encoder: &str, log: &str) -> bool {
+    let blamed = log.contains(encoder);
+    if blamed {
+        GPU_FAILED.store(true, Ordering::Relaxed);
     }
-    let mut enc = if gst_has("x264enc") {
-        vec!["x264enc", "speed-preset=veryfast", "tune=zerolatency", "bitrate={kbps}", "key-int-max=120", "!", "video/x-h264,profile=high"]
+    blamed
+}
+
+/// The GPU's H.264 encoder to use, if any (`FLATSHOT_GPU_ENCODER`: "none",
+/// or one of them, used as if it were installed).
+fn gpu_h264() -> Option<(&'static str, &'static [&'static str])> {
+    if GPU_FAILED.load(Ordering::Relaxed) || !gst_has("h264parse") {
+        return None; // (and mp4mux takes what they make only through h264parse)
+    }
+    match std::env::var("FLATSHOT_GPU_ENCODER").as_deref() {
+        Ok("none") => None,
+        Ok(name) => GPU_H264.iter().find(|e| e.0 == name).copied(),
+        Err(_) => GPU_H264.iter().find(|e| gst_has(e.0)).copied(),
+    }
+}
+
+/// GStreamer's video encoder for `fmt`, for frames of `size`: for H.264,
+/// the GPU's where there's one and `gpu` (it keeps up at any frame rate,
+/// leaving the CPU alone), else the CPU's.
+fn gst_video_encoder(fmt: &str, size: (i32, i32), gpu: bool) -> Option<GstEncoder> {
+    if gpu
+        && fmt != "webm"
+        && (GPU_MIN.0..=GPU_MAX).contains(&size.0)
+        && (GPU_MIN.1..=GPU_MAX).contains(&size.1)
+        && let Some((name, words)) = gpu_h264()
+    {
+        let mut words = words.to_vec();
+        words.extend(["!", "h264parse"]);
+        return Some(GstEncoder { name, words, format: "NV12", gpu: true });
+    }
+    cpu_encoder(fmt)
+}
+
+/// The CPU's encoder for `fmt`, on every core: x264 or OpenH264 for H.264,
+/// VP8 for WebM.
+fn cpu_encoder(fmt: &str) -> Option<GstEncoder> {
+    if fmt == "webm" {
+        // (skipping what didn't change: most of a screen, most of the time)
+        let words = vec![
+            "vp8enc",
+            "deadline=1",
+            "cpu-used=8",
+            "threads={threads}",
+            "end-usage=cbr",
+            "target-bitrate={bps}",
+            "keyframe-max-dist={keys}",
+            "static-threshold=100",
+        ];
+        return gst_has("vp8enc").then_some(GstEncoder { name: "vp8enc", words, format: "I420", gpu: false });
+    }
+    let (name, mut words) = if gst_has("x264enc") {
+        // (a constant quality, at most `cap`: a still screen costs next to nothing)
+        let x264 = ["x264enc", "speed-preset={preset}", "tune=zerolatency", "pass=qual", "quantizer=20", "bitrate={cap}", "key-int-max={keys}"];
+        let mut words = x264.to_vec();
+        words.extend(["!", "video/x-h264,profile=high"]);
+        ("x264enc", words)
     } else if gst_has("openh264enc") {
-        vec!["openh264enc", "bitrate={bps}", "complexity=low"]
+        // (a slice per thread: one slice would be one thread)
+        ("openh264enc", vec!["openh264enc", "bitrate={bps}", "complexity=low", "multi-thread={threads}", "slice-mode=auto", "gop-size={keys}"])
     } else {
         return None;
     };
     if gst_has("h264parse") {
-        enc.extend(["!", "h264parse"]);
+        words.extend(["!", "h264parse"]);
     }
-    Some(enc)
+    Some(GstEncoder { name, words, format: "I420", gpu: false })
 }
 
 fn gst_audio_encoder(fmt: &str) -> Option<Vec<&'static str>> {
@@ -394,12 +531,21 @@ fn gst_audio_encoder(fmt: &str) -> Option<Vec<&'static str>> {
 }
 
 /// gst-launch's arguments: `source` (frames of size `frame`) cropped to
-/// `crop`, encoded for `opts.format`, written to `path`. Each argument is
-/// one word of the pipeline (gst-launch keeps their spaces).
-pub fn gst_pipeline(source: &[String], frame: (u32, u32), crop: IRect, opts: &Options, path: &Path) -> Result<Vec<String>, String> {
-    let fmt = if opts.format == "webm" { "webm" } else { "mp4" };
-    let encoder = gst_video_encoder(fmt).ok_or_else(|| problem(Method::TestGst, fmt).unwrap_or_else(|| "no GStreamer video encoder".into()))?;
-    let kbps = bitrate(crop.w, crop.h, opts.budget_fps());
+/// `crop`, at `rate` frames a second (None: as the stream gives them),
+/// encoded by `encoder` for `opts.format`, written to `path`. Each argument
+/// is one word of the pipeline (gst-launch keeps their spaces).
+pub fn gst_pipeline(
+    source: &[String],
+    frame: (u32, u32),
+    crop: IRect,
+    opts: &Options,
+    rate: Option<u32>,
+    encoder: &GstEncoder,
+    path: &Path,
+) -> Result<Vec<String>, String> {
+    let fmt = segment_extension(&opts.format);
+    let fps = budget_fps(rate);
+    let kbps = bitrate(crop.w, crop.h, fps);
     let (w, h) = (frame.0 as i32, frame.1 as i32);
     let (right, bottom) = ((w - crop.x - crop.w).max(0), (h - crop.y - crop.h).max(0));
     let mut a: Vec<String> = source.to_vec();
@@ -429,24 +575,43 @@ pub fn gst_pipeline(source: &[String], frame: (u32, u32), crop: IRect, opts: &Op
     ] {
         a.push(word);
     }
-    // At the rate chosen, else (native) the frames as the stream gives them.
-    if let Some(fps) = opts.fps {
-        a.extend(["videorate".to_string(), "!".into(), format!("video/x-raw,framerate={fps}/1"), "!".into()]);
+    // At a rate chosen (or a GIF's), the frames beyond it go before they
+    // cost anything. A stream's frames come only when the screen changes:
+    // one still for longer than two frames isn't repeated here (each
+    // repeat would be converted), but after converting, below.
+    if let Some(r) = rate.filter(|_| opts.fps.is_some() || opts.format == "gif") {
+        let still = 2_000_000_000 / u64::from(r.max(1));
+        a.extend(["videorate".to_string(), format!("max-duplication-time={still}"), "!".into(), format!("video/x-raw,framerate={r}/1"), "!".into()]);
     }
-    for word in [
+    // To the encoder's format on several threads, undithered (dithering's
+    // noise costs bits, and shimmers where the screen is still). The
+    // desktop's frame is back in its hands the sooner (it has only a few
+    // to draw into: KWin, three).
+    let convert = cpu_threads().min(8);
+    a.extend([
         "videoconvert".to_string(),
+        format!("n-threads={convert}"),
+        "dither=none".into(),
         "!".into(),
-        "video/x-raw,format=I420".into(),
+        format!("video/x-raw,format={}", encoder.format),
         "!".into(),
-        "queue".into(),
-        "max-size-buffers=0".into(),
-        "max-size-bytes=0".into(),
-        "max-size-time=2000000000".into(),
-        "!".into(),
-    ] {
-        a.push(word);
+    ]);
+    // A steady rate (players and editors expect one): a frame shown for
+    // longer is repeated, as the same picture, not converted again.
+    if let Some(r) = rate {
+        a.extend(["videorate".to_string(), "!".into(), format!("video/x-raw,framerate={r}/1"), "!".into()]);
     }
-    a.extend(encoder.iter().map(|w| w.replace("{kbps}", &kbps.to_string()).replace("{bps}", &(kbps * 1000).to_string())));
+    // (up to a second, at most 256 MB, for the encoder's busiest moments)
+    a.extend(strings(&["queue", "max-size-buffers=0", "max-size-bytes=268435456", "max-size-time=1000000000", "!"]));
+    let fill = [
+        ("{kbps}", kbps.to_string()),
+        ("{bps}", (kbps * 1000).to_string()),
+        ("{cap}", bitrate_cap(crop.w, crop.h, fps).to_string()),
+        ("{keys}", keyframe_interval(rate).to_string()),
+        ("{threads}", cpu_threads().to_string()),
+        ("{preset}", x264_preset(crop.w, crop.h, fps).to_string()),
+    ];
+    a.extend(encoder.words.iter().map(|w| fill.iter().fold(w.to_string(), |w, (k, v)| w.replace(k, v))));
     a.extend(strings(&["!", "queue", "!"]));
     if fmt == "webm" {
         a.extend(strings(&["webmmux", "name=mux"]));
@@ -503,10 +668,14 @@ pub struct Launch {
     pub stop: rustix::process::Signal,
     /// what it was set up as, for the log
     pub about: String,
+    /// the GPU's encoder it encodes with, if it does (should that fail to
+    /// start, the CPU's can)
+    pub gpu: Option<&'static str>,
 }
 
-/// The recorder for one segment, written to `path`.
-pub fn launch(how: Method, target: &Target, opts: &Options, path: &Path, cast: Option<&portal::ScreenCast>) -> Result<Launch, String> {
+/// The recorder for one segment, written to `path` (with the GPU's video
+/// encoder, if there's one and `gpu`).
+pub fn launch(how: Method, target: &Target, opts: &Options, path: &Path, cast: Option<&portal::ScreenCast>, gpu: bool) -> Result<Launch, String> {
     let crop = target.local_pixels();
     if crop.w < 2 || crop.h < 2 {
         return Err("The area is too small to record.".into());
@@ -518,10 +687,11 @@ pub fn launch(how: Method, target: &Target, opts: &Options, path: &Path, cast: O
         Method::X11 | Method::Test => {
             // (x11grab takes the screen as often as it's asked: native is as
             // often as the monitor shows a new picture)
-            let fps = match (opts.fps, how) {
-                (Some(f), _) => f.to_string(),
-                (None, Method::X11) => format!("{:.2}", target.refresh.filter(|r| (1.0..=500.0).contains(r)).unwrap_or(60.0)),
-                (None, _) => "30".to_string(),
+            let refresh = target.refresh.filter(|r| (1.0..=500.0).contains(r));
+            let rate = opts.rate(if how == Method::X11 { refresh } else { Some(30.0) });
+            let fps = match (opts.fps, refresh) {
+                (None, Some(r)) if how == Method::X11 && opts.format != "gif" => format!("{r:.2}"),
+                _ => rate.unwrap_or(60).to_string(),
             };
             let video = if how == Method::X11 {
                 // X11's screen is in device pixels.
@@ -548,9 +718,10 @@ pub fn launch(how: Method, target: &Target, opts: &Options, path: &Path, cast: O
             argv.extend(video);
             argv.extend(inputs);
             argv.extend(mapping);
-            argv.extend(ffmpeg_codecs(ext, crop, opts.budget_fps(), !audio.is_empty()));
+            argv.extend(ffmpeg_codecs(ext, crop, rate, !audio.is_empty()));
             argv.extend(["-r".to_string(), fps.clone(), path.display().to_string()]);
-            Ok(Launch { argv, stream: None, stop: int, about: format!("{}x{}+{}+{} with {}", crop.w, crop.h, crop.x, crop.y, how.label()) })
+            let about = format!("{}x{}+{}+{} at {fps} fps with {}", crop.w, crop.h, crop.x, crop.y, how.label());
+            Ok(Launch { argv, stream: None, stop: int, about, gpu: None })
         }
         Method::WfRecorder => {
             let r = target.rect;
@@ -558,7 +729,9 @@ pub fn launch(how: Method, target: &Target, opts: &Options, path: &Path, cast: O
             // steady rate, and a stop is heard at once (with no new frame
             // it would wait, and be killed with its file unfinished).
             let mut argv = strings(&["wf-recorder", "-y", "-D", "-g", &format!("{},{} {}x{}", r.x, r.y, r.w, r.h)]);
-            if let Some(fps) = opts.fps {
+            let rate = opts.rate(target.refresh);
+            let fps = if opts.format == "gif" { rate } else { opts.fps };
+            if let Some(fps) = fps {
                 argv.extend(["-r".to_string(), fps.to_string()]); // (else as the compositor gives them)
             }
             argv.extend(strings(&["-x", "yuv420p", "-f"]));
@@ -566,12 +739,14 @@ pub fn launch(how: Method, target: &Target, opts: &Options, path: &Path, cast: O
             if ext == "webm" {
                 argv.extend(strings(&["-c", "libvpx", "-p", "deadline=realtime", "-p", "cpu-used=8"]));
             } else {
-                argv.extend(strings(&["-c", "libx264", "-p", "preset=veryfast", "-p", "crf=20"]));
+                let preset = x264_preset(crop.w, crop.h, budget_fps(rate));
+                argv.extend(strings(&["-c", "libx264", "-p", &format!("preset={preset}"), "-p", "crf=20"]));
             }
+            argv.extend(["-p".to_string(), format!("g={}", keyframe_interval(rate))]);
             if let Some(source) = audio.first() {
                 argv.push(format!("--audio={source}")); // (wf-recorder records one source)
             }
-            Ok(Launch { argv, stream: None, stop: int, about: format!("{}x{}{:+}{:+} with wf-recorder", r.w, r.h, r.x, r.y) })
+            Ok(Launch { argv, stream: None, stop: int, about: format!("{}x{}{:+}{:+} with wf-recorder", r.w, r.h, r.x, r.y), gpu: None })
         }
         Method::Portal | Method::TestGst => {
             // What the stream shows (the portal says, else the area's
@@ -607,9 +782,14 @@ pub fn launch(how: Method, target: &Target, opts: &Options, path: &Path, cast: O
                 ),
                 None => return Err("the screen-cast portal shared no screen".into()),
             };
+            let encoder =
+                gst_video_encoder(ext, (crop.w, crop.h), gpu).ok_or_else(|| problem(how, ext).unwrap_or_else(|| "no GStreamer video encoder".into()))?;
+            let rate = opts.rate(target.refresh);
+            let pace = rate.map_or("frames as they come".into(), |r| format!("{r} fps"));
+            about.push_str(&format!("; {pace}, {}", encoder.name));
             let mut argv = strings(&["gst-launch-1.0", "-e", "-q"]);
-            argv.extend(gst_pipeline(&source, frame, crop, opts, path)?);
-            Ok(Launch { argv, stream, stop: int, about })
+            argv.extend(gst_pipeline(&source, frame, crop, opts, rate, &encoder, path)?);
+            Ok(Launch { argv, stream, stop: int, about, gpu: encoder.gpu.then_some(encoder.name) })
         }
     }
 }
@@ -705,6 +885,16 @@ pub fn to_gif(video: &Path, out: &Path, fps: Option<u32>) -> Result<(), String> 
     ffmpeg(&strings(&["-i", &video.display().to_string(), "-vf", &filter, "-loop", "0", &out.display().to_string()]), Duration::from_secs(1800))
 }
 
+/// The first frame of `video`, as a PNG at `out` no more than `size`
+/// pixels across.
+pub fn first_frame(video: &Path, out: &Path, size: u32) -> Result<(), String> {
+    if !util::have("ffmpeg") {
+        return Err("no ffmpeg".into());
+    }
+    let fit = format!("scale='min({size},iw)':'min({size},ih)':force_original_aspect_ratio=decrease");
+    ffmpeg(&strings(&["-i", &video.display().to_string(), "-frames:v", "1", "-vf", &fit, &out.display().to_string()]), Duration::from_secs(30))
+}
+
 /// Can the video at `path` be read (a recorder that had to be killed may
 /// have left it unfinished)? True when there's no ffprobe to ask.
 pub fn playable(path: &Path) -> bool {
@@ -779,11 +969,11 @@ mod tests {
     fn recorders_are_set_up() {
         let t = target(IRect::new(100, 100, 640, 480), 1.0);
         let opts = Options { format: "mp4".into(), fps: Some(30), mic: false, system_audio: false, cursor: true };
-        let l = launch(Method::Test, &t, &opts, Path::new("/tmp/x/part-001.mp4"), None).unwrap();
+        let l = launch(Method::Test, &t, &opts, Path::new("/tmp/x/part-001.mp4"), None, false).unwrap();
         assert_eq!(l.argv[0], "ffmpeg");
         assert!(l.argv.windows(2).any(|w| w[0] == "-i" && w[1] == "testsrc2=size=640x480:rate=30"));
         assert_eq!(l.argv.last().unwrap(), "/tmp/x/part-001.mp4");
-        let l = launch(Method::WfRecorder, &t, &Options { mic: true, ..opts.clone() }, Path::new("/tmp/a b.mp4"), None).unwrap();
+        let l = launch(Method::WfRecorder, &t, &Options { mic: true, ..opts.clone() }, Path::new("/tmp/a b.mp4"), None, false).unwrap();
         assert!(l.argv.windows(2).any(|w| w[0] == "-g" && w[1] == "100,100 640x480"));
         assert!(l.argv.contains(&"/tmp/a b.mp4".to_string()));
         assert!(l.argv.contains(&format!("--audio={MIC}")));
@@ -792,21 +982,51 @@ mod tests {
         let (inputs, map) = ffmpeg_audio(&[MIC, SYSTEM], 1);
         assert_eq!(inputs.iter().filter(|a| *a == "-i").count(), 2);
         assert!(map.iter().any(|m| m.starts_with("[1:a][2:a]amix=inputs=2")));
-        // Native: as the stream gives them (no rate forced), or on X11 as
-        // often as the monitor refreshes.
+        // Native: on X11 as often as the monitor refreshes; wf-recorder's
+        // frames as the compositor gives them (all of them, with -D).
         let native = Options { fps: None, ..opts.clone() };
-        let l = launch(Method::WfRecorder, &t, &native, Path::new("/tmp/n.mp4"), None).unwrap();
+        let l = launch(Method::WfRecorder, &t, &native, Path::new("/tmp/n.mp4"), None, false).unwrap();
         assert!(!l.argv.contains(&"-r".to_string()));
-        let l = launch(Method::X11, &t, &native, Path::new("/tmp/n.mp4"), None).unwrap();
+        assert!(l.argv.windows(2).any(|w| w[0] == "-p" && w[1] == "g=120"), "{:?}", l.argv);
+        let l = launch(Method::X11, &t, &native, Path::new("/tmp/n.mp4"), None, false).unwrap();
         assert!(l.argv.windows(2).any(|w| w[0] == "-framerate" && w[1] == "59.94"));
-        let gst = gst_pipeline(&["videotestsrc".to_string()], (1920, 1080), IRect::new(0, 0, 640, 480), &native, Path::new("/tmp/n.mp4"));
-        if let Ok(gst) = gst {
-            assert!(!gst.iter().any(|w| w == "videorate" || w.contains("framerate=")), "{gst:?}");
+        assert!(l.argv.windows(2).any(|w| w[0] == "-g" && w[1] == "120"), "{:?}", l.argv);
+        // A GIF: no more than 30 frames a second, however fast the monitor.
+        let gif = Options { format: "gif".into(), ..native.clone() };
+        assert_eq!((gif.rate(Some(143.9)), gif.rate(Some(24.0)), gif.rate(None)), (Some(30), Some(24), None));
+        assert_eq!(Options { fps: Some(60), ..gif.clone() }.rate(None), Some(30));
+        let fast = Target { refresh: Some(143.9), ..t.clone() };
+        let l = launch(Method::X11, &fast, &gif, Path::new("/tmp/n.mp4"), None, false).unwrap();
+        assert!(l.argv.windows(2).any(|w| w[0] == "-framerate" && w[1] == "30"), "{:?}", l.argv);
+        for gif in [&gif, &Options { fps: Some(60), ..gif.clone() }] {
+            let l = launch(Method::WfRecorder, &fast, gif, Path::new("/tmp/n.mp4"), None, false).unwrap();
+            assert!(l.argv.windows(2).any(|w| w[0] == "-r" && w[1] == "30"), "{:?}", l.argv);
         }
-        let gst = gst_pipeline(&["videotestsrc".to_string()], (1920, 1080), IRect::new(0, 0, 640, 480), &opts, Path::new("/tmp/n.mp4"));
-        if let Ok(gst) = gst {
-            assert!(gst.iter().any(|w| w == "video/x-raw,framerate=30/1"), "{gst:?}");
+        // GStreamer: native is the monitor's rate, steady (none known: the
+        // frames as the stream gives them).
+        let x264 = GstEncoder { name: "x264enc", words: vec!["x264enc", "speed-preset={preset}", "key-int-max={keys}"], format: "I420", gpu: false };
+        let gst = |opts: &Options, rate| {
+            gst_pipeline(&["videotestsrc".to_string()], (1920, 1080), IRect::new(0, 0, 640, 480), opts, rate, &x264, Path::new("/tmp/n.mp4")).unwrap()
+        };
+        assert_eq!(native.rate(t.refresh), Some(60));
+        let words = gst(&native, native.rate(t.refresh));
+        assert!(words.iter().any(|w| w == "video/x-raw,framerate=60/1"), "{words:?}");
+        assert!(!words.iter().any(|w| w.starts_with("max-duplication-time=")), "{words:?}");
+        assert!(words.contains(&"key-int-max=120".to_string()) && words.contains(&"speed-preset=veryfast".to_string()), "{words:?}");
+        let words = gst(&native, native.rate(None));
+        assert!(!words.iter().any(|w| w == "videorate" || w.contains("framerate=")), "{words:?}");
+        // A rate chosen (or a GIF's): what's beyond it goes before it's
+        // converted; what's missing is repeated after.
+        for (opts, thin) in [(&opts, "max-duplication-time=66666666"), (&gif, "max-duplication-time=66666666")] {
+            let words = gst(opts, opts.rate(fast.refresh));
+            let at = |word: &str| words.iter().position(|w| w == word).unwrap_or_else(|| panic!("no {word} in {words:?}"));
+            assert!(at("videocrop") < at(thin) && at(thin) < at("dither=none"), "{words:?}");
+            let steady: Vec<usize> = words.iter().enumerate().filter(|w| w.1 == "video/x-raw,framerate=30/1").map(|w| w.0).collect();
+            assert!(steady.len() == 2 && steady[0] < at("dither=none") && at("dither=none") < steady[1], "{words:?}");
         }
+        // (faster x264 presets where a slower one couldn't keep up)
+        assert_eq!(x264_preset(640, 480, 30), "veryfast");
+        assert_eq!(x264_preset(7680, 4320, 240), "ultrafast");
         assert_eq!(clock(Duration::from_secs(65)), "01:05");
         assert_eq!(clock(Duration::from_secs(3723)), "1:02:03");
     }

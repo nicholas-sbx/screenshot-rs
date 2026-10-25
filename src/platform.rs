@@ -67,6 +67,8 @@ pub enum Owner {
     RecBar,
     /// a corner mark round the area being recorded (0-3)
     RecMark(u8),
+    /// the countdown before a recording, over its area
+    RecDial,
     /// a delayed capture's countdown, on each monitor (by number)
     Countdown(u8),
     /// the tray icon, where the panel takes it in itself (X11's XEmbed)

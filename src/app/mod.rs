@@ -143,7 +143,7 @@ impl App {
             Some(Owner::Settings) => return self.settings_input(ev),
             Some(Owner::Recent) => return self.recent_input(ev),
             Some(Owner::RecBar) => return self.recbar_input(ev),
-            Some(Owner::RecMark(_) | Owner::Countdown(_)) => return,
+            Some(Owner::RecMark(_) | Owner::RecDial | Owner::Countdown(_)) => return,
             _ => {}
         }
         let Some(s) = &mut self.session else { return };
@@ -221,7 +221,7 @@ impl App {
             Owner::Recent => self.close_recent(),
             // (the bar's window closed by the desktop: done recording)
             Owner::RecBar => self.stop_recording(),
-            Owner::RecMark(_) | Owner::Countdown(_) => {}
+            Owner::RecMark(_) | Owner::RecDial | Owner::Countdown(_) => {}
         }
     }
 
